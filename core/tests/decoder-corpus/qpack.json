@@ -1,0 +1,787 @@
+{
+  "schema_version": 1,
+  "objects": {
+    "0fa3e33cbe595303d282be4f7eeb00779a44b5c4a8bcecab23dbb8edd268ebc4": "0000511c2f6162636465666768696a6b6c6d6e6f707172737475767778797a30",
+    "0fce4769e4fd6c02f04e5f054155e595216a060380a95b8626cb3d32f94fc443": "0000510b2f69",
+    "226551141953665ab9eec075c771cde9c2ac86826a4b3e71548bac86cb9b1126": "0000ff23",
+    "246ed89bd80de98e16f753ec66ba3744deb91ae1f85510930a942e2e9869f243": "447f",
+    "334f38f6b429d2a273c2e2befc1088c3ced8e37c4793bf5a2a2fb0af812eb258": "000010",
+    "351599cea8e5c223f78913dc0e087742c0e9017a283a69349dffdad552baef8b": "0000508cf1e3c2e5f23a6ba0ab90f4ff",
+    "3561e896864aca0fa5e9dc8688eebbbd2859f62c172e97b9c390f88ffcd1632d": "0000d1d7",
+    "5da43dee60308c91ba9cb1175417eaf4b9f94481f481421e1f15f0bdeb89efd6": "0000510b2f696e6465782e68746d6c",
+    "5febd7bf5995ab1157129eec143f43c871f22ffe5da0dc6b63f5bceca94acc17": "7fffffffffffffffffff7f",
+    "667519f876c4c3fa7d485f872886f7b42c2bbdda045fe7eb96eee79fdfcb3a5c": "447f0045",
+    "684e1ed05209e44af148bd284c77351404ff87b3309f48f42c29f256f5c76a30": "4401",
+    "6c179f21e6f62b629055d8ab40f454ed02e48b68563913473b857d3638e23b28": "2020",
+    "80361170760f73e85fcf9d51429476860e66c55bc2f043d8b3de3a2d47bd5015": "0000511b2f6162636465666768696a6b6c6d6e6f707172737475767778797a",
+    "91b0dc2a64a46bdb35e86c731379070ced1e88d1dfd73d61a1b0172b9dddaff7": "000023782d610162",
+    "96a296d224f285c67bee93c30f8a309157f0daa35dc5b87e410b78630a09cfc7": "0000",
+    "aaa8e61e7faf37dd77cc5f907b38146741994b27d5b1978679af68b43f55e7c5": "84",
+    "af0d0b34b6a90d2c010338d4f7f07f748b5a8b1c940a1f2c44ca3e568b81e0a2": "0000ff24",
+    "b54d2ea20e0a7dca58b4b0b29f3783989536f8005bf2a96c9bf5107f0b81b86a": "03811011",
+    "bb7208bc9b5d7c04f1236a82a0093a5e33f40423d5ba8d4266f7092c3ba43b62": "21",
+    "cdfcbd3f59bb3a87cbbafa914fc5fa4bd0e92e50e74991f0fe01485af6a77b53": "0000d1d7c1",
+    "d3a064592dc6bda7ad009a53d77dc197fd15e0fd3b291f30eb8ab37862e2fc95": "000080",
+    "dc86d4289edca4fb090c9e02e64fd16a1d7fee65476a08a6790a56c15710f903": "0000518100",
+    "e9aff84fdb699ca706c0a1fed47bb095cb25e3c95aa5d1c5d216ff2cfbcd4998": "c000"
+  },
+  "cases": [
+    {
+      "id": "accepted-decoder-cancellations",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "667519f876c4c3fa7d485f872886f7b42c2bbdda045fe7eb96eee79fdfcb3a5c",
+      "limits": {},
+      "setup": {
+        "surface": "decoder-stream"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "636f6e73756d65643d34",
+        "partials": [
+          0,
+          1,
+          1
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            4
+          ]
+        },
+        {
+          "ends": [
+            1,
+            2,
+            3,
+            4
+          ]
+        },
+        {
+          "ends": [
+            2,
+            4
+          ]
+        }
+      ]
+    },
+    {
+      "id": "accepted-empty-section",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "96a296d224f285c67bee93c30f8a309157f0daa35dc5b87e410b78630a09cfc7",
+      "limits": {
+        "max_size": 4096
+      },
+      "setup": {
+        "surface": "section"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "id": "accepted-encoder-capacity-zero",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "6c179f21e6f62b629055d8ab40f454ed02e48b68563913473b857d3638e23b28",
+      "limits": {},
+      "setup": {
+        "surface": "encoder-stream"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "636f6e73756d65643d32",
+        "partials": [
+          0,
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            2
+          ]
+        },
+        {
+          "ends": [
+            1,
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "id": "accepted-huffman-authority",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "351599cea8e5c223f78913dc0e087742c0e9017a283a69349dffdad552baef8b",
+      "limits": {
+        "max_size": 4096
+      },
+      "setup": {
+        "surface": "section"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "3a617574686f726974793a207777772e6578616d706c652e636f6d0a",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            16
+          ]
+        }
+      ]
+    },
+    {
+      "id": "accepted-last-static-entry",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "226551141953665ab9eec075c771cde9c2ac86826a4b3e71548bac86cb9b1126",
+      "limits": {
+        "max_size": 4096
+      },
+      "setup": {
+        "surface": "section"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "782d6672616d652d6f7074696f6e733a2073616d656f726967696e0a",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            4
+          ]
+        }
+      ]
+    },
+    {
+      "id": "accepted-literal-name",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "91b0dc2a64a46bdb35e86c731379070ced1e88d1dfd73d61a1b0172b9dddaff7",
+      "limits": {
+        "max_size": 4096
+      },
+      "setup": {
+        "surface": "section"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "782d613a20620a",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            8
+          ]
+        }
+      ]
+    },
+    {
+      "id": "accepted-rfc9204-b1",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "5da43dee60308c91ba9cb1175417eaf4b9f94481f481421e1f15f0bdeb89efd6",
+      "limits": {
+        "max_size": 4096
+      },
+      "setup": {
+        "surface": "section"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "3a706174683a202f696e6465782e68746d6c0a",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            15
+          ]
+        }
+      ]
+    },
+    {
+      "id": "accepted-section-at-size-limit",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "80361170760f73e85fcf9d51429476860e66c55bc2f043d8b3de3a2d47bd5015",
+      "limits": {
+        "max_size": 64
+      },
+      "setup": {
+        "surface": "section"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "3a706174683a202f6162636465666768696a6b6c6d6e6f707172737475767778797a0a",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            31
+          ]
+        }
+      ]
+    },
+    {
+      "id": "accepted-static-indexed",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "cdfcbd3f59bb3a87cbbafa914fc5fa4bd0e92e50e74991f0fe01485af6a77b53",
+      "limits": {
+        "max_size": 4096
+      },
+      "setup": {
+        "surface": "section"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "3a6d6574686f643a204745540a3a736368656d653a2068747470730a3a706174683a202f0a",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            5
+          ]
+        }
+      ]
+    },
+    {
+      "id": "partial-decoder-open-integer",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "246ed89bd80de98e16f753ec66ba3744deb91ae1f85510930a942e2e9869f243",
+      "limits": {},
+      "setup": {
+        "surface": "decoder-stream"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "partial",
+        "projection_hex": "636f6e73756d65643d31",
+        "partials": [
+          1,
+          1
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            2
+          ]
+        },
+        {
+          "ends": [
+            1,
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "id": "refused-decoder-insert-count-increment",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "684e1ed05209e44af148bd284c77351404ff87b3309f48f42c29f256f5c76a30",
+      "limits": {},
+      "setup": {
+        "surface": "decoder-stream"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "decoder-stream",
+        "projection_hex": "",
+        "partials": [
+          0,
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            2
+          ]
+        },
+        {
+          "ends": [
+            1,
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "id": "refused-decoder-integer-overflow",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "5febd7bf5995ab1157129eec143f43c871f22ffe5da0dc6b63f5bceca94acc17",
+      "limits": {},
+      "setup": {
+        "surface": "decoder-stream"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "decoder-stream",
+        "projection_hex": "",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            11
+          ]
+        }
+      ]
+    },
+    {
+      "id": "refused-decoder-section-acknowledgment",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "aaa8e61e7faf37dd77cc5f907b38146741994b27d5b1978679af68b43f55e7c5",
+      "limits": {},
+      "setup": {
+        "surface": "decoder-stream"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "decoder-stream",
+        "projection_hex": "",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "refused-dynamic-indexed",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "d3a064592dc6bda7ad009a53d77dc197fd15e0fd3b291f30eb8ab37862e2fc95",
+      "limits": {
+        "max_size": 4096
+      },
+      "setup": {
+        "surface": "section"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "decompression",
+        "projection_hex": "",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            3
+          ]
+        }
+      ]
+    },
+    {
+      "id": "refused-encoder-capacity-one",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "bb7208bc9b5d7c04f1236a82a0093a5e33f40423d5ba8d4266f7092c3ba43b62",
+      "limits": {},
+      "setup": {
+        "surface": "encoder-stream"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "encoder-stream",
+        "projection_hex": "",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "refused-encoder-insert",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "e9aff84fdb699ca706c0a1fed47bb095cb25e3c95aa5d1c5d216ff2cfbcd4998",
+      "limits": {},
+      "setup": {
+        "surface": "encoder-stream"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "encoder-stream",
+        "projection_hex": "",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "id": "refused-huffman-padding",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "dc86d4289edca4fb090c9e02e64fd16a1d7fee65476a08a6790a56c15710f903",
+      "limits": {
+        "max_size": 4096
+      },
+      "setup": {
+        "surface": "section"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "decompression",
+        "projection_hex": "",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            5
+          ]
+        }
+      ]
+    },
+    {
+      "id": "refused-post-base",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "334f38f6b429d2a273c2e2befc1088c3ced8e37c4793bf5a2a2fb0af812eb258",
+      "limits": {
+        "max_size": 4096
+      },
+      "setup": {
+        "surface": "section"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "decompression",
+        "projection_hex": "",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            3
+          ]
+        }
+      ]
+    },
+    {
+      "id": "refused-rfc9204-b2-dynamic",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "b54d2ea20e0a7dca58b4b0b29f3783989536f8005bf2a96c9bf5107f0b81b86a",
+      "limits": {
+        "max_size": 4096
+      },
+      "setup": {
+        "surface": "section"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "decompression",
+        "projection_hex": "",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            4
+          ]
+        }
+      ]
+    },
+    {
+      "id": "refused-section-over-size-limit",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "0fa3e33cbe595303d282be4f7eeb00779a44b5c4a8bcecab23dbb8edd268ebc4",
+      "limits": {
+        "max_size": 64
+      },
+      "setup": {
+        "surface": "section"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "too-large",
+        "projection_hex": "",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            32
+          ]
+        }
+      ]
+    },
+    {
+      "id": "refused-static-index-99",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "af0d0b34b6a90d2c010338d4f7f07f748b5a8b1c940a1f2c44ca3e568b81e0a2",
+      "limits": {
+        "max_size": 4096
+      },
+      "setup": {
+        "surface": "section"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "decompression",
+        "projection_hex": "",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            4
+          ]
+        }
+      ]
+    },
+    {
+      "id": "refused-truncated-literal",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "0fce4769e4fd6c02f04e5f054155e595216a060380a95b8626cb3d32f94fc443",
+      "limits": {
+        "max_size": 4096
+      },
+      "setup": {
+        "surface": "section"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "decompression",
+        "projection_hex": "",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            6
+          ]
+        }
+      ]
+    },
+    {
+      "id": "refused-two-fields-over-size-limit",
+      "target": "qpack",
+      "law": "reviewed_qpack",
+      "input_kind": "qpack-wire",
+      "generator_version": 1,
+      "digest": "3561e896864aca0fa5e9dc8688eebbbd2859f62c172e97b9c390f88ffcd1632d",
+      "limits": {
+        "max_size": 64
+      },
+      "setup": {
+        "surface": "section"
+      },
+      "oracle": {
+        "name": "python-rfc9204-static",
+        "version": 1
+      },
+      "expected": {
+        "class": "too-large",
+        "projection_hex": "",
+        "partials": [
+          0
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            4
+          ]
+        }
+      ]
+    }
+  ]
+}

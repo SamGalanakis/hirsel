@@ -98,3 +98,141 @@ fn proposal_host_and_guest_values_and_error_spans_agree() {
         }
     }
 }
+
+// tools/decoder-fuzz builds this crate's test configuration with the libFuzzer
+// callback for nightly discovery. No other build compiles it.
+#[cfg(fuzzing)]
+#[path = "../../../tools/decoder-fuzz/host_target.rs"]
+mod host_target;
+#[path = "../../hirsel-core-driver/src/property_corpus/reviewed.rs"]
+mod reviewed;
+
+/// The limits every reviewed and discovered `.hcfg` document is read under.
+const REVIEWED_LIMITS: Limits = Limits {
+    input_bytes: 4096,
+    depth: 16,
+    nodes: 256,
+    collection: 8,
+    decoded_bytes: 1024,
+    comparison_bytes: 4096,
+    diagnostics: 1,
+};
+
+#[derive(Debug, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Observed {
+    Decoded(serde_json::Value),
+    /// The document is not a value of the schema.
+    Invalid(String),
+    /// The document is past one of the limits.
+    Limit(String),
+}
+
+fn orders() -> Descriptor {
+    let source = include_str!("../../hirsel-config-schema/fixtures/orders_v1.hirsel");
+    Descriptor::lower("orders_v1", source, "Site").unwrap()
+}
+
+/// The owner predicate of the `.hcfg` reader: the host's value or typed
+/// refusal, which the guest projection of the same bytes must equal.
+fn observe(schema: &Descriptor, bytes: &[u8]) -> Observed {
+    let host = decode(bytes, &[schema], REVIEWED_LIMITS).map(|document| document.value);
+    let guest = read::guest_with_budget(bytes, schema, REVIEWED_LIMITS, &mut |_| Ok(()))
+        .map(Decoded::projection);
+    assert_eq!(guest, host, "guest and host readings");
+    match host {
+        Ok(value) => Observed::Decoded(value),
+        Err(error) => match error.kind {
+            ErrorKind::Invalid(reason) => Observed::Invalid(reason.into()),
+            ErrorKind::Limit(limit) => Observed::Limit(limit.into()),
+            resource => panic!("the reader ran out of {resource:?}"),
+        },
+    }
+}
+
+/// Discovery's entry to the owner predicate. `expect` is a declared status
+/// that the observation must also meet. Returns the observation.
+#[cfg(fuzzing)]
+fn discovered(input: &[u8], _schedule: usize, expect: Option<&str>) -> String {
+    let observation = match observe(&orders(), input) {
+        Observed::Decoded(value) => format!("decoded {value}"),
+        Observed::Invalid(reason) => format!("invalid {reason}"),
+        Observed::Limit(limit) => format!("limit {limit}"),
+    };
+    if let Some(expect) = expect {
+        let status = observation.split(' ').next().unwrap();
+        assert_eq!(status, expect, "discovered: declared status");
+    }
+    observation
+}
+
+#[test]
+fn reviewed_hcfg() {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Setup {
+        schema: String,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Schedule {
+        kind: String,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Budget {
+        input_bytes: u64,
+        depth: u64,
+        nodes: u64,
+        collection: u64,
+        decoded_bytes: u64,
+        comparison_bytes: u64,
+        diagnostics: u64,
+    }
+    type Case = reviewed::Case<Budget, Setup, Observed, Schedule>;
+    let cases: Vec<(Case, Vec<u8>)> = reviewed::read(
+        include_bytes!("../../../core/tests/decoder-corpus/hcfg.json"),
+        "hcfg",
+        "reviewed_hcfg",
+        "hcfg-document",
+        "hirsel-data-projection",
+    )
+    .unwrap();
+    let mut statuses = [0; 3];
+    for (case, bytes) in cases {
+        let id = &case.id;
+        let budget = &case.limits;
+        let limits = Limits::from([
+            budget.input_bytes,
+            budget.depth,
+            budget.nodes,
+            budget.collection,
+            budget.decoded_bytes,
+            budget.comparison_bytes,
+            budget.diagnostics,
+        ]);
+        assert_eq!(
+            format!("{limits:?}"),
+            format!("{REVIEWED_LIMITS:?}"),
+            "{id}"
+        );
+        assert_eq!(case.setup.schema, "orders_v1.Site", "{id}");
+        assert!(
+            matches!(case.schedules.as_slice(), [one] if one.kind == "contiguous"),
+            "{id}"
+        );
+        // Two replays, each from a newly lowered schema.
+        let first = observe(&orders(), &bytes);
+        assert_eq!(observe(&orders(), &bytes), first, "{id}: replay");
+        assert_eq!(first, case.expected, "{id}");
+        let status = match first {
+            Observed::Decoded(_) => 0,
+            Observed::Invalid(_) => 1,
+            Observed::Limit(_) => 2,
+        };
+        statuses[status] += 1;
+        eprintln!("{id}: {} twice", ["decoded", "invalid", "limit"][status]);
+    }
+    // A value, a semantic refusal and a budget refusal are separate cases.
+    assert!(statuses.iter().all(|&count| count > 0), "{statuses:?}");
+}

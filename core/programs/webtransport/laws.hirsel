@@ -438,3 +438,248 @@ fn wire_decode_totality_property() -> Result[(), ()] {
     c.cases = 160
     std.prop.check(c, wt_wire_gen(), wt_total_law)
 }
+
+// The reviewed corpus (core/tests/decoder-corpus/qpack.json): field sections under a size
+// limit and the two QPACK instruction streams. Its expected classes, projections and
+// partial steps are a Python reference's of RFC 9204 §4.3–§4.5 over the published static
+// table and Huffman code, not this package's. Rows are `id class selector input projection
+// schedules` with hex fields and `-` for an empty one; a schedule is `<chunk ends,
+// big-endian u16>:<partial steps>`. Selectors: 0 a section under 4096, 1 the decoder
+// stream, 2 the encoder stream, 3 a section under 64.
+// Regenerate: tools/decoder-fuzz/fixtures.py rows qpack --write.
+const REVIEWED_QPACK: String = "accepted-decoder-cancellations accepted 1 447f0045 636f6e73756d65643d34 0004:0,0001000200030004:1,00020004:1\naccepted-empty-section accepted 0 0000 - 0002:0\naccepted-encoder-capacity-zero accepted 2 2020 636f6e73756d65643d32 0002:0,00010002:0\naccepted-huffman-authority accepted 0 0000508cf1e3c2e5f23a6ba0ab90f4ff 3a617574686f726974793a207777772e6578616d706c652e636f6d0a 0010:0\naccepted-last-static-entry accepted 0 0000ff23 782d6672616d652d6f7074696f6e733a2073616d656f726967696e0a 0004:0\naccepted-literal-name accepted 0 000023782d610162 782d613a20620a 0008:0\naccepted-rfc9204-b1 accepted 0 0000510b2f696e6465782e68746d6c 3a706174683a202f696e6465782e68746d6c0a 000f:0\naccepted-section-at-size-limit accepted 3 0000511b2f6162636465666768696a6b6c6d6e6f707172737475767778797a 3a706174683a202f6162636465666768696a6b6c6d6e6f707172737475767778797a0a 001f:0\naccepted-static-indexed accepted 0 0000d1d7c1 3a6d6574686f643a204745540a3a736368656d653a2068747470730a3a706174683a202f0a 0005:0\npartial-decoder-open-integer partial 1 447f 636f6e73756d65643d31 0002:1,00010002:1\nrefused-decoder-insert-count-increment decoder-stream 1 4401 - 0002:0,00010002:0\nrefused-decoder-integer-overflow decoder-stream 1 7fffffffffffffffffff7f - 000b:0\nrefused-decoder-section-acknowledgment decoder-stream 1 84 - 0001:0\nrefused-dynamic-indexed decompression 0 000080 - 0003:0\nrefused-encoder-capacity-one encoder-stream 2 21 - 0001:0\nrefused-encoder-insert encoder-stream 2 c000 - 0002:0\nrefused-huffman-padding decompression 0 0000518100 - 0005:0\nrefused-post-base decompression 0 000010 - 0003:0\nrefused-rfc9204-b2-dynamic decompression 0 03811011 - 0004:0\nrefused-section-over-size-limit too-large 3 0000511c2f6162636465666768696a6b6c6d6e6f707172737475767778797a30 - 0020:0\nrefused-static-index-99 decompression 0 0000ff24 - 0004:0\nrefused-truncated-literal decompression 0 0000510b2f69 - 0006:0\nrefused-two-fields-over-size-limit too-large 3 0000d1d7 - 0004:0\n"
+
+fn reviewed_qpack_class(e: qpack.QpackError) -> u8 {
+    match e {
+        Decompression => 2u8,
+        EncoderStream => 3u8,
+        DecoderStream => 4u8,
+        TooLarge => 5u8,
+    }
+}
+
+fn reviewed_qpack_name(class: u8) -> String {
+    match class {
+        0u8 => "accepted",
+        1u8 => "partial",
+        2u8 => "decompression",
+        3u8 => "encoder-stream",
+        4u8 => "decoder-stream",
+        5u8 => "too-large",
+        6u8 => "surface",
+        _ => "law",
+    }
+}
+
+fn reviewed_consumed(n: u64) -> Bytes {
+    let mut text = string.from("consumed=")
+    string.push_u64(mut text, n)
+    let mut out: Bytes = list.new()
+    list.append(mut out, string.as_bytes(text))
+    take out
+}
+
+fn reviewed_end(ends: Bytes, i: u64) -> u64 {
+    let high: u64 = int.widen(ends[2 * i])
+    let low: u64 = int.widen(ends[2 * i + 1])
+    high * 256 + low
+}
+
+// One field section: its fields as `name: value` lines. The owner law: the fields
+// encode_section writes decode to the same fields under the same limit.
+fn reviewed_qpack_section(wire: Bytes, max: u64) -> (u8, Bytes, u64) {
+    let mut fields: List[qpack.Field] = list.new()
+    if let Error(e) = qpack.decode_section(wire, 0, list.len(wire), max, mut fields) {
+        return (reviewed_qpack_class(e), b"", 0)
+    }
+    let mut again: Bytes = list.new()
+    qpack.encode_section(fields, mut again)
+    let mut back: List[qpack.Field] = list.new()
+    if let Error(_) = qpack.decode_section(again, 0, list.len(again), max, mut back) {
+        return (9u8, b"", 0)
+    }
+    if back != fields {
+        return (9u8, b"", 0)
+    }
+    let mut out: Bytes = list.new()
+    for f in fields {
+        list.append(mut out, f.name)
+        list.append(mut out, b": ")
+        list.append(mut out, f.value)
+        list.push(mut out, 10)
+    }
+    (0u8, take out, 0)
+}
+
+// The decoder stream in chunks, buffered as the connection buffers it: each read drops
+// the complete instructions and a step that leaves bytes behind is partial. The owner
+// law: the chunks consume what one read of the whole stream consumes, or are refused
+// as it is.
+fn reviewed_qpack_decoder(wire: Bytes, ends: Bytes) -> (u8, Bytes, u64) {
+    let size = list.len(wire)
+    let whole = qpack.read_decoder_stream(wire, 0, size)
+    let mut buf: Bytes = list.new()
+    let mut partials = 0u64
+    let mut consumed = 0u64
+    let mut from = 0u64
+    for i in 0u64 .. list.len(ends) / 2 {
+        let stop = reviewed_end(ends, i)
+        if stop < from || stop > size {
+            return (9u8, b"", partials)
+        }
+        list.append(mut buf, list.slice(wire, from, stop))
+        from = stop
+        match qpack.read_decoder_stream(buf, 0, list.len(buf)) {
+            Ok(n) => {
+                if n > list.len(buf) {
+                    return (9u8, b"", partials)
+                }
+                list.drop_prefix(mut buf, n)
+                consumed += n
+                if list.len(buf) > 0 {
+                    partials += 1
+                }
+            },
+            Error(e) => {
+                if let Error(w) = whole {
+                    if w == e {
+                        return (reviewed_qpack_class(e), b"", partials)
+                    }
+                }
+                return (9u8, b"", partials)
+            },
+        }
+    }
+    if from != size {
+        return (9u8, b"", partials)
+    }
+    match whole {
+        Ok(n) if n == consumed && n + list.len(buf) == size => if list.len(buf) > 0 {
+            (1u8, reviewed_consumed(n), partials)
+        } else {
+            (0u8, reviewed_consumed(n), partials)
+        },
+        _ => (9u8, b"", partials),
+    }
+}
+
+// The encoder stream, each chunk read on its own as the connection reads it. The owner
+// law: the chunks consume what one read of the whole stream consumes, or are refused
+// as it is.
+fn reviewed_qpack_encoder(wire: Bytes, ends: Bytes) -> (u8, Bytes, u64) {
+    let size = list.len(wire)
+    let whole = qpack.read_encoder_stream(wire, 0, size)
+    let mut consumed = 0u64
+    let mut from = 0u64
+    for i in 0u64 .. list.len(ends) / 2 {
+        let stop = reviewed_end(ends, i)
+        if stop < from || stop > size {
+            return (9u8, b"", 0)
+        }
+        match qpack.read_encoder_stream(wire, from, stop) {
+            Ok(n) => {
+                consumed += n
+            },
+            Error(e) => {
+                if let Error(w) = whole {
+                    if w == e {
+                        return (reviewed_qpack_class(e), b"", 0)
+                    }
+                }
+                return (9u8, b"", 0)
+            },
+        }
+        from = stop
+    }
+    match whole {
+        Ok(n) if n == consumed && n == size => (0u8, reviewed_consumed(n), 0),
+        _ => (9u8, b"", 0),
+    }
+}
+
+// One input on fresh state: its class, its projection and its partial steps. Class 6 is
+// a selector that names no surface; class 9 a broken owner law or chunks that do not
+// cover the input in order.
+fn reviewed_qpack_case(selector: u8, wire: Bytes, ends: Bytes) -> (u8, Bytes, u64) {
+    match selector {
+        0u8 => reviewed_qpack_section(wire, 4096),
+        1u8 => reviewed_qpack_decoder(wire, ends),
+        2u8 => reviewed_qpack_encoder(wire, ends),
+        3u8 => reviewed_qpack_section(wire, 64),
+        _ => (6u8, b"", 0),
+    }
+}
+
+fn reviewed_field(row: String, mut at: u64) -> View[String] in row {
+    let start = at
+    let end = match string.find(row, start, " ") {
+        Some(space) => space,
+        None => string.byte_len(row),
+    }
+    at = end + 1
+    string.slice(row, start, end)
+}
+
+fn reviewed_bytes(text: String) -> Bytes {
+    if text == "-" {
+        return b""
+    }
+    option.unwrap(std.hex.decode(string.as_bytes(text)))
+}
+
+fn reviewed_count(text: String) -> u64 {
+    let digits = string.as_bytes(text)
+    let mut n = 0u64
+    for i in 0u64 .. list.len(digits) {
+        let digit: u64 = int.widen(digits[i] - 48)
+        n = n * 10 + digit
+    }
+    n
+}
+
+/// bug: Decode a field section to the wrong fields, admit one past its size limit or a
+/// dynamic reference, or consume a QPACK instruction stream differently when its bytes
+/// arrive in pieces.
+/// oracle: core/tests/decoder-corpus/qpack.json, whose expected observations are a Python
+/// reference's of RFC 9204 §4.3–§4.5 and Appendix A and B, RFC 7541 §5.1, §5.2 and
+/// Appendix B and RFC 9114 §4.2.2. Every case runs twice per schedule, each from fresh
+/// state.
+@test
+fn reviewed_qpack() -> Result[(), ()] {
+    let data = REVIEWED_QPACK
+    let mut at = 0u64
+    let mut completed = 0u64
+    while at < string.byte_len(data) {
+        let end = option.unwrap(string.find(data, at, "\n"))
+        let row = string.slice(data, at, end)
+        let mut next = 0u64
+        let id = reviewed_field(row, mut next)
+        let class = reviewed_field(row, mut next)
+        let selector: u8 = int.truncate(reviewed_count(reviewed_field(row, mut next)))
+        let raw = reviewed_bytes(reviewed_field(row, mut next))
+        let projection = reviewed_bytes(reviewed_field(row, mut next))
+        let schedules = reviewed_field(row, mut next)
+        let mut s = 0u64
+        while s < string.byte_len(schedules) {
+            let stop = match string.find(schedules, s, ",") {
+                Some(comma) => comma,
+                None => string.byte_len(schedules),
+            }
+            let colon = option.unwrap(string.find(schedules, s, ":"))
+            let ends = reviewed_bytes(string.slice(schedules, s, colon))
+            let partials = reviewed_count(string.slice(schedules, colon + 1, stop))
+            let (first, shown, steps) = reviewed_qpack_case(selector, raw, ends)
+            let (second, replayed, again) = reviewed_qpack_case(selector, raw, ends)
+            if first != second || shown != replayed || steps != again || reviewed_qpack_name(first) != class || shown != projection || steps != partials {
+                fail(string.from(id))
+            }
+            s = stop + 1
+        }
+        completed += 1
+        at = end + 1
+    }
+    if completed != 23 {
+        fail("reviewed qpack cases completed")
+    }
+    Ok(())
+}

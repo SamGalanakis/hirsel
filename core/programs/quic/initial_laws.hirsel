@@ -165,3 +165,251 @@ fn rfc9001_client_initial_parses() -> Result[(), ()] {
     invalid_parameter_vectors()
     Ok(())
 }
+
+// The reviewed corpus (core/tests/decoder-corpus/quic-tls.json): CRYPTO streams whose
+// first TLS message is read as a ClientHello. Its expected classes, projections and
+// partial steps are a Python reference's of RFC 8446 §4.1.2 over RFC 9001 A.2's hello,
+// not this package's. Rows are `id class selector input projection schedules` with hex
+// fields and `-` for an empty one; a schedule is `<fragment ends, big-endian u16>:<partial
+// steps>`. Regenerate: tools/decoder-fuzz/fixtures.py rows quic-tls --write.
+const REVIEWED_QUIC_TLS: String = "accepted-next-message-follows accepted 0 010000ed0303ebf8fa56f12939b9584a3896472ec40bb863cfd3e86804fe3a47f06a2b69484c00000413011302010000c000000010000e00000b6578616d706c652e636f6dff01000100000a00080006001d0017001800100007000504616c706e000500050100000000003300260024001d00209370b2c9caa47fbabaf4559fedba753de171fa71f50f1ce15d43e994ec74d748002b0003020304000d0010000e0403050306030203080408050806002d00020101001c00024001003900320408ffffffffffffffff05048000ffff07048000ffff0801100104800075300901100f088394c8f03e51570806048000ffff0b000009 72616e646f6d3d65626638666135366631323933396239353834613338393634373265633430626238363363666433653836383034666533613437663036613262363934383463207375697465733d313330312c313330322067726f7570733d303031642c303031372c30303138207369676e6174757265733d303430332c303530332c303630332c303230332c303830342c303830352c30383036207368617265733d303031643a39333730623263396361613437666261626166343535396665646261373533646531373166613731663530663163653135643433653939346563373464373438206e616d653d6578616d706c652e636f6d20616c706e3d616c706e20706172616d65746572733d30343038666666666666666666666666666666663035303438303030666666663037303438303030666666663038303131303031303438303030373533303039303131303066303838333934633866303365353135373038303630343830303066666666 00f5:0,00f100f5:0,00f000f5:1\naccepted-no-server-name accepted 0 010000d90303ebf8fa56f12939b9584a3896472ec40bb863cfd3e86804fe3a47f06a2b69484c00000413011302010000acff01000100000a00080006001d0017001800100007000504616c706e000500050100000000003300260024001d00209370b2c9caa47fbabaf4559fedba753de171fa71f50f1ce15d43e994ec74d748002b0003020304000d0010000e0403050306030203080408050806002d00020101001c00024001003900320408ffffffffffffffff05048000ffff07048000ffff0801100104800075300901100f088394c8f03e51570806048000ffff 72616e646f6d3d65626638666135366631323933396239353834613338393634373265633430626238363363666433653836383034666533613437663036613262363934383463207375697465733d313330312c313330322067726f7570733d303031642c303031372c30303138207369676e6174757265733d303430332c303530332c303630332c303230332c303830342c303830352c30383036207368617265733d303031643a39333730623263396361613437666261626166343535396665646261373533646531373166613731663530663163653135643433653939346563373464373438206e616d653d2d20616c706e3d616c706e20706172616d65746572733d30343038666666666666666666666666666666663035303438303030666666663037303438303030666666663038303131303031303438303030373533303039303131303066303838333934633866303365353135373038303630343830303066666666 00dd:0,006e00dd:1\naccepted-rfc9001-a2 accepted 0 010000ed0303ebf8fa56f12939b9584a3896472ec40bb863cfd3e86804fe3a47f06a2b69484c00000413011302010000c000000010000e00000b6578616d706c652e636f6dff01000100000a00080006001d0017001800100007000504616c706e000500050100000000003300260024001d00209370b2c9caa47fbabaf4559fedba753de171fa71f50f1ce15d43e994ec74d748002b0003020304000d0010000e0403050306030203080408050806002d00020101001c00024001003900320408ffffffffffffffff05048000ffff07048000ffff0801100104800075300901100f088394c8f03e51570806048000ffff 72616e646f6d3d65626638666135366631323933396239353834613338393634373265633430626238363363666433653836383034666533613437663036613262363934383463207375697465733d313330312c313330322067726f7570733d303031642c303031372c30303138207369676e6174757265733d303430332c303530332c303630332c303230332c303830342c303830352c30383036207368617265733d303031643a39333730623263396361613437666261626166343535396665646261373533646531373166613731663530663163653135643433653939346563373464373438206e616d653d6578616d706c652e636f6d20616c706e3d616c706e20706172616d65746572733d30343038666666666666666666666666666666663035303438303030666666663037303438303030666666663038303131303031303438303030373533303039303131303066303838333934633866303365353135373038303630343830303066666666 00f1:0,000100020003000400f1:4,0004006400f000f1:3\naccepted-two-protocols accepted 0 010000f00303ebf8fa56f12939b9584a3896472ec40bb863cfd3e86804fe3a47f06a2b69484c00000413011302010000c300000010000e00000b6578616d706c652e636f6dff01000100000a00080006001d001700180010000a000802683304616c706e000500050100000000003300260024001d00209370b2c9caa47fbabaf4559fedba753de171fa71f50f1ce15d43e994ec74d748002b0003020304000d0010000e0403050306030203080408050806002d00020101001c00024001003900320408ffffffffffffffff05048000ffff07048000ffff0801100104800075300901100f088394c8f03e51570806048000ffff 72616e646f6d3d65626638666135366631323933396239353834613338393634373265633430626238363363666433653836383034666533613437663036613262363934383463207375697465733d313330312c313330322067726f7570733d303031642c303031372c30303138207369676e6174757265733d303430332c303530332c303630332c303230332c303830342c303830352c30383036207368617265733d303031643a39333730623263396361613437666261626166343535396665646261373533646531373166613731663530663163653135643433653939346563373464373438206e616d653d6578616d706c652e636f6d20616c706e3d68332c616c706e20706172616d65746572733d30343038666666666666666666666666666666663035303438303030666666663037303438303030666666663038303131303031303438303030373533303039303131303066303838333934633866303365353135373038303630343830303066666666 00f4:0\npartial-empty partial 0 - - 0000:1\npartial-header-only partial 0 010000ed - 0004:1,00030004:2\npartial-largest-message-header partial 0 01003ffc - 0004:1\npartial-stream-ends-early partial 0 010000ed0303ebf8fa56f12939b9584a3896472ec40bb863cfd3e86804fe3a47f06a2b69484c00000413011302010000c000000010000e00000b6578616d706c652e636f6dff01000100000a00080006001d0017001800100007000504616c706e000500 - 0064:1,00320064:2\nrefused-compression tls-alert 0 010000ed0303ebf8fa56f12939b9584a3896472ec40bb863cfd3e86804fe3a47f06a2b69484c00000413011302010100c000000010000e00000b6578616d706c652e636f6dff01000100000a00080006001d0017001800100007000504616c706e000500050100000000003300260024001d00209370b2c9caa47fbabaf4559fedba753de171fa71f50f1ce15d43e994ec74d748002b0003020304000d0010000e0403050306030203080408050806002d00020101001c00024001003900320408ffffffffffffffff05048000ffff07048000ffff0801100104800075300901100f088394c8f03e51570806048000ffff 636f64653d333033 00f1:0\nrefused-crypto-buffer crypto-buffer 0 01003ffd 636f64653d3133 0004:0,00020004:1\nrefused-extensions-overrun tls-alert 0 010000ec0303ebf8fa56f12939b9584a3896472ec40bb863cfd3e86804fe3a47f06a2b69484c00000413011302010000c000000010000e00000b6578616d706c652e636f6dff01000100000a00080006001d0017001800100007000504616c706e000500050100000000003300260024001d00209370b2c9caa47fbabaf4559fedba753de171fa71f50f1ce15d43e994ec74d748002b0003020304000d0010000e0403050306030203080408050806002d00020101001c00024001003900320408ffffffffffffffff05048000ffff07048000ffff0801100104800075300901100f088394c8f03e51570806048000ff 636f64653d333036 00f0:0\nrefused-legacy-version-ssl3 tls-alert 0 010000ed0300ebf8fa56f12939b9584a3896472ec40bb863cfd3e86804fe3a47f06a2b69484c00000413011302010000c000000010000e00000b6578616d706c652e636f6dff01000100000a00080006001d0017001800100007000504616c706e000500050100000000003300260024001d00209370b2c9caa47fbabaf4559fedba753de171fa71f50f1ce15d43e994ec74d748002b0003020304000d0010000e0403050306030203080408050806002d00020101001c00024001003900320408ffffffffffffffff05048000ffff07048000ffff0801100104800075300901100f088394c8f03e51570806048000ffff 636f64653d333236 00f1:0\nrefused-no-application-protocol tls-alert 0 010000e20303ebf8fa56f12939b9584a3896472ec40bb863cfd3e86804fe3a47f06a2b69484c00000413011302010000b500000010000e00000b6578616d706c652e636f6dff01000100000a00080006001d00170018000500050100000000003300260024001d00209370b2c9caa47fbabaf4559fedba753de171fa71f50f1ce15d43e994ec74d748002b0003020304000d0010000e0403050306030203080408050806002d00020101001c00024001003900320408ffffffffffffffff05048000ffff07048000ffff0801100104800075300901100f088394c8f03e51570806048000ffff 636f64653d333736 00e6:0\nrefused-no-transport-parameters tls-alert 0 010000b70303ebf8fa56f12939b9584a3896472ec40bb863cfd3e86804fe3a47f06a2b69484c000004130113020100008a00000010000e00000b6578616d706c652e636f6dff01000100000a00080006001d0017001800100007000504616c706e000500050100000000003300260024001d00209370b2c9caa47fbabaf4559fedba753de171fa71f50f1ce15d43e994ec74d748002b0003020304000d0010000e0403050306030203080408050806002d00020101001c00024001 636f64653d333635 00bb:0\nrefused-server-hello other-message 0 020000ed0303ebf8fa56f12939b9584a3896472ec40bb863cfd3e86804fe3a47f06a2b69484c00000413011302010000c000000010000e00000b6578616d706c652e636f6dff01000100000a00080006001d0017001800100007000504616c706e000500050100000000003300260024001d00209370b2c9caa47fbabaf4559fedba753de171fa71f50f1ce15d43e994ec74d748002b0003020304000d0010000e0403050306030203080408050806002d00020101001c00024001003900320408ffffffffffffffff05048000ffff07048000ffff0801100104800075300901100f088394c8f03e51570806048000ffff 6b696e643d32 00f1:0,007800f1:1\nrefused-session-id tls-alert 0 0100010d0303ebf8fa56f12939b9584a3896472ec40bb863cfd3e86804fe3a47f06a2b69484c20000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f000413011302010000c000000010000e00000b6578616d706c652e636f6dff01000100000a00080006001d0017001800100007000504616c706e000500050100000000003300260024001d00209370b2c9caa47fbabaf4559fedba753de171fa71f50f1ce15d43e994ec74d748002b0003020304000d0010000e0403050306030203080408050806002d00020101001c00024001003900320408ffffffffffffffff05048000ffff07048000ffff0801100104800075300901100f088394c8f03e51570806048000ffff 636f64653d3130 0111:0\nrefused-versions-tls12-only tls-alert 0 010000ed0303ebf8fa56f12939b9584a3896472ec40bb863cfd3e86804fe3a47f06a2b69484c00000413011302010000c000000010000e00000b6578616d706c652e636f6dff01000100000a00080006001d0017001800100007000504616c706e000500050100000000003300260024001d00209370b2c9caa47fbabaf4559fedba753de171fa71f50f1ce15d43e994ec74d748002b0003020303000d0010000e0403050306030203080408050806002d00020101001c00024001003900320408ffffffffffffffff05048000ffff07048000ffff0801100104800075300901100f088394c8f03e51570806048000ffff 636f64653d333236 00f1:0\n"
+
+fn reviewed_crypto_name(class: u8) -> String {
+    match class {
+        0u8 => "accepted",
+        1u8 => "partial",
+        2u8 => "tls-alert",
+        3u8 => "crypto-buffer",
+        4u8 => "other-message",
+        _ => "law",
+    }
+}
+
+fn reviewed_labelled(label: Bytes, n: u64) -> Bytes {
+    let mut text = string.new()
+    string.push_u64(mut text, n)
+    let mut out: Bytes = list.new()
+    list.append(mut out, label)
+    list.append(mut out, string.as_bytes(text))
+    take out
+}
+
+fn reviewed_hex(mut out: Bytes, data: Bytes) {
+    list.append(mut out, string.as_bytes(std.hex.encode(data)))
+}
+
+fn reviewed_code(mut out: Bytes, code: u16) {
+    let mut word: Bytes = list.with_capacity(2)
+    list.put_word_be(mut word, code)
+    reviewed_hex(mut out, word)
+}
+
+fn reviewed_codes(mut out: Bytes, label: Bytes, codes: List[u16]) {
+    list.append(mut out, label)
+    for i in 0u64 .. list.len(codes) {
+        if i > 0 {
+            list.push(mut out, 44)
+        }
+        reviewed_code(mut out, codes[i])
+    }
+}
+
+fn reviewed_offer(o: handshake.ClientOffer) -> Bytes {
+    let mut out: Bytes = list.new()
+    list.append(mut out, b"random=")
+    reviewed_hex(mut out, o.random)
+    reviewed_codes(mut out, b" suites=", o.suites)
+    reviewed_codes(mut out, b" groups=", o.groups)
+    reviewed_codes(mut out, b" signatures=", o.signatures)
+    list.append(mut out, b" shares=")
+    let mut shown = 0u64
+    for group in o.groups {
+        if let Some(key) = map.get(o.shares, group) {
+            if shown > 0 {
+                list.push(mut out, 44)
+            }
+            shown += 1
+            reviewed_code(mut out, group)
+            list.push(mut out, 58)
+            reviewed_hex(mut out, key)
+        }
+    }
+    list.append(mut out, b" name=")
+    match view o.name {
+        Some(name) => list.append(mut out, name),
+        None => list.push(mut out, 45),
+    }
+    list.append(mut out, b" alpn=")
+    for i in 0u64 .. list.len(o.alpn) {
+        if i > 0 {
+            list.push(mut out, 44)
+        }
+        list.append(mut out, o.alpn[i])
+    }
+    list.append(mut out, b" parameters=")
+    reviewed_hex(mut out, o.parameters)
+    take out
+}
+
+fn reviewed_end(ends: Bytes, i: u64) -> u64 {
+    let high: u64 = int.widen(ends[2 * i])
+    let low: u64 = int.widen(ends[2 * i + 1])
+    high * 256 + low
+}
+
+// The owner law of a reassembled message: it is the stream's first framed bytes, and the
+// same fragments delivered last to first reassemble the same message.
+fn reviewed_reassembled(raw: Bytes, ends: Bytes, wire: Bytes) -> bool {
+    let n = list.len(wire)
+    if n < 4 || n > list.len(raw) || wire != list.slice(raw, 0, n) {
+        return false
+    }
+    let high: u64 = int.widen(raw[1])
+    let middle: u64 = int.widen(raw[2])
+    let low: u64 = int.widen(raw[3])
+    if n != 4 + high * 65536 + middle * 256 + low {
+        return false
+    }
+    let mut reader = quic.crypto_reader()
+    let count = list.len(ends) / 2
+    for k in 0u64 .. count {
+        let i = count - 1 - k
+        let from = if i == 0 {
+            0u64
+        } else {
+            reviewed_end(ends, i - 1)
+        }
+        if !quic.crypto_receive(mut reader, from, list.slice(raw, from, reviewed_end(ends, i))) {
+            return false
+        }
+    }
+    match quic.crypto_message(mut reader) {
+        Ok(Some(again)) => again == wire,
+        _ => false,
+    }
+}
+
+// One delivery of a CRYPTO stream on fresh state, a fragment per end: its class, its
+// projection and the steps that left the first message partial. Class 9 is a broken
+// owner law (reviewed_reassembled) or fragments that do not cover the input in order.
+fn reviewed_crypto_case(raw: Bytes, ends: Bytes) -> (u8, Bytes, u64) {
+    let size = list.len(raw)
+    let mut reader = quic.crypto_reader()
+    let mut partials = 0u64
+    let mut from = 0u64
+    let mut found: Option[Bytes] = None
+    for i in 0u64 .. list.len(ends) / 2 {
+        let stop = reviewed_end(ends, i)
+        if stop < from || stop > size {
+            return (9u8, b"", partials)
+        }
+        if let None = found {
+            if !quic.crypto_receive(mut reader, from, list.slice(raw, from, stop)) {
+                return (3u8, reviewed_labelled(b"code=", 0x0d), partials)
+            }
+            match quic.crypto_message(mut reader) {
+                Ok(Some(wire)) => {
+                    found = Some(wire)
+                },
+                Ok(None) => {
+                    partials += 1
+                },
+                Error(code) => return (3u8, reviewed_labelled(b"code=", code), partials),
+            }
+        }
+        from = stop
+    }
+    if from != size {
+        return (9u8, b"", partials)
+    }
+    let Some(wire) = found else {
+        return (1u8, b"", partials)
+    }
+    if !reviewed_reassembled(raw, ends, wire) {
+        return (9u8, b"", partials)
+    }
+    let mut at = 0u64
+    let message = match handshake.read_message(wire, mut at) {
+        Ok(m) => m,
+        Error(e) => return (2u8, reviewed_labelled(b"code=", handshake.error_code(e)), partials),
+    }
+    if message.kind != handshake.CLIENT_HELLO {
+        return (4u8, reviewed_labelled(b"kind=", int.widen(message.kind)), partials)
+    }
+    match handshake.read_client_hello(message.body) {
+        Ok(offer) => (0u8, reviewed_offer(offer), partials),
+        Error(e) => (2u8, reviewed_labelled(b"code=", handshake.error_code(e)), partials),
+    }
+}
+
+fn reviewed_field(row: String, mut at: u64) -> View[String] in row {
+    let start = at
+    let end = match string.find(row, start, " ") {
+        Some(space) => space,
+        None => string.byte_len(row),
+    }
+    at = end + 1
+    string.slice(row, start, end)
+}
+
+fn reviewed_bytes(field: String) -> Bytes {
+    if field == "-" {
+        return b""
+    }
+    option.unwrap(std.hex.decode(string.as_bytes(field)))
+}
+
+fn reviewed_count(field: String) -> u64 {
+    let digits = string.as_bytes(field)
+    let mut n = 0u64
+    for i in 0u64 .. list.len(digits) {
+        let digit: u64 = int.widen(digits[i] - 48)
+        n = n * 10 + digit
+    }
+    n
+}
+
+/// bug: Reassemble a fragmented CRYPTO stream into the wrong TLS message, read a published
+/// ClientHello into the wrong offer, or answer a malformed one with the wrong alert.
+/// oracle: core/tests/decoder-corpus/quic-tls.json, whose expected observations are a
+/// Python reference's of RFC 8446 §4.1.2 and §4.2, RFC 9001 §8.1, §8.2, §8.4 and A.2 and
+/// RFC 9000 §7.5. Every case runs twice per schedule, each from fresh state.
+@test
+fn reviewed_crypto_stream() -> Result[(), ()] {
+    let data = REVIEWED_QUIC_TLS
+    let mut at = 0u64
+    let mut completed = 0u64
+    while at < string.byte_len(data) {
+        let end = option.unwrap(string.find(data, at, "\n"))
+        let row = string.slice(data, at, end)
+        let mut next = 0u64
+        let id = reviewed_field(row, mut next)
+        let class = reviewed_field(row, mut next)
+        let _ = reviewed_field(row, mut next)
+        let raw = reviewed_bytes(reviewed_field(row, mut next))
+        let projection = reviewed_bytes(reviewed_field(row, mut next))
+        let schedules = reviewed_field(row, mut next)
+        let mut s = 0u64
+        while s < string.byte_len(schedules) {
+            let stop = match string.find(schedules, s, ",") {
+                Some(comma) => comma,
+                None => string.byte_len(schedules),
+            }
+            let colon = option.unwrap(string.find(schedules, s, ":"))
+            let ends = reviewed_bytes(string.slice(schedules, s, colon))
+            let partials = reviewed_count(string.slice(schedules, colon + 1, stop))
+            let (first, shown, steps) = reviewed_crypto_case(raw, ends)
+            let (second, replayed, again) = reviewed_crypto_case(raw, ends)
+            if first != second || shown != replayed || steps != again || reviewed_crypto_name(first) != class || shown != projection || steps != partials {
+                fail(string.from(id))
+            }
+            s = stop + 1
+        }
+        completed += 1
+        at = end + 1
+    }
+    if completed != 17 {
+        fail("reviewed quic-tls cases completed")
+    }
+    Ok(())
+}

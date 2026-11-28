@@ -1238,3 +1238,104 @@ fn typed_json_schema_contract() -> bool {
     }
     true
 }
+
+// The reviewed corpus (core/tests/decoder-corpus/json.json). Its expected classes and
+// compact renderings are Python's json module's, not this module's. Rows are
+// `id class selector input projection schedules` with hex fields and `-` for an empty one.
+// Regenerate: tools/decoder-fuzz/fixtures.py rows json --write.
+const REVIEWED_JSON: String = "accepted-control-escapes accepted 0 225c75303030315c745c225c5c5c2f22 225c75303030315c745c225c5c2f22 -\naccepted-depth-128 accepted 0 5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d 5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d -\naccepted-empty-containers accepted 0 5b7b7d2c5b5d5d 5b7b7d2c5b5d5d -\naccepted-object-spaced accepted 0 207b20226b22203a205b2031202c207b20227822203a20227922207d205d202c0d0a09227a22203a20225c75303065395c6e22207d20 7b226b223a5b312c7b2278223a2279227d5d2c227a223a22c3a95c6e227d -\naccepted-scalars accepted 0 5b6e756c6c2c747275652c66616c73652c302c2d312c312e352c2261225d 5b6e756c6c2c747275652c66616c73652c302c2d312c312e352c2261225d -\naccepted-surrogate-pair accepted 0 225c75643833645c756465303022 22f09f988022 -\naccepted-utf8-text accepted 0 7b22d0bad0bbd18ed187223a22d0b7d0bdd0b0d187d0b5d0bdd0b8d0b5222c226e223a3132333435363738393031323334353637383930313233343536373839307d 7b22d0bad0bbd18ed187223a22d0b7d0bdd0b0d187d0b5d0bdd0b8d0b5222c226e223a3132333435363738393031323334353637383930313233343536373839307d -\nrefused-depth-129 depth 0 5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d - -\nrefused-not-finite not-finite 0 5b31653939395d - -\nrefused-syntax-empty syntax 0 - - -\nrefused-syntax-leading-zero syntax 0 3031 - -\nrefused-syntax-raw-control syntax 0 22610a6222 - -\nrefused-syntax-trailing-comma syntax 0 5b312c5d - -\nrefused-syntax-trailing-value syntax 0 7b7d2078 - -\nrefused-syntax-truncated syntax 0 7b2261223a - -\nrefused-utf8 utf8 0 22ff22 - -\n"
+
+fn reviewed_json_class(e: json.Error) -> u8 {
+    match e {
+        Syntax(_) => 1u8,
+        NotFinite(_) => 2u8,
+        Depth => 3u8,
+        _ => 5u8,
+    }
+}
+
+fn reviewed_json_name(class: u8) -> String {
+    match class {
+        0u8 => "accepted",
+        1u8 => "syntax",
+        2u8 => "not-finite",
+        3u8 => "depth",
+        4u8 => "utf8",
+        5u8 => "other",
+        _ => "law",
+    }
+}
+
+fn reviewed_json_render(text: String) -> Result[String, json.Error] {
+    region r {
+        let doc = json.parse(r, text)?
+        let mut out = string.new()
+        json.push_json(mut out, doc)
+        Ok(take out)
+    }
+}
+
+// One input on fresh state: its class and, when accepted, its compact rendering.
+// Class 9 is a broken owner law: the sizing pass and the parse disagree, or the
+// rendering is not a fixed point of parse and render.
+fn reviewed_json_case(take raw: Bytes) -> (u8, String) {
+    let Ok(text) = string.from_utf8(take raw) else {
+        return (4u8, string.new())
+    }
+    match (json.size(text), reviewed_json_render(text)) {
+        (Ok(_), Ok(out)) => match reviewed_json_render(out) {
+            Ok(again) if again == out => (0u8, take out),
+            _ => (9u8, take out),
+        },
+        (Error(a), Error(b)) => if reviewed_json_class(a) == reviewed_json_class(b) {
+            (reviewed_json_class(a), string.new())
+        } else {
+            (9u8, string.new())
+        },
+        _ => (9u8, string.new()),
+    }
+}
+
+fn reviewed_field(row: String, mut at: u64) -> View[String] in row {
+    let start = at
+    let end = match string.find(row, start, " ") {
+        Some(space) => space,
+        None => string.byte_len(row),
+    }
+    at = end + 1
+    string.slice(row, start, end)
+}
+
+fn reviewed_bytes(field: String) -> Bytes {
+    if field == "-" {
+        return b""
+    }
+    decode_json_fixture(field)
+}
+
+// Every reviewed case twice, each run from fresh state: both runs and the reviewed
+// observation agree. The result is the number of completed cases.
+// expect: run reviewed_json() = 16
+fn reviewed_json() -> u64 {
+    let data = REVIEWED_JSON
+    let mut at: u64 = 0
+    let mut completed: u64 = 0
+    while at < string.byte_len(data) {
+        let end = option.unwrap(string.find(data, at, "\n"))
+        let row = string.slice(data, at, end)
+        let mut next: u64 = 0
+        let id = reviewed_field(row, mut next)
+        let class = reviewed_field(row, mut next)
+        let _ = reviewed_field(row, mut next)
+        let raw = reviewed_bytes(reviewed_field(row, mut next))
+        let projection = reviewed_bytes(reviewed_field(row, mut next))
+        let (first, shown) = reviewed_json_case(clone(raw))
+        let (second, replayed) = reviewed_json_case(take raw)
+        if first != second || shown != replayed || reviewed_json_name(first) != class || string.as_bytes(shown) != projection {
+            fail(string.from(id))
+        }
+        completed += 1
+        at = end + 1
+    }
+    completed
+}

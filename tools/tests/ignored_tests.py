@@ -88,6 +88,12 @@ def hirsel_test():
             'tools/stray.py (Python tests without a runner)',
         ])
 
+    def test_a_subpackage_script_label_names_its_runner(self):
+        self.write('tools/fuzz/test_cases.py', 'def test_case(): pass\n')
+        with (self.root / 'BUCK').open('a') as buck:
+            buck.write('hirsel_script_test(script="//tools/fuzz:test_cases.py", data=[])\n')
+        self.assertEqual(runners.problems(self.root), [])
+
 
 if __name__ == '__main__':
     unittest.main()

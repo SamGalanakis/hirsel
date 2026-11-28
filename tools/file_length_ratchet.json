@@ -96,7 +96,9 @@
     "reason": "ws-single-listener-3201 adds the mixed-route law beside the HTTP connection fixtures"
   },
   "core/std/tests/json.hirsel": {
-    "lines": 1240
+    "lines": 1341,
+    "raise_revision": 1,
+    "reason": "fuzz-s7-host-and-native-cohorts-3452 adds the reviewed json cohort's owner law beside the JSON fixtures"
   },
   "core/std/tests/list.hirsel": {
     "lines": 1503

@@ -202,7 +202,9 @@ def passes_ignored(node):
 
 
 def python_runners(root, rules):
-    runners = {root / literal(attrs, 'script') for rule, attrs in rules if rule == 'hirsel_script_test'}
+    # A script in a subpackage is its export_file label, `//<package>:<path>`.
+    runners = {root / literal(attrs, 'script').removeprefix('//').replace(':', '/', 1)
+               for rule, attrs in rules if rule == 'hirsel_script_test'}
     scripts = [*(root / 'tools').glob('nightly-*.sh'), *(root / '.github/workflows').glob('*.y*ml')]
     for script in scripts:
         for match in PYTHON_COMMAND.finditer(script.read_text()):

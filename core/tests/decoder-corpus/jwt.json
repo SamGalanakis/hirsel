@@ -1,0 +1,535 @@
+{
+  "schema_version": 1,
+  "objects": {
+    "0d7b5638bc094a339daf853f2cbe15280727f29b7f905e495a751dac6572bc6f": "65794a68624763694f694a756232356c496e302e65794a7063334d694f694a6a62334a7764584d694c434a6c654841694f6a457a4d4441344d546b304d4442392e",
+    "11d2b821fa42c3289de6f3e21133ef2d2d8d4a2123e71814c03169e2094afdf5": "65794a68624763694f694a49557a4d344e434a392e65794a7063334d694f694a6a62334a7764584d694c434a6c654841694f6a457a4d4441344d546b304d4442392e6268685f506d364b4e4b7339584855394f784536424134685958596d616b68783767765437465a513773766d7859566b39344e41746c33464e43395a68786b61",
+    "26eb168d31907e86616d38dcc68c86f69ab1d362f336cfa4e943a8511ce33fbe": "65794a68624763694f694a49557a49314e694973496e523563434936496b705856434a392e577a457a4d4441344d546b304d4442642e5471766b324a6c666646737a55796c4d5756445f6d69366b51307535314a7544385a3376416557526e3159",
+    "3344f73d7d2f60657634a722199abb5d765e8e71621f65928be75c16e70430f2": "65794a68624763694f694a49557a49314e694973496e523563434936496b705856434a392e65794a7063334d694f694a6a62334a7764584d694c434a7a645749694f694a6a59584e6c4c5449694c434a6c654841694f6a457a4d4441344d546b304d444173496d35695a6949364d544d774d4467784f544d334f53776961574630496a6f784d7a41774f4445354d44417766512e6d424e5072383248536645666b4244656871304e513172654e793953775672504d5579757330686a714c59",
+    "5499694cf21ebebf5254b24db1e9569547a9d8fb3fe47b2b4046b331981724a9": "65794a68624763694f694a49557a49314e694973496d4e79615851694f6c73695a586877496c3073496d5634634349364d544d774d4467784f5451774d48302e65794a7063334d694f694a6a62334a7764584d694c434a6c654841694f6a457a4d4441344d546b304d4442392e4f692d64445453685338785541794d4c5750454c767778684c64314b55346a514145687955744f31377477",
+    "58a26ef266867149cbc23bafdc0f75aa652f5b2eed4634f84ff4f73895bccd4d": "65794a68624763694f694a49557a49314e694973496e523563434936496b705856434a392e65794a7063334d694f694a6a62334a7764584d694c434a6c654841694f6a457a4d4441344d546b304d444173496d46315a434936496d567363325633614756795a534a392e306753357545786f305654337664786a65784e575457536f424e62626f5756554843483969675a56723841",
+    "6203a437373667bcbef99586d62f41799fbb060f87964354a84e925aa98d1ce3": "65794a68624763694f694a49557a49314e694973496e523563434936496b705856434a392e65794a7063334d694f694a6a62334a7764584d694c434a6c654841694f6a457a4d4441344d546b7a4e7a6c392e4d65766262734d64377932594548577844644365567438444b3937417673484666637756396443656d4a55",
+    "73c7f960eeab670877ab082ff9912e65b4eab97ea4494821d1fa2a0b2f10e846": "65794a30655841694f694a4b563151694c41304b49434a68624763694f694a49557a49314e694a392e65794a7063334d694f694a71623255694c41304b49434a6c654841694f6a457a4d4441344d546b7a4f44417344516f67496d6830644841364c79396c654746746347786c4c6d4e76625339706331397962323930496a7030636e566c66512e65426a66744a655a344356502d6d4239324b3237756862554a55317031725f775731674657464f456a586b",
+    "8574410fe367e57f9e271bdd3e2548803dc13b6cde0c589eb9a6d9f60071f4a7": "65794a30655841694f694a4b563151694c41304b49434a68624763694f694a49557a49314e694a392e65794a7063334d694f694a71623255694c41304b49434a6c654841694f6a457a4d4441344d546b7a4f44417344516f67496d6830644841364c79396c654746746347786c4c6d4e76625339706331397962323930496a7030636e566c6651",
+    "8d4ef6536dc8895f256c1e0d95dcd19763036732d64a095e44a90ed444267ad3": "65794a30655841694f694a4b563151694c41304b49434a68624763694f694a49557a49314e694a392e65794a7063334d694f694a71623255694c41304b49434a6c654841694f6a457a4d4441344d546b7a4f44417344516f67496d6830644841364c79396c654746746347786c4c6d4e76625339706331397962323930496a7030636e566c66512e64426a66744a655a344356502d6d4239324b3237756862554a55317031725f775731674657464f456a586b",
+    "a33a06dc6309122da4057f6c65e63863c1bb8c5cc75ce217cc626d32b86f5ed4": "65794a68624763694f694a49557a49314e694973496e523563434936496b705856434a392e65794a7063334d694f694a6a62334a7764584d694c434a6c654841694f6a457a4d4441344d546b304d444173496d35695a6949364d544d774d4467784f544d344d48302e535a615275626267585f4d643549674a5138614e70635358484b6d70454c32347746483375724d4f6a6930",
+    "a6e000055b7c604bdfea906c9ed8d2651edeec74508de80b693e9781501fd2af": "212121212e65794a7063334d694f694a71623255694c41304b49434a6c654841694f6a457a4d4441344d546b7a4f44417344516f67496d6830644841364c79396c654746746347786c4c6d4e76625339706331397962323930496a7030636e566c66512e64426a66744a655a344356502d6d4239324b3237756862554a55317031725f775731674657464f456a586b",
+    "becb6f3f818a898465fb57b96c30c0fff275229b7d9967f6433ab6971535f419": "65794a68624763694f672e65794a7063334d694f694a6a62334a7764584d694c434a6c654841694f6a457a4d4441344d546b304d4442392e6b5154525075747a317775347459585a65726d41527979574d2d566872593068757a444c766f696e6a5845",
+    "d056e74f00908e352e1305d8c8f0134480a7f29013aed3eb4eb684669a3b7062": "fffe2e65794a7063334d694f694a71623255694c41304b49434a6c654841694f6a457a4d4441344d546b7a4f44417344516f67496d6830644841364c79396c654746746347786c4c6d4e76625339706331397962323930496a7030636e566c66512e64426a66744a655a344356502d6d4239324b3237756862554a55317031725f775731674657464f456a586b",
+    "dd09c3cb123f60416e1ea54c3f246607b3ab614a05c8d6c81a736a772eefac83": "65794a68624763694f694a49557a49314e694973496e523563434936496b705856434a392e65794a7063334d694f694a6a62334a7764584d6966512e645267527574534f4e6d4a6c4172587134367a6d644444734f59534c32706a33744478376b4c586d793777",
+    "df28dd0855721bdd81b50e42a6bc3729044a8921d83d5b5335fe6caffce056d4": "65794a68624763694f694a49557a49314e694973496e523563434936496b705856434a392e65794a7063334d694f694a6a62334a7764584d694c434a6c654841694f6a457a4d4441344d546b304d4442392e57316c7359446d3244325243332d646555354a6547773437706a7049677050496c6f6e625146353739734d"
+  },
+  "cases": [
+    {
+      "id": "accepted-rfc7515-a1",
+      "target": "jwt",
+      "law": "reviewed_jwt",
+      "input_kind": "compact-jws",
+      "generator_version": 1,
+      "digest": "8d4ef6536dc8895f256c1e0d95dcd19763036732d64a095e44a90ed444267ad3",
+      "limits": {
+        "token_bytes": 65536
+      },
+      "setup": {
+        "key": "rfc7515-a1",
+        "key_base64url": "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow",
+        "allow": "HS256",
+        "now": 1300819379,
+        "leeway": 0,
+        "require_exp": true
+      },
+      "oracle": {
+        "name": "python-hmac-rfc7515",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "616c673d4853323536206973733d6a6f65206578703d3133303038313933383020636c61696d733d3762323236393733373332323361323236613666363532323263306430613230323236353738373032323361333133333330333033383331333933333338333032633064306132303232363837343734373033613266326636353738363136643730366336353265363336663664326636393733356637323666366637343232336137343732373536353764"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "accepted-signed-claims",
+      "target": "jwt",
+      "law": "reviewed_jwt",
+      "input_kind": "compact-jws",
+      "generator_version": 1,
+      "digest": "3344f73d7d2f60657634a722199abb5d765e8e71621f65928be75c16e70430f2",
+      "limits": {
+        "token_bytes": 65536
+      },
+      "setup": {
+        "key": "rfc7515-a1",
+        "key_base64url": "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow",
+        "allow": "HS256",
+        "now": 1300819379,
+        "leeway": 0,
+        "require_exp": true
+      },
+      "oracle": {
+        "name": "python-hmac-rfc7515",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "616c673d4853323536206973733d636f72707573206578703d3133303038313934303020636c61696d733d3762323236393733373332323361323236333666373237303735373332323263323237333735363232323361323236333631373336353264333232323263323236353738373032323361333133333330333033383331333933343330333032633232366536323636323233613331333333303330333833313339333333373339326332323639363137343232336133313333333033303338333133393330333033303764"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-alg-hs384",
+      "target": "jwt",
+      "law": "reviewed_jwt",
+      "input_kind": "compact-jws",
+      "generator_version": 1,
+      "digest": "11d2b821fa42c3289de6f3e21133ef2d2d8d4a2123e71814c03169e2094afdf5",
+      "limits": {
+        "token_bytes": 65536
+      },
+      "setup": {
+        "key": "rfc7515-a1",
+        "key_base64url": "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow",
+        "allow": "HS256",
+        "now": 1300819379,
+        "leeway": 0,
+        "require_exp": true
+      },
+      "oracle": {
+        "name": "python-hmac-rfc7515",
+        "version": 1
+      },
+      "expected": {
+        "class": "unsupported",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-alg-none",
+      "target": "jwt",
+      "law": "reviewed_jwt",
+      "input_kind": "compact-jws",
+      "generator_version": 1,
+      "digest": "0d7b5638bc094a339daf853f2cbe15280727f29b7f905e495a751dac6572bc6f",
+      "limits": {
+        "token_bytes": 65536
+      },
+      "setup": {
+        "key": "rfc7515-a1",
+        "key_base64url": "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow",
+        "allow": "HS256",
+        "now": 1300819379,
+        "leeway": 0,
+        "require_exp": true
+      },
+      "oracle": {
+        "name": "python-hmac-rfc7515",
+        "version": 1
+      },
+      "expected": {
+        "class": "unsupported",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-audience-unasked",
+      "target": "jwt",
+      "law": "reviewed_jwt",
+      "input_kind": "compact-jws",
+      "generator_version": 1,
+      "digest": "58a26ef266867149cbc23bafdc0f75aa652f5b2eed4634f84ff4f73895bccd4d",
+      "limits": {
+        "token_bytes": 65536
+      },
+      "setup": {
+        "key": "rfc7515-a1",
+        "key_base64url": "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow",
+        "allow": "HS256",
+        "now": 1300819379,
+        "leeway": 0,
+        "require_exp": true
+      },
+      "oracle": {
+        "name": "python-hmac-rfc7515",
+        "version": 1
+      },
+      "expected": {
+        "class": "mismatch",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-claims-array",
+      "target": "jwt",
+      "law": "reviewed_jwt",
+      "input_kind": "compact-jws",
+      "generator_version": 1,
+      "digest": "26eb168d31907e86616d38dcc68c86f69ab1d362f336cfa4e943a8511ce33fbe",
+      "limits": {
+        "token_bytes": 65536
+      },
+      "setup": {
+        "key": "rfc7515-a1",
+        "key_base64url": "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow",
+        "allow": "HS256",
+        "now": 1300819379,
+        "leeway": 0,
+        "require_exp": true
+      },
+      "oracle": {
+        "name": "python-hmac-rfc7515",
+        "version": 1
+      },
+      "expected": {
+        "class": "malformed",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-crit",
+      "target": "jwt",
+      "law": "reviewed_jwt",
+      "input_kind": "compact-jws",
+      "generator_version": 1,
+      "digest": "5499694cf21ebebf5254b24db1e9569547a9d8fb3fe47b2b4046b331981724a9",
+      "limits": {
+        "token_bytes": 65536
+      },
+      "setup": {
+        "key": "rfc7515-a1",
+        "key_base64url": "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow",
+        "allow": "HS256",
+        "now": 1300819379,
+        "leeway": 0,
+        "require_exp": true
+      },
+      "oracle": {
+        "name": "python-hmac-rfc7515",
+        "version": 1
+      },
+      "expected": {
+        "class": "unsupported",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-expired-at-exp",
+      "target": "jwt",
+      "law": "reviewed_jwt",
+      "input_kind": "compact-jws",
+      "generator_version": 1,
+      "digest": "6203a437373667bcbef99586d62f41799fbb060f87964354a84e925aa98d1ce3",
+      "limits": {
+        "token_bytes": 65536
+      },
+      "setup": {
+        "key": "rfc7515-a1",
+        "key_base64url": "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow",
+        "allow": "HS256",
+        "now": 1300819379,
+        "leeway": 0,
+        "require_exp": true
+      },
+      "oracle": {
+        "name": "python-hmac-rfc7515",
+        "version": 1
+      },
+      "expected": {
+        "class": "expired",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-header-not-base64url",
+      "target": "jwt",
+      "law": "reviewed_jwt",
+      "input_kind": "compact-jws",
+      "generator_version": 1,
+      "digest": "a6e000055b7c604bdfea906c9ed8d2651edeec74508de80b693e9781501fd2af",
+      "limits": {
+        "token_bytes": 65536
+      },
+      "setup": {
+        "key": "rfc7515-a1",
+        "key_base64url": "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow",
+        "allow": "HS256",
+        "now": 1300819379,
+        "leeway": 0,
+        "require_exp": true
+      },
+      "oracle": {
+        "name": "python-hmac-rfc7515",
+        "version": 1
+      },
+      "expected": {
+        "class": "malformed",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-header-truncated-json",
+      "target": "jwt",
+      "law": "reviewed_jwt",
+      "input_kind": "compact-jws",
+      "generator_version": 1,
+      "digest": "becb6f3f818a898465fb57b96c30c0fff275229b7d9967f6433ab6971535f419",
+      "limits": {
+        "token_bytes": 65536
+      },
+      "setup": {
+        "key": "rfc7515-a1",
+        "key_base64url": "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow",
+        "allow": "HS256",
+        "now": 1300819379,
+        "leeway": 0,
+        "require_exp": true
+      },
+      "oracle": {
+        "name": "python-hmac-rfc7515",
+        "version": 1
+      },
+      "expected": {
+        "class": "malformed",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-missing-exp",
+      "target": "jwt",
+      "law": "reviewed_jwt",
+      "input_kind": "compact-jws",
+      "generator_version": 1,
+      "digest": "dd09c3cb123f60416e1ea54c3f246607b3ab614a05c8d6c81a736a772eefac83",
+      "limits": {
+        "token_bytes": 65536
+      },
+      "setup": {
+        "key": "rfc7515-a1",
+        "key_base64url": "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow",
+        "allow": "HS256",
+        "now": 1300819379,
+        "leeway": 0,
+        "require_exp": true
+      },
+      "oracle": {
+        "name": "python-hmac-rfc7515",
+        "version": 1
+      },
+      "expected": {
+        "class": "mismatch",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-not-text",
+      "target": "jwt",
+      "law": "reviewed_jwt",
+      "input_kind": "compact-jws",
+      "generator_version": 1,
+      "digest": "d056e74f00908e352e1305d8c8f0134480a7f29013aed3eb4eb684669a3b7062",
+      "limits": {
+        "token_bytes": 65536
+      },
+      "setup": {
+        "key": "rfc7515-a1",
+        "key_base64url": "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow",
+        "allow": "HS256",
+        "now": 1300819379,
+        "leeway": 0,
+        "require_exp": true
+      },
+      "oracle": {
+        "name": "python-hmac-rfc7515",
+        "version": 1
+      },
+      "expected": {
+        "class": "not-text",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-not-yet-valid-nbf",
+      "target": "jwt",
+      "law": "reviewed_jwt",
+      "input_kind": "compact-jws",
+      "generator_version": 1,
+      "digest": "a33a06dc6309122da4057f6c65e63863c1bb8c5cc75ce217cc626d32b86f5ed4",
+      "limits": {
+        "token_bytes": 65536
+      },
+      "setup": {
+        "key": "rfc7515-a1",
+        "key_base64url": "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow",
+        "allow": "HS256",
+        "now": 1300819379,
+        "leeway": 0,
+        "require_exp": true
+      },
+      "oracle": {
+        "name": "python-hmac-rfc7515",
+        "version": 1
+      },
+      "expected": {
+        "class": "not-yet-valid",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-signature-flipped",
+      "target": "jwt",
+      "law": "reviewed_jwt",
+      "input_kind": "compact-jws",
+      "generator_version": 1,
+      "digest": "73c7f960eeab670877ab082ff9912e65b4eab97ea4494821d1fa2a0b2f10e846",
+      "limits": {
+        "token_bytes": 65536
+      },
+      "setup": {
+        "key": "rfc7515-a1",
+        "key_base64url": "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow",
+        "allow": "HS256",
+        "now": 1300819379,
+        "leeway": 0,
+        "require_exp": true
+      },
+      "oracle": {
+        "name": "python-hmac-rfc7515",
+        "version": 1
+      },
+      "expected": {
+        "class": "bad-signature",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-signature-other-key",
+      "target": "jwt",
+      "law": "reviewed_jwt",
+      "input_kind": "compact-jws",
+      "generator_version": 1,
+      "digest": "df28dd0855721bdd81b50e42a6bc3729044a8921d83d5b5335fe6caffce056d4",
+      "limits": {
+        "token_bytes": 65536
+      },
+      "setup": {
+        "key": "rfc7515-a1",
+        "key_base64url": "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow",
+        "allow": "HS256",
+        "now": 1300819379,
+        "leeway": 0,
+        "require_exp": true
+      },
+      "oracle": {
+        "name": "python-hmac-rfc7515",
+        "version": 1
+      },
+      "expected": {
+        "class": "bad-signature",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-two-segments",
+      "target": "jwt",
+      "law": "reviewed_jwt",
+      "input_kind": "compact-jws",
+      "generator_version": 1,
+      "digest": "8574410fe367e57f9e271bdd3e2548803dc13b6cde0c589eb9a6d9f60071f4a7",
+      "limits": {
+        "token_bytes": 65536
+      },
+      "setup": {
+        "key": "rfc7515-a1",
+        "key_base64url": "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow",
+        "allow": "HS256",
+        "now": 1300819379,
+        "leeway": 0,
+        "require_exp": true
+      },
+      "oracle": {
+        "name": "python-hmac-rfc7515",
+        "version": 1
+      },
+      "expected": {
+        "class": "malformed",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    }
+  ]
+}

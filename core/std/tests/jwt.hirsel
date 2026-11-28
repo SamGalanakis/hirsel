@@ -688,3 +688,151 @@ fn hmac_minimum(alg: jwt.Alg, minimum: u64) -> u64 {
 fn jwt_hmac_key_law() -> u64 {
     hmac_minimum(Hs256, 32) + 10 * hmac_minimum(Hs384, 48) + 100 * hmac_minimum(Hs512, 64)
 }
+
+// The reviewed corpus (core/tests/decoder-corpus/jwt.json): compact tokens under RFC 7515
+// A.1's key, HS256 only, at REVIEWED_JWT_NOW with no leeway and a required exp. Its expected
+// classes and projections are a Python reference's (hmac, base64, json), not this module's.
+// Rows are `id class selector input projection schedules` with hex fields and `-` for an
+// empty one. Regenerate: tools/decoder-fuzz/fixtures.py rows jwt --write.
+const REVIEWED_JWT: String = "accepted-rfc7515-a1 accepted 0 65794a30655841694f694a4b563151694c41304b49434a68624763694f694a49557a49314e694a392e65794a7063334d694f694a71623255694c41304b49434a6c654841694f6a457a4d4441344d546b7a4f44417344516f67496d6830644841364c79396c654746746347786c4c6d4e76625339706331397962323930496a7030636e566c66512e64426a66744a655a344356502d6d4239324b3237756862554a55317031725f775731674657464f456a586b 616c673d4853323536206973733d6a6f65206578703d3133303038313933383020636c61696d733d3762323236393733373332323361323236613666363532323263306430613230323236353738373032323361333133333330333033383331333933333338333032633064306132303232363837343734373033613266326636353738363136643730366336353265363336663664326636393733356637323666366637343232336137343732373536353764 -\naccepted-signed-claims accepted 0 65794a68624763694f694a49557a49314e694973496e523563434936496b705856434a392e65794a7063334d694f694a6a62334a7764584d694c434a7a645749694f694a6a59584e6c4c5449694c434a6c654841694f6a457a4d4441344d546b304d444173496d35695a6949364d544d774d4467784f544d334f53776961574630496a6f784d7a41774f4445354d44417766512e6d424e5072383248536645666b4244656871304e513172654e793953775672504d5579757330686a714c59 616c673d4853323536206973733d636f72707573206578703d3133303038313934303020636c61696d733d3762323236393733373332323361323236333666373237303735373332323263323237333735363232323361323236333631373336353264333232323263323236353738373032323361333133333330333033383331333933343330333032633232366536323636323233613331333333303330333833313339333333373339326332323639363137343232336133313333333033303338333133393330333033303764 -\nrefused-alg-hs384 unsupported 0 65794a68624763694f694a49557a4d344e434a392e65794a7063334d694f694a6a62334a7764584d694c434a6c654841694f6a457a4d4441344d546b304d4442392e6268685f506d364b4e4b7339584855394f784536424134685958596d616b68783767765437465a513773766d7859566b39344e41746c33464e43395a68786b61 - -\nrefused-alg-none unsupported 0 65794a68624763694f694a756232356c496e302e65794a7063334d694f694a6a62334a7764584d694c434a6c654841694f6a457a4d4441344d546b304d4442392e - -\nrefused-audience-unasked mismatch 0 65794a68624763694f694a49557a49314e694973496e523563434936496b705856434a392e65794a7063334d694f694a6a62334a7764584d694c434a6c654841694f6a457a4d4441344d546b304d444173496d46315a434936496d567363325633614756795a534a392e306753357545786f305654337664786a65784e575457536f424e62626f5756554843483969675a56723841 - -\nrefused-claims-array malformed 0 65794a68624763694f694a49557a49314e694973496e523563434936496b705856434a392e577a457a4d4441344d546b304d4442642e5471766b324a6c666646737a55796c4d5756445f6d69366b51307535314a7544385a3376416557526e3159 - -\nrefused-crit unsupported 0 65794a68624763694f694a49557a49314e694973496d4e79615851694f6c73695a586877496c3073496d5634634349364d544d774d4467784f5451774d48302e65794a7063334d694f694a6a62334a7764584d694c434a6c654841694f6a457a4d4441344d546b304d4442392e4f692d64445453685338785541794d4c5750454c767778684c64314b55346a514145687955744f31377477 - -\nrefused-expired-at-exp expired 0 65794a68624763694f694a49557a49314e694973496e523563434936496b705856434a392e65794a7063334d694f694a6a62334a7764584d694c434a6c654841694f6a457a4d4441344d546b7a4e7a6c392e4d65766262734d64377932594548577844644365567438444b3937417673484666637756396443656d4a55 - -\nrefused-header-not-base64url malformed 0 212121212e65794a7063334d694f694a71623255694c41304b49434a6c654841694f6a457a4d4441344d546b7a4f44417344516f67496d6830644841364c79396c654746746347786c4c6d4e76625339706331397962323930496a7030636e566c66512e64426a66744a655a344356502d6d4239324b3237756862554a55317031725f775731674657464f456a586b - -\nrefused-header-truncated-json malformed 0 65794a68624763694f672e65794a7063334d694f694a6a62334a7764584d694c434a6c654841694f6a457a4d4441344d546b304d4442392e6b5154525075747a317775347459585a65726d41527979574d2d566872593068757a444c766f696e6a5845 - -\nrefused-missing-exp mismatch 0 65794a68624763694f694a49557a49314e694973496e523563434936496b705856434a392e65794a7063334d694f694a6a62334a7764584d6966512e645267527574534f4e6d4a6c4172587134367a6d644444734f59534c32706a33744478376b4c586d793777 - -\nrefused-not-text not-text 0 fffe2e65794a7063334d694f694a71623255694c41304b49434a6c654841694f6a457a4d4441344d546b7a4f44417344516f67496d6830644841364c79396c654746746347786c4c6d4e76625339706331397962323930496a7030636e566c66512e64426a66744a655a344356502d6d4239324b3237756862554a55317031725f775731674657464f456a586b - -\nrefused-not-yet-valid-nbf not-yet-valid 0 65794a68624763694f694a49557a49314e694973496e523563434936496b705856434a392e65794a7063334d694f694a6a62334a7764584d694c434a6c654841694f6a457a4d4441344d546b304d444173496d35695a6949364d544d774d4467784f544d344d48302e535a615275626267585f4d643549674a5138614e70635358484b6d70454c32347746483375724d4f6a6930 - -\nrefused-signature-flipped bad-signature 0 65794a30655841694f694a4b563151694c41304b49434a68624763694f694a49557a49314e694a392e65794a7063334d694f694a71623255694c41304b49434a6c654841694f6a457a4d4441344d546b7a4f44417344516f67496d6830644841364c79396c654746746347786c4c6d4e76625339706331397962323930496a7030636e566c66512e65426a66744a655a344356502d6d4239324b3237756862554a55317031725f775731674657464f456a586b - -\nrefused-signature-other-key bad-signature 0 65794a68624763694f694a49557a49314e694973496e523563434936496b705856434a392e65794a7063334d694f694a6a62334a7764584d694c434a6c654841694f6a457a4d4441344d546b304d4442392e57316c7359446d3244325243332d646555354a6547773437706a7049677050496c6f6e625146353739734d - -\nrefused-two-segments malformed 0 65794a30655841694f694a4b563151694c41304b49434a68624763694f694a49557a49314e694a392e65794a7063334d694f694a71623255694c41304b49434a6c654841694f6a457a4d4441344d546b7a4f44417344516f67496d6830644841364c79396c654746746347786c4c6d4e76625339706331397962323930496a7030636e566c6651 - -\n"
+
+const REVIEWED_JWT_NOW: u64 = 1300819379
+
+fn reviewed_jwt_class(e: jwt.Error) -> u8 {
+    match e {
+        Malformed(_) => 1u8,
+        UnsupportedAlg => 2u8,
+        UnsupportedCrit => 2u8,
+        BadSignature => 4u8,
+        Expired => 5u8,
+        NotYetValid => 6u8,
+        Mismatch(_) => 7u8,
+        _ => 3u8,
+    }
+}
+
+fn reviewed_jwt_name(class: u8) -> String {
+    match class {
+        0u8 => "accepted",
+        1u8 => "malformed",
+        2u8 => "unsupported",
+        3u8 => "key",
+        4u8 => "bad-signature",
+        5u8 => "expired",
+        6u8 => "not-yet-valid",
+        7u8 => "mismatch",
+        8u8 => "not-text",
+        _ => "law",
+    }
+}
+
+// The token's last segment is the HMAC-SHA256 of the two before it, computed with
+// std.hmac and std.base64 rather than with jwt.
+fn reviewed_jwt_tagged(token: String) -> bool {
+    let Some(first) = string.find(token, 0, ".") else {
+        return false
+    }
+    let Some(second) = string.find(token, first + 1, ".") else {
+        return false
+    }
+    let tag = hmac.sha256(b64(A1_K), string.as_bytes(string.slice(token, 0, second)))
+    let mut mac: Bytes = list.with_capacity(32)
+    for x in tag {
+        list.push(mut mac, x)
+    }
+    string.slice(token, second + 1, string.byte_len(token)) == base64.encode_url(mac, false)
+}
+
+fn reviewed_jwt_shown(t: jwt.Jwt) -> String {
+    let mut out = string.from("alg=")
+    string.push(mut out, jwt.alg_name(t.header.alg))
+    string.push(mut out, " iss=")
+    match view t.claims.iss {
+        Some(iss) => string.push(mut out, iss),
+        None => string.push(mut out, "-"),
+    }
+    string.push(mut out, " exp=")
+    match t.claims.exp {
+        Some(exp) => string.push_u64(mut out, exp),
+        None => string.push(mut out, "-"),
+    }
+    string.push(mut out, " claims=")
+    string.push(mut out, hex.encode(string.as_bytes(t.claims.json)))
+    out
+}
+
+// One token on fresh state: its class and, when accepted, its projection. Class 9 is a
+// broken owner law: verify_jwt accepts what verify_jws refuses or they refuse differently,
+// a verified payload is not the claims text, or a verified token's tag is not its HMAC.
+fn reviewed_jwt_case(take raw: Bytes) -> (u8, String) {
+    let Ok(token) = string.from_utf8(take raw) else {
+        return (8u8, string.new())
+    }
+    let jws = jwt.verify_jws(token, jwt.allow(Hs256), hs_key())
+    let checked = jwt.verify_jwt(token, rules(REVIEWED_JWT_NOW, 0, None, None), hs_key())
+    match (take jws, take checked) {
+        (Error(a), Error(b)) => if reviewed_jwt_class(a) == reviewed_jwt_class(b) {
+            (reviewed_jwt_class(a), string.new())
+        } else {
+            (9u8, string.new())
+        },
+        (Error(_), Ok(_)) => (9u8, string.new()),
+        (Ok(_), Error(e)) => {
+            let class = reviewed_jwt_class(e)
+            if reviewed_jwt_tagged(token) && (class == 1u8 || class >= 5u8) {
+                (class, string.new())
+            } else {
+                (9u8, string.new())
+            }
+        },
+        (Ok(seen), Ok(t)) => if reviewed_jwt_tagged(token) && seen.payload == string.as_bytes(t.claims.json) {
+            (0u8, reviewed_jwt_shown(t))
+        } else {
+            (9u8, string.new())
+        },
+    }
+}
+
+fn reviewed_field(row: String, mut at: u64) -> View[String] in row {
+    let start = at
+    let end = match string.find(row, start, " ") {
+        Some(space) => space,
+        None => string.byte_len(row),
+    }
+    at = end + 1
+    string.slice(row, start, end)
+}
+
+fn reviewed_bytes(field: String) -> Bytes {
+    if field == "-" {
+        return b""
+    }
+    unhex(field)
+}
+
+// Every reviewed case twice, each run from fresh state: both runs and the reviewed
+// observation agree. The result is the number of completed cases.
+// expect: run reviewed_jwt() = 16
+fn reviewed_jwt() -> u64 {
+    let data = REVIEWED_JWT
+    let mut at: u64 = 0
+    let mut completed: u64 = 0
+    while at < string.byte_len(data) {
+        let end = option.unwrap(string.find(data, at, "\n"))
+        let row = string.slice(data, at, end)
+        let mut next: u64 = 0
+        let id = reviewed_field(row, mut next)
+        let class = reviewed_field(row, mut next)
+        let _ = reviewed_field(row, mut next)
+        let raw = reviewed_bytes(reviewed_field(row, mut next))
+        let projection = reviewed_bytes(reviewed_field(row, mut next))
+        let (first, shown) = reviewed_jwt_case(clone(raw))
+        let (second, replayed) = reviewed_jwt_case(take raw)
+        if first != second || shown != replayed || reviewed_jwt_name(first) != class || string.as_bytes(shown) != projection {
+            fail(string.from(id))
+        }
+        completed += 1
+        at = end + 1
+    }
+    completed
+}

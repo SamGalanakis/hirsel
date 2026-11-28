@@ -106,3 +106,37 @@ fn one_sequence(bytes: &[u8]) -> bool {
     };
     content.len() == len
 }
+
+#[cfg(test)]
+pub(crate) mod laws {
+    use super::*;
+    use crate::Pattern;
+
+    /// A TLS verification name's owner predicate (the `net` decoder cohort,
+    /// `ip::laws`). An accepted name reads back as itself, is the one name its
+    /// exact pattern covers, and a DNS name already in that form is one
+    /// `tls.hello` may hand out.
+    pub(crate) fn name(bytes: &[u8]) -> Result<String, String> {
+        let Some(name) = verification_name(bytes) else {
+            let reason = match std::str::from_utf8(bytes) {
+                Ok(_) => "name",
+                Err(_) => "utf8",
+            };
+            return Err(reason.into());
+        };
+        let (kind, text) = match &name {
+            Name::Ip(ip) => ("ip", ip.to_string()),
+            Name::Dns(dns) => ("dns", dns.to_string()),
+        };
+        assert_eq!(
+            verification_name(text.as_bytes()).as_ref(),
+            Some(&name),
+            "an accepted name does not read back"
+        );
+        assert!(Pattern::Exact(name.clone()).covers(&name));
+        if kind == "dns" && text.as_bytes() == bytes {
+            assert!(hello_name(bytes), "a verification name is no hello name");
+        }
+        Ok(format!("{kind}:{text}"))
+    }
+}

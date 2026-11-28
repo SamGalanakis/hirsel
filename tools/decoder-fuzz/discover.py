@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Nightly decoder discovery (the board's "Decoder discovery" row).
 
-Two workers: the Rust libFuzzer host of the package archive reader, one input
-per fresh child, and the covered native image of std's HTTP/1 head parser,
-which searches in one warm worker (native_worker.Warm). Each fresh run has its
+Two kinds of worker: a Rust cohort's libFuzzer host (HOSTS), one input per fresh
+child, and a native cohort's covered law image (NATIVES), which searches in one
+warm worker (native_worker.Warm). Each fresh run has its
 own raw coverage file, read against the map of the build that wrote it; a warm
 case reads back its target's flags. Only decoder sites count. The driver saves
 the case before it starts a worker or asks the warm one, replays a lost warm
@@ -11,7 +11,7 @@ case in a fresh child, saves a failure before it shrinks it, shrinks and
 confirms it in fresh children, and accounts search and reduction child CPU
 apart.
 
-    discover.py nightly --host H --compiler C --runtime R --out DIR --alert FILE
+    discover.py nightly --host H... --compiler C --runtime R --out DIR --alert FILE
     discover.py qualify ...   # the same row, then its one-time qualification checks
 
 Exit status: 0 green, 1 a confirmed failure, 2 incomplete, 75 deferred (no spare CPU).
@@ -59,34 +59,69 @@ def reviewed(bundle, target):
             for case in document["cases"] if case["target"] == target}
 
 
+# The native cohorts (native_worker.TARGETS has each one's law and build). `pair` are
+# two reviewed cases of different reach; `mismatch` a reviewed case and a status it
+# does not have, the seeded oracle mismatch.
+NATIVES = {
+    "http1": {
+        "limit": 512,
+        "tokens": (b"\r\n", b"\n", b"\r\n\r\n", b"GET ", b"POST ", b" HTTP/1.1", b" HTTP/1.0", b": ", b"Host", b" ",
+                   b"\t", b"/", b"?", b"\x00", b"\x7f", b"\xff", b":", b"HTTP/"),
+        "pair": ("control-get", "control-get-leading-crlf"), "mismatch": ("control-get", "partial"),
+    },
+    "json": {
+        "limit": 512,
+        "tokens": (b"{", b"}", b"[", b"]", b":", b",", b'"', b"\\", b"\\u", b"\\ud83d", b"null", b"true", b"false",
+                   b"-", b"0", b".", b"e", b"1e999", b" ", b"\n", b"\x00", b"\xff", b"\xc3\xa9"),
+        "pair": ("accepted-scalars", "refused-syntax-trailing-comma"), "mismatch": ("accepted-scalars", "syntax"),
+    },
+    "jwt": {
+        "limit": 1024,
+        "tokens": (b".", b"eyJhbGciOiJIUzI1NiJ9", b"eyJhbGciOiJub25lIn0", b"eyJ", b"e30", b"-", b"_", b"=", b"+", b"/",
+                   b"A", b"\x00", b"\xff", b" "),
+        "pair": ("accepted-rfc7515-a1", "refused-two-segments"), "mismatch": ("accepted-rfc7515-a1", "expired"),
+    },
+    "quic-tls": {
+        "limit": 512,
+        "tokens": (b"\x01\x00\x00", b"\x02", b"\x00", b"\xff", b"\x03\x03", b"\x03\x04", b"\x00\x2b", b"\x00\x33",
+                   b"\x00\x0a", b"\x00\x0d", b"\x00\x10", b"\x00\x39", b"\x00\x00", b"\x13\x01", b"\x00\x1d",
+                   b"\x3f\xfd", b"\x01\x00"),
+        "pair": ("accepted-rfc9001-a2", "refused-server-hello"), "mismatch": ("accepted-rfc9001-a2", "partial"),
+    },
+    "qpack": {
+        "limit": 256,
+        "tokens": (b"\x00", b"\x01", b"\x02", b"\x03", b"\x00\x00", b"\xd1", b"\xc1", b"\xff\x23", b"\x51", b"\x50",
+                   b"\x23", b"\x80", b"\x10", b"\x20", b"\x40", b"\x7f", b"\xff", b"\x8c"),
+        "pair": ("accepted-rfc9204-b1", "refused-decoder-section-acknowledgment"),
+        "mismatch": ("accepted-rfc9204-b1", "decompression"),
+    },
+}
+
+
 class Native:
-    """std's HTTP/1 request-head parser: `hirsel test --coverage` with std as source.
+    """A native decoder cohort: its owner law under `hirsel test --coverage`.
 
     Search cases run warm; a fault, shrinking and confirmation run fresh.
     """
-    name = "http1"
-    accepted = ("complete",)
-    limit = 512
-    tokens = (b"\r\n", b"\n", b"\r\n\r\n", b"GET ", b"POST ", b" HTTP/1.1", b" HTTP/1.0", b": ", b"Host", b" ", b"\t",
-              b"/", b"?", b"\x00", b"\x7f", b"\xff", b":", b"HTTP/")
-    mismatch = ("control-get", "partial")
 
-    def __init__(self, args):
+    def __init__(self, name, args):
+        self.name = name
+        vars(self).update(NATIVES[name])
+        self.accepted = native_worker.TARGETS[name]["statuses"][:1]
         self.compiler, self.runtime = args.compiler, args.runtime
         self.warm = args.worker == "warm"
 
     def cases(self):
-        return {name: {"input": raw, "schedule": native_worker.partition(case["schedules"][0], len(raw))}
-                for name, (raw, case) in reviewed("http1.json", "http1").items()}
+        return native_worker.reviewed_cases(self.name)
 
     def controls(self):
-        return native_worker.CONTROLS
+        return self.pair
 
     def schedule(self, raw, seed):
-        return native_worker.schedule(raw, seed)
+        return native_worker.schedule(self.name, raw, seed)
 
     def prepare(self, work):
-        return native_worker.prepare_warm(self.compiler, self.runtime, work, targets=(self.name,))[self.name]
+        return native_worker.prepare_warm(self.compiler, self.runtime, work, self.name)
 
     def sites(self, image):
         return native_worker.warm_sites(image)
@@ -95,39 +130,114 @@ class Native:
         return native_worker.fresh(image, sites, case, raw_file, **options)
 
     def replay(self, image, case, payload):
-        environment = native_worker.case_environment(case["input"], case["schedule"], case.get("expect"))
+        environment = native_worker.warm_variables(image, case)
         return " ".join(f"{key}={value}" for key, value in environment.items()) + " " + image["executable"]
 
 
-class Host:
-    """The package archive frame reader: the libFuzzer host in the driver's test configuration."""
-    name = "archive"
-    accepted = ("decoded",)
-    limit = 1024
-    tokens = (b"\x28\xb5\x2f\xfd", b"\x00", b"\xff", b"\x01\x00\x00", b"\x20", b"\x60", b"\xe0", b"\x80")
-    mismatch = ("block-rle", "refused")
-    warm = False
-    test = "package_content::archive::host_target::libfuzzer"
-    source = "crates/hirsel-core-driver/src/package_content/archive.rs"
+def production(path):
+    """The line of a source file's first test item: production code precedes it.
+    A gated one-line declaration (`mod laws;`) is not one."""
+    lines = path.read_text().splitlines()
+    for number, line in enumerate(lines, 1):
+        if line.startswith(("#[test]", "#[cfg(test)]", "#[cfg(fuzzing)]", "#[cfg(all(test")):
+            item = next((later for later in lines[number:] if not later.startswith("#[")), "")
+            if not item.endswith(";"):
+                return number
+    return len(lines) + 1
 
-    def __init__(self, args):
-        self.executable, self.llvm = args.host, args.llvm
+
+# The Rust cohorts. Each is a libFuzzer host in its owner crate's test
+# configuration (`crate` is that executable's name; `test` its callback).
+# Decoder sites are the counters of `symbols` whose innermost line is production
+# code of `sources`, under `root`. A cohort of several `surfaces` takes one
+# selector byte before the surface's bytes, so an edited input keeps its parent's.
+HOSTS = {
+    "archive": {
+        "crate": "hirsel_core_driver", "test": "package_content::archive::host_target::libfuzzer",
+        "bundle": "archive.json", "symbols": "15package_content7archive",
+        "root": "crates/hirsel-core-driver/src/package_content", "sources": ("archive.rs",),
+        "accepted": ("decoded",), "limit": 1024, "reads": True,
+        "tokens": (b"\x28\xb5\x2f\xfd", b"\x00", b"\xff", b"\x01\x00\x00", b"\x20", b"\x60", b"\xe0", b"\x80"),
+        "pair": ("block-rle", "truncated-before-block"), "mismatch": ("block-rle", "refused"),
+    },
+    "hcfg": {
+        "crate": "hirsel_data", "test": "tests::host_target::libfuzzer", "bundle": "hcfg.json",
+        "symbols": "11hirsel_data", "root": "crates/hirsel-data/src",
+        "sources": ("lib.rs", "read.rs", "scalar.rs", "decoded.rs", "declaration.rs", "guest.rs", "guest/wire.rs"),
+        "accepted": ("decoded",), "limit": 4608,
+        "tokens": (b"orders_v1.Site(", b"(", b")", b"[", b"]", b", ", b": ", b'"', b"\n", b"Sec(", b"Tiered(", b"banner",
+                   b"timeout", b"residency", b"cache", b"0", b"18446744073709551616", b"\\", b"//", b"\x00", b"\xff"),
+        "pair": ("accepted-site", "budget-collection"), "mismatch": ("accepted-site", "invalid"),
+    },
+    "module": {
+        "crate": "hirsel_mod", "test": "tests::host_target::libfuzzer", "bundle": "module.json",
+        "symbols": "10hirsel_mod", "root": "crates/hirsel-mod/src", "sources": ("lib.rs", "read.rs", "rows.rs"),
+        "accepted": ("parsed",), "limit": 32768,
+        "tokens": (b"HIRMOD\x00\x01", b"\x00", b"\xff", b"\x00\x00\x00\x00", b"\xff\xff\xff\xff", b"\x01\x00\x00\x00",
+                   b"\x08\x00\x00\x00", b"\x40\x00\x00\x00", b"\x00\x10\x00\x00", b"\x80"),
+        "pair": ("cranelift-product", "refused-short-header"), "mismatch": ("cranelift-product", "malformed"),
+    },
+    "net": {
+        "crate": "hirsel_core_net", "test": "ip::host_target::libfuzzer", "bundle": "net.json",
+        "symbols": "15hirsel_core_net", "root": "crates/hirsel-core-net/src",
+        "sources": ("ip.rs", "tls.rs", "tls_rule.rs", "scram.rs"),
+        "surfaces": ("address-records", "tls-name", "tls-policy", "scram"),
+        "accepted": ("accepted",), "limit": 512,
+        "tokens": (b"\x00", b"\x01", b"\xff", b".", b"*.", b":", b"::", b",", b" ", b"\t", b"-", b"\n", b"=", b"Tls ",
+                   b"System", b"Roots=sha256:", b"example.com", b"n,,", b"p=tls-server-end-point,,", b"n=user", b"r=",
+                   b"s=", b"i=4096", b"i=1", b"v=", b"c=biws", b"p=", b"e="),
+        "pair": ("records-v4-then-v6", "scram-rfc7677"), "mismatch": ("records-v4-then-v6", "refused"),
+    },
+    "registry": {
+        "crate": "hirsel_core_driver", "test": "registry_verify::laws::reviewed::host_target::libfuzzer",
+        "bundle": "registry.json", "symbols": "15registry_verify", "root": "crates/hirsel-core-driver/src",
+        "sources": ("registry_verify.rs", "registry_verify/notes.rs", "registry_verify/status.rs",
+                    "registry_verify/tiles.rs"),
+        "surfaces": ("note", "status", "inclusion"),
+        "accepted": ("accepted",), "limit": 4096,
+        "tokens": (b"\x00", b"\x01", b"\xff", b"\n", b"\n\n", b"\xe2\x80\x94 ", b" ", b"packages.example/log",
+                   b"packages.example/status", b"packages.example/", b'["release",', b'["retire",', b'["reinstate",',
+                   b'["takedown",', b'"', b",", b"]", b"@1", b"0", b"="),
+        "pair": ("note-two-witnesses", "status-two-releases-interleaved"),
+        "mismatch": ("note-two-witnesses", "refused"),
+    },
+}
+
+
+class Host:
+    """A Rust decoder cohort: the libFuzzer host in its owner crate's test configuration."""
+    warm = False
+    surfaces = ()
+    reads = False
+
+    def __init__(self, name, args):
+        self.name = name
+        vars(self).update(HOSTS[name])
+        self.executable = next((host for host in args.host if host.name == self.crate), None)
+        self.llvm = args.llvm
 
     def cases(self):
-        return {name: {"input": raw, "schedule": case["schedules"][1]["max_read"]}
-                for name, (raw, case) in reviewed("archive.json", "archive").items()}
+        cases = {}
+        for name, (raw, case) in reviewed(self.bundle, self.name).items():
+            if self.surfaces:
+                raw = bytes([self.surfaces.index(case["setup"]["surface"])]) + raw
+            # The archive reader's schedule is its largest read. The others read their input whole.
+            cases[name] = {"input": raw, "schedule": case["schedules"][1]["max_read"] if self.reads else 0}
+        return cases
 
     def controls(self):
-        return ("block-rle", "truncated-before-block")
+        return self.pair
 
     def schedule(self, raw, seed):
-        return 1 + seed % 7
+        return 1 + seed % 7 if self.reads else 0
 
     def command(self):
         return [str(self.executable), "--exact", self.test, "--nocapture", "--test-threads", "1"]
 
     def prepare(self, work):
-        """Name each decoder counter of this build once: its innermost source line in the reader."""
+        """Name each decoder counter of this build once: its innermost source line in the decoder."""
+        if self.executable is None:
+            raise ValueError(f"no --host is the {self.crate} harness")
         work.mkdir(parents=True, exist_ok=True)
         started = child_cpu()
         described = work / "pcs"
@@ -142,12 +252,12 @@ class Host:
         if (magic, version) != ("hirsel-decoder-pcs", "1") or len(table) != 8 * int(count):
             raise ValueError("unreadable counter description")
         addresses = struct.unpack(f"<{count}Q", table)
-        # Reader code is in symbols of the archive module, or inlined into them.
+        # Decoder code is in symbols of the owner module or crate, or inlined into them.
         symbols = subprocess.run([str(self.llvm / "llvm-nm"), "--defined-only", "-n", "-S", str(self.executable)],
                                  capture_output=True, text=True, check=True).stdout
         ranges = sorted((int(start, 16), int(start, 16) + int(size, 16)) for start, size, kind, name in
                         (line.split() for line in symbols.splitlines() if line.count(" ") == 3)
-                        if kind in "tT" and "15package_content7archive" in name)
+                        if kind in "tT" and self.symbols in name)
         starts = [start for start, _ in ranges]
         candidates = [index for index, address in enumerate(addresses) if address and (
             at := bisect.bisect_right(starts, address) - 1) >= 0 and address < ranges[at][1]]
@@ -155,16 +265,16 @@ class Host:
             [str(self.llvm / "llvm-symbolizer"), "--obj=" + str(self.executable), "--output-style=JSON"],
             input="".join(f"{addresses[index]:#x}\n" for index in candidates), capture_output=True, text=True,
             check=True).stdout
-        # Production code precedes the module's first test item.
-        lines = (ROOT / self.source).read_text().splitlines()
-        tests = next(number for number, line in enumerate(lines, 1) if line.startswith(("#[test]", "#[cfg(test)]")))
+        tests = {source: production(ROOT / self.root / source) for source in self.sources}
         sites, names, seen = [], [], {}
         for index, row in zip(candidates, map(json.loads, placed.splitlines())):
             frame = (row.get("Symbol") or [{}])[0]
-            if not frame.get("FileName", "").endswith(self.source) or not 0 < frame.get("Line", 0) < tests:
+            source = next((source for source in self.sources
+                           if frame.get("FileName", "").endswith(f"{self.root}/{source}")), None)
+            if source is None or not 0 < frame.get("Line", 0) < tests[source]:
                 continue
             function = frame["FunctionName"].split("::<")[0].rsplit("::", 1)[-1]
-            key = f"archive.rs:{frame['Line']}:{frame['Column']} {function}"
+            key = f"{source}:{frame['Line']}:{frame['Column']} {function}"
             ordinal = seen[key, frame["FunctionName"]] = seen.get((key, frame["FunctionName"]), -1) + 1
             sites.append(index)
             names.append(f"{key}#{ordinal}")
@@ -530,6 +640,8 @@ class Row:
             if digest(data) in seen:
                 skipped += 1
                 continue
+            # Short parents repeat their mutants: only an unbroken run of repeats ends the search.
+            skipped = 0
             seen.add(digest(data))
             case = self.case(data, {"seed": self.args.seed, "parent": digest(parent["input"]), "run": self.runs},
                              seed=seed)
@@ -622,7 +734,8 @@ def qualify(target, image, out, args, row, cases):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("mode", choices=("nightly", "qualify"))
-    parser.add_argument("--host", type=Path, required=True, help="//:hirsel-core-driver-decoder-fuzz")
+    parser.add_argument("--host", type=Path, action="append", default=[],
+                        help="a //:<crate>-decoder-fuzz executable; one per host crate")
     parser.add_argument("--compiler", type=Path, required=True)
     parser.add_argument("--runtime", type=Path, required=True)
     parser.add_argument("--llvm", type=Path, default=ROOT / "tools/buck2/toolchains/llvm-files/bin")
@@ -633,15 +746,18 @@ def main():
     parser.add_argument("--reduction-cpu-seconds", type=float, default=10)
     parser.add_argument("--capacity-window", type=float, default=2)
     parser.add_argument("--worker", choices=("warm", "fresh"), default="warm",
-                        help="the native target's search worker (fresh: one child per case)")
+                        help="the native targets' search worker (fresh: one child per case)")
     parser.add_argument("--max-runs", type=int, help=argparse.SUPPRESS)
-    parser.add_argument("--targets", default="archive,http1", help=argparse.SUPPRESS)
+    parser.add_argument("--targets", default=",".join((*HOSTS, *NATIVES)), help=argparse.SUPPRESS)
     args = parser.parse_args()
-    args.host, args.compiler, args.runtime = args.host.resolve(), args.compiler.resolve(), args.runtime.resolve()
+    args.host = [host.resolve() for host in args.host]
+    args.compiler, args.runtime = args.compiler.resolve(), args.runtime.resolve()
     args.out.mkdir(parents=True, exist_ok=True)
     args.out, args.alert = args.out.resolve(), args.alert.resolve()
     started = time.time()
-    targets = [kind(args) for kind in (Host, Native) if kind.name in args.targets.split(",")]
+    selected = args.targets.split(",")
+    targets = [kind(name, args) for kind, names in ((Host, HOSTS), (Native, NATIVES)) for name in names
+               if name in selected]
     # One worker runs at a time, so the row needs one idle CPU of its allocation.
     cpus = sorted(os.sched_getaffinity(0))
     idle = spare_cpus(cpus, args.capacity_window)

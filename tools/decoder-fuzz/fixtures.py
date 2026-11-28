@@ -4,6 +4,10 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import struct
+
+ROOT = Path(__file__).resolve().parents[2]
+CORPUS = ROOT / "core/tests/decoder-corpus"
 
 
 def unique(pairs):
@@ -129,12 +133,121 @@ def http_body(case, raw):
     return '\n'.join(lines + ['    true', '}', ''])
 
 
+# The native cohorts whose owner law reads a test-only projection of its bundle:
+# one constant in the owner source, a row per case. `classes` are the law's
+# result classes by exit digit; `selectors` name a cohort's surfaces by the byte
+# that selects one. `streaming` cohorts take each schedule as a partition and
+# record the partial steps it witnesses.
+NATIVE = {
+    "json": {
+        "law": "reviewed_json", "input_kind": "json-text", "oracle": "python-json",
+        "source": "core/std/tests/json.hirsel", "constant": "REVIEWED_JSON",
+        "classes": ("accepted", "syntax", "not-finite", "depth", "utf8", "other"),
+    },
+    "jwt": {
+        "law": "reviewed_jwt", "input_kind": "compact-jws", "oracle": "python-hmac-rfc7515",
+        "source": "core/std/tests/jwt.hirsel", "constant": "REVIEWED_JWT",
+        "classes": ("accepted", "malformed", "unsupported", "key", "bad-signature", "expired", "not-yet-valid",
+                    "mismatch", "not-text"),
+    },
+    "quic-tls": {
+        "law": "reviewed_crypto_stream", "input_kind": "crypto-stream", "oracle": "python-rfc8446-client-hello",
+        "source": "core/programs/quic/initial_laws.hirsel", "constant": "REVIEWED_QUIC_TLS", "streaming": True,
+        "classes": ("accepted", "partial", "tls-alert", "crypto-buffer", "other-message"),
+    },
+    "qpack": {
+        "law": "reviewed_qpack", "input_kind": "qpack-wire", "oracle": "python-rfc9204-static",
+        "source": "core/programs/webtransport/laws.hirsel", "constant": "REVIEWED_QPACK", "streaming": True,
+        "classes": ("accepted", "partial", "decompression", "encoder-stream", "decoder-stream", "too-large",
+                    "surface"),
+        "selectors": ("section:4096", "decoder-stream", "encoder-stream", "section:64"),
+    },
+}
+
+
+def selector(stem, case):
+    """The byte that selects a case's surface: 0 for a cohort of one surface."""
+    names = NATIVE[stem].get("selectors")
+    if names is None:
+        return 0
+    surface = case["setup"]["surface"]
+    return names.index(f"{surface}:{case['limits']['max_size']}" if surface == "section" else surface)
+
+
+def native_cases(stem):
+    """A native cohort's reviewed cases: input, surface selector, partitions and expected observation."""
+    cohort = NATIVE[stem]
+    bundle = select(CORPUS / f"{stem}.json", stem, cohort["law"])
+    cases = []
+    for case in bundle["cases"]:
+        raw = bytes.fromhex(bundle["objects"][case["digest"]])
+        expected = case["expected"]
+        streaming = cohort.get("streaming", False)
+        keys(expected, "class", "projection_hex", *(("partials",) if streaming else ()))
+        if (case["input_kind"], case["oracle"]["name"]) != (cohort["input_kind"], cohort["oracle"]):
+            raise ValueError(f"{case['id']}: wrong input kind or oracle")
+        if expected["class"] not in cohort["classes"]:
+            raise ValueError(f"{case['id']}: unknown class {expected['class']!r}")
+        if streaming:
+            ends = [partition(schedule, len(raw)) for schedule in case["schedules"]]
+            partials = expected["partials"]
+            if not isinstance(partials, list) or len(partials) != len(ends):
+                raise ValueError(f"{case['id']}: one partial count per schedule")
+        elif case["schedules"] != [{"kind": "contiguous"}]:
+            raise ValueError(f"{case['id']}: a whole-input decoder has the contiguous schedule")
+        else:
+            ends, partials = [], []
+        cases.append({"id": case["id"], "input": raw, "selector": selector(stem, case), "ends": ends,
+                      "partials": [number(n, 0, len(raw) + 1) for n in partials], "class": expected["class"],
+                      "projection": bytes.fromhex(expected["projection_hex"])})
+    return cases
+
+
+def packed(ends):
+    return b"".join(struct.pack(">H", end) for end in ends)
+
+
+def native_rows(stem):
+    """Rows `id class selector input projection schedules`: hex fields, `-` for an empty one."""
+    def field(data):
+        return data.hex() or "-"
+    rows = []
+    for case in native_cases(stem):
+        schedules = ",".join(f"{field(packed(ends))}:{partial}" for ends, partial in zip(case["ends"], case["partials"]))
+        rows.append(f"{case['id']} {case['class']} {case['selector']} {field(case['input'])} "
+                    f"{field(case['projection'])} {schedules or '-'}\n")
+    return "".join(rows)
+
+
+def project(stem, write):
+    """The cohort's projection line; `write` replaces it in the owner source."""
+    cohort = NATIVE[stem]
+    prefix = f"const {cohort['constant']}: String = "
+    line = prefix + json.dumps(native_rows(stem))
+    if write:
+        source = ROOT / cohort["source"]
+        lines = source.read_text().split("\n")
+        at = [index for index, text in enumerate(lines) if text.startswith(prefix)]
+        if len(at) != 1:
+            raise ValueError(f"{cohort['source']}: expected one {cohort['constant']} line")
+        lines[at[0]] = line
+        source.write_text("\n".join(lines))
+    return line
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    project = commands.add_parser("http1")
-    project.add_argument("bundle", type=Path)
+    project_http = commands.add_parser("http1")
+    project_http.add_argument("bundle", type=Path)
+    rows = commands.add_parser("rows", help="a native cohort's projection constant")
+    rows.add_argument("stem", choices=sorted(NATIVE))
+    rows.add_argument("--write", action="store_true", help="replace the constant in the owner source")
     args = parser.parse_args()
+    if args.command == "rows":
+        line = project(args.stem, args.write)
+        if not args.write:
+            print(line)
     if args.command == "http1":
         bundle = select(args.bundle, "http1", "reviewed_fragmentation")
         rows = []

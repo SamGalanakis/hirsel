@@ -115,6 +115,14 @@ DECODER_FUZZ_COVERAGE = [
     "-Cllvm-args=-sanitizer-coverage-trace-compares",
 ]
 
+# The unit harnesses that own a Rust decoder cohort of nightly discovery.
+DECODER_FUZZ_HOSTS = [
+    "hirsel-core-driver-unittest",
+    "hirsel-core-net-unittest",
+    "hirsel-data-unittest",
+    "hirsel-mod-unittest",
+]
+
 def _env_set(key, value):
     return "--env-set={}={}".format(key, value)
 
@@ -318,14 +326,14 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
             labels = ["gate"],
             visibility = ["PUBLIC"],
         )
-    if name == "hirsel-core-driver-unittest":
-        # Nightly decoder discovery's libFuzzer host (tools/decoder-fuzz): the
+    if name in DECODER_FUZZ_HOSTS:
+        # Nightly decoder discovery's libFuzzer hosts (tools/decoder-fuzz): a
         # unit harness's sources and dependencies again, under cfg(fuzzing),
-        # with sanitizer coverage in this crate and the pinned libFuzzer
-        # runtime. It is opt-in: no test rule names it, so its different flags
-        # key a separate compile that pre-push selection never builds.
+        # with sanitizer coverage in that crate and the pinned libFuzzer
+        # runtime. Each is opt-in: no test rule names it, so its different
+        # flags key a separate compile that pre-push selection never builds.
         native.rust_binary(
-            name = "hirsel-core-driver-decoder-fuzz",
+            name = package_name + "-decoder-fuzz",
             incoming_transition = "root//tools/buck2:test_tool_transition",
             crate = crate,
             crate_root = crate_root,

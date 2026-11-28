@@ -1,10 +1,12 @@
-//! The libFuzzer host of the package archive frame reader. It is a module of
-//! `hirsel-core-driver`'s test configuration (`package_content::archive`), so
-//! its one byte callback calls the crate-private owner predicate that
-//! `reviewed_short_reads` calls. tools/decoder-fuzz/discover.py runs it on one
-//! input per process and reads that run's raw file against the build's site map.
+//! The libFuzzer host of a Rust decoder cohort. It is a module of the owning
+//! crate's test configuration, declared beside the owner's reviewed law, so
+//! its one byte callback calls the crate-private owner predicate that the
+//! reviewed test calls: the enclosing module's
+//! `discovered(input, schedule, expect) -> String`, which returns the
+//! observation (its first word is the status) and panics when a law breaks.
+//! tools/decoder-fuzz/discover.py runs it on one input per process and reads
+//! that run's raw file against the build's site map.
 
-use super::short_reads;
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::fs::File;
 use std::io::Write;
@@ -22,7 +24,36 @@ unsafe extern "C" {
     static __stop___sancov_cntrs: u8;
     static __start___sancov_pcs: [usize; 2];
     static __stop___sancov_pcs: [usize; 2];
+    fn dl_iterate_phdr(
+        callback: unsafe extern "C" fn(*mut Loaded, usize, *mut c_void) -> c_int,
+        data: *mut c_void,
+    ) -> c_int;
 }
+
+/// The loader's record of one object and one of its program headers
+/// (`dl_phdr_info` and `Elf64_Phdr`), declared here so a host crate needs no
+/// dependency for them.
+#[repr(C)]
+struct Loaded {
+    address: u64,
+    name: *const c_char,
+    headers: *const Header,
+    count: u16,
+}
+
+#[repr(C)]
+struct Header {
+    kind: u32,
+    flags: u32,
+    offset: u64,
+    address: u64,
+    physical: u64,
+    file_size: u64,
+    memory_size: u64,
+    align: u64,
+}
+
+const PT_NOTE: u32 = 4;
 
 /// One run's raw file: the build it belongs to, then what the run reached.
 struct Raw {
@@ -53,23 +84,19 @@ fn pcs() -> &'static [[usize; 2]] {
 
 /// The executable's load bias and GNU build ID.
 fn identity() -> (usize, String) {
-    unsafe extern "C" fn first(
-        info: *mut libc::dl_phdr_info,
-        _: usize,
-        data: *mut c_void,
-    ) -> c_int {
+    unsafe extern "C" fn first(info: *mut Loaded, _: usize, data: *mut c_void) -> c_int {
         // SAFETY: the loader passes a valid record; `data` is the caller's pair.
         unsafe {
             let info = &*info;
             let found = &mut *data.cast::<(usize, String)>();
-            found.0 = info.dlpi_addr as usize;
-            for header in std::slice::from_raw_parts(info.dlpi_phdr, info.dlpi_phnum as usize) {
-                if header.p_type != libc::PT_NOTE {
+            found.0 = info.address as usize;
+            for header in std::slice::from_raw_parts(info.headers, info.count as usize) {
+                if header.kind != PT_NOTE {
                     continue;
                 }
                 let notes = std::slice::from_raw_parts(
-                    (found.0 + header.p_vaddr as usize) as *const u8,
-                    header.p_memsz as usize,
+                    (found.0 + header.address as usize) as *const u8,
+                    header.memory_size as usize,
                 );
                 let mut at = 0;
                 while at + 12 <= notes.len() {
@@ -96,7 +123,7 @@ fn identity() -> (usize, String) {
     }
     let mut found = (0, String::new());
     // SAFETY: the callback only reads the loader's records during this call.
-    unsafe { libc::dl_iterate_phdr(Some(first), (&raw mut found).cast()) };
+    unsafe { dl_iterate_phdr(first, (&raw mut found).cast()) };
     assert!(!found.1.is_empty(), "executable has no GNU build ID");
     found
 }
@@ -160,9 +187,10 @@ extern "C" fn test_one_input(data: *const u8, size: usize) -> c_int {
         }
         counters().fill(0);
     }
-    let max_read = variable("HIRSEL_DECODER_MAX_READ").map_or(3, |value| value.parse().unwrap());
+    // The owner reads the schedule word: the archive's largest read, for one.
+    let schedule = variable("HIRSEL_DECODER_MAX_READ").map_or(3, |value| value.parse().unwrap());
     let expect = variable("HIRSEL_DECODER_EXPECT");
-    let observation = short_reads::discovered(input, max_read, expect.as_deref());
+    let observation = super::discovered(input, schedule, expect.as_deref());
     finish(&format!("observed {observation}"));
     0
 }

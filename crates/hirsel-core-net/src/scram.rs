@@ -265,3 +265,45 @@ fn normalize(password: &[u8]) -> Cow<'_, [u8]> {
     }
     Cow::Owned(mapped.nfkc().collect::<String>().into_bytes())
 }
+
+#[cfg(test)]
+pub(crate) mod laws {
+    use super::*;
+
+    /// The password of every reviewed and discovered exchange.
+    pub(crate) const PASSWORD: &[u8] = b"pencil";
+
+    /// A SCRAM-SHA-256 exchange's owner predicate (the `net` decoder cohort,
+    /// `ip::laws`). The input is four lines: the channel binding in hex, the
+    /// client-first, server-first and server-final messages. An accepted
+    /// exchange projects its iteration count and client-final message.
+    pub(crate) fn exchange(bytes: &[u8]) -> Result<String, String> {
+        let mut lines = bytes.split(|&byte| byte == b'\n');
+        let (Some(binding), Some(client), Some(server), Some(last), None) = (
+            lines.next(),
+            lines.next(),
+            lines.next(),
+            lines.next(),
+            lines.next(),
+        ) else {
+            return Err("frame".into());
+        };
+        let binding = std::str::from_utf8(binding)
+            .ok()
+            .and_then(hirsel_core_ids::hex::decode)
+            .and_then(|binding| Binding::from_bytes(&binding))
+            .ok_or("frame")?;
+        let transcript =
+            Transcript::parse(client, server, &binding).map_err(|error| format!("{error:?}"))?;
+        let (message, signature) = transcript.derive(PASSWORD);
+        assert_eq!(message.len(), transcript.final_len());
+        if !verify(&signature, last) {
+            return Err("ServerSignature".into());
+        }
+        let message = String::from_utf8(message).expect("the client-final message is text");
+        Ok(format!(
+            "iterations={} final={message}",
+            transcript.iterations()
+        ))
+    }
+}

@@ -382,6 +382,8 @@ fn reviewed_short_reads() {
 #[cfg(all(test, fuzzing))]
 #[path = "../../../../tools/decoder-fuzz/host_target.rs"]
 mod host_target;
+#[cfg(all(test, fuzzing))]
+use short_reads::discovered;
 
 #[cfg(test)]
 mod short_reads {

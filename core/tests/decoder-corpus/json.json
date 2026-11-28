@@ -1,0 +1,423 @@
+{
+  "schema_version": 1,
+  "objects": {
+    "2c1ba6ac713bfc21e74f3429be952fca3e7a796734394fd18a48eb6713880d89": "22ff22",
+    "422b6e380acaa9ba096e424e88ae518cc55b4d8200909533189438a3002954bb": "22610a6222",
+    "432ee139fe86104a3f54d5c3ad36447e7446a61c830056b8361fc25d63e826f4": "5b6e756c6c2c747275652c66616c73652c302c2d312c312e352c2261225d",
+    "5704751eaa60246c3a6ebfcbae961c784ce9e456e11720b20b3e084ac4b01c97": "225c75303030315c745c225c5c5c2f22",
+    "7a38905296006c575d7d45d1d881690a3ee87361ed67ce64642e2504482da818": "5b7b7d2c5b5d5d",
+    "886ad6246ed150b2930495926ba07d579307bc7fecaf4b391650dca8bae7bc66": "5b312c5d",
+    "938db8c9f82c8cb58d3f3ef4fd250036a48d26a712753d2fde5abd03a85cabf4": "3031",
+    "97138117e7ec69c339ba9138949ece6a46baeecc192c6ad14ed8155e54173e4b": "7b22d0bad0bbd18ed187223a22d0b7d0bdd0b0d187d0b5d0bdd0b8d0b5222c226e223a3132333435363738393031323334353637383930313233343536373839307d",
+    "a844476cdcca918383dd7ed3ef8bf750b95bbe7abc750e6c39f85b03eca87b7a": "5b31653939395d",
+    "b81d4d68b67b94e0663eb228de7becf4e3ed6a585eea788f2597e28855b80dec": "207b20226b22203a205b2031202c207b20227822203a20227922207d205d202c0d0a09227a22203a20225c75303065395c6e22207d20",
+    "bbbe9eb3a1d1c2c271edf6367285d9edb35e8cbc2ce3e56e8ddceb2f0886f140": "7b7d2078",
+    "bf9ccb2c6b046c499dabdebed2f03905969c04d81b93b7f396977cad5d48cae7": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d",
+    "dbaec29ce2fb52a1a372e1da31b0d434d257fe11bebee2d31c6649710e3052a6": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d",
+    "e30439cb87e140c0b998ad3095285abfec0294e2a8916f9a8f30d85734e6f82b": "225c75643833645c756465303022",
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855": "",
+    "ffb38b22ee3e0ca90325ebce953a9846990f292faf44c50498771602e31cb61f": "7b2261223a"
+  },
+  "cases": [
+    {
+      "id": "accepted-control-escapes",
+      "target": "json",
+      "law": "reviewed_json",
+      "input_kind": "json-text",
+      "generator_version": 1,
+      "digest": "5704751eaa60246c3a6ebfcbae961c784ce9e456e11720b20b3e084ac4b01c97",
+      "limits": {
+        "depth": 128
+      },
+      "setup": {},
+      "oracle": {
+        "name": "python-json",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "225c75303030315c745c225c5c2f22"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "accepted-depth-128",
+      "target": "json",
+      "law": "reviewed_json",
+      "input_kind": "json-text",
+      "generator_version": 1,
+      "digest": "dbaec29ce2fb52a1a372e1da31b0d434d257fe11bebee2d31c6649710e3052a6",
+      "limits": {
+        "depth": 128
+      },
+      "setup": {},
+      "oracle": {
+        "name": "python-json",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "accepted-empty-containers",
+      "target": "json",
+      "law": "reviewed_json",
+      "input_kind": "json-text",
+      "generator_version": 1,
+      "digest": "7a38905296006c575d7d45d1d881690a3ee87361ed67ce64642e2504482da818",
+      "limits": {
+        "depth": 128
+      },
+      "setup": {},
+      "oracle": {
+        "name": "python-json",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "5b7b7d2c5b5d5d"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "accepted-object-spaced",
+      "target": "json",
+      "law": "reviewed_json",
+      "input_kind": "json-text",
+      "generator_version": 1,
+      "digest": "b81d4d68b67b94e0663eb228de7becf4e3ed6a585eea788f2597e28855b80dec",
+      "limits": {
+        "depth": 128
+      },
+      "setup": {},
+      "oracle": {
+        "name": "python-json",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "7b226b223a5b312c7b2278223a2279227d5d2c227a223a22c3a95c6e227d"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "accepted-scalars",
+      "target": "json",
+      "law": "reviewed_json",
+      "input_kind": "json-text",
+      "generator_version": 1,
+      "digest": "432ee139fe86104a3f54d5c3ad36447e7446a61c830056b8361fc25d63e826f4",
+      "limits": {
+        "depth": 128
+      },
+      "setup": {},
+      "oracle": {
+        "name": "python-json",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "5b6e756c6c2c747275652c66616c73652c302c2d312c312e352c2261225d"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "accepted-surrogate-pair",
+      "target": "json",
+      "law": "reviewed_json",
+      "input_kind": "json-text",
+      "generator_version": 1,
+      "digest": "e30439cb87e140c0b998ad3095285abfec0294e2a8916f9a8f30d85734e6f82b",
+      "limits": {
+        "depth": 128
+      },
+      "setup": {},
+      "oracle": {
+        "name": "python-json",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "22f09f988022"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "accepted-utf8-text",
+      "target": "json",
+      "law": "reviewed_json",
+      "input_kind": "json-text",
+      "generator_version": 1,
+      "digest": "97138117e7ec69c339ba9138949ece6a46baeecc192c6ad14ed8155e54173e4b",
+      "limits": {
+        "depth": 128
+      },
+      "setup": {},
+      "oracle": {
+        "name": "python-json",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "7b22d0bad0bbd18ed187223a22d0b7d0bdd0b0d187d0b5d0bdd0b8d0b5222c226e223a3132333435363738393031323334353637383930313233343536373839307d"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-depth-129",
+      "target": "json",
+      "law": "reviewed_json",
+      "input_kind": "json-text",
+      "generator_version": 1,
+      "digest": "bf9ccb2c6b046c499dabdebed2f03905969c04d81b93b7f396977cad5d48cae7",
+      "limits": {
+        "depth": 128
+      },
+      "setup": {},
+      "oracle": {
+        "name": "python-json",
+        "version": 1
+      },
+      "expected": {
+        "class": "depth",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-not-finite",
+      "target": "json",
+      "law": "reviewed_json",
+      "input_kind": "json-text",
+      "generator_version": 1,
+      "digest": "a844476cdcca918383dd7ed3ef8bf750b95bbe7abc750e6c39f85b03eca87b7a",
+      "limits": {
+        "depth": 128
+      },
+      "setup": {},
+      "oracle": {
+        "name": "python-json",
+        "version": 1
+      },
+      "expected": {
+        "class": "not-finite",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-syntax-empty",
+      "target": "json",
+      "law": "reviewed_json",
+      "input_kind": "json-text",
+      "generator_version": 1,
+      "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "limits": {
+        "depth": 128
+      },
+      "setup": {},
+      "oracle": {
+        "name": "python-json",
+        "version": 1
+      },
+      "expected": {
+        "class": "syntax",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-syntax-leading-zero",
+      "target": "json",
+      "law": "reviewed_json",
+      "input_kind": "json-text",
+      "generator_version": 1,
+      "digest": "938db8c9f82c8cb58d3f3ef4fd250036a48d26a712753d2fde5abd03a85cabf4",
+      "limits": {
+        "depth": 128
+      },
+      "setup": {},
+      "oracle": {
+        "name": "python-json",
+        "version": 1
+      },
+      "expected": {
+        "class": "syntax",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-syntax-raw-control",
+      "target": "json",
+      "law": "reviewed_json",
+      "input_kind": "json-text",
+      "generator_version": 1,
+      "digest": "422b6e380acaa9ba096e424e88ae518cc55b4d8200909533189438a3002954bb",
+      "limits": {
+        "depth": 128
+      },
+      "setup": {},
+      "oracle": {
+        "name": "python-json",
+        "version": 1
+      },
+      "expected": {
+        "class": "syntax",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-syntax-trailing-comma",
+      "target": "json",
+      "law": "reviewed_json",
+      "input_kind": "json-text",
+      "generator_version": 1,
+      "digest": "886ad6246ed150b2930495926ba07d579307bc7fecaf4b391650dca8bae7bc66",
+      "limits": {
+        "depth": 128
+      },
+      "setup": {},
+      "oracle": {
+        "name": "python-json",
+        "version": 1
+      },
+      "expected": {
+        "class": "syntax",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-syntax-trailing-value",
+      "target": "json",
+      "law": "reviewed_json",
+      "input_kind": "json-text",
+      "generator_version": 1,
+      "digest": "bbbe9eb3a1d1c2c271edf6367285d9edb35e8cbc2ce3e56e8ddceb2f0886f140",
+      "limits": {
+        "depth": 128
+      },
+      "setup": {},
+      "oracle": {
+        "name": "python-json",
+        "version": 1
+      },
+      "expected": {
+        "class": "syntax",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-syntax-truncated",
+      "target": "json",
+      "law": "reviewed_json",
+      "input_kind": "json-text",
+      "generator_version": 1,
+      "digest": "ffb38b22ee3e0ca90325ebce953a9846990f292faf44c50498771602e31cb61f",
+      "limits": {
+        "depth": 128
+      },
+      "setup": {},
+      "oracle": {
+        "name": "python-json",
+        "version": 1
+      },
+      "expected": {
+        "class": "syntax",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-utf8",
+      "target": "json",
+      "law": "reviewed_json",
+      "input_kind": "json-text",
+      "generator_version": 1,
+      "digest": "2c1ba6ac713bfc21e74f3429be952fca3e7a796734394fd18a48eb6713880d89",
+      "limits": {
+        "depth": 128
+      },
+      "setup": {},
+      "oracle": {
+        "name": "python-json",
+        "version": 1
+      },
+      "expected": {
+        "class": "utf8",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    }
+  ]
+}

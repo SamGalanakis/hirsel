@@ -1129,6 +1129,8 @@ dependencies = [
  "rustls",
  "sec1",
  "serde",
+ "serde_json",
+ "sha2 0.11.1",
  "stringprep",
  "subtle",
  "unicode-normalization",
@@ -1241,6 +1243,7 @@ dependencies = [
 name = "hirsel-data"
 version = "0.1.0"
 dependencies = [
+ "hirsel-core-ids",
  "hirsel-core-layout",
  "hirsel-core-syntax",
  "hirsel-guard",
@@ -1310,6 +1313,9 @@ dependencies = [
  "hirsel-core-ids",
  "hirsel-core-layout",
  "hirsel-guard",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
 ]
 
 [[package]]

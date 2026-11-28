@@ -279,3 +279,41 @@ impl TlsRule {
         Pattern::list_bytes(&self.patterns)
     }
 }
+
+#[cfg(test)]
+pub(crate) mod laws {
+    use super::*;
+
+    /// A TLS grant rule's owner predicate (the `net` decoder cohort,
+    /// `ip::laws`). An accepted rule has one canonical text that reads back as
+    /// the same rule, is its own intersection, and permits each name it lists.
+    pub(crate) fn policy(bytes: &[u8]) -> Result<String, String> {
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            return Err("utf8".into());
+        };
+        let Some(rule) = TlsRule::parse(text) else {
+            return Err("rule".into());
+        };
+        let trust = match rule.trust() {
+            TlsTrust::System => "System".to_owned(),
+            TlsTrust::Roots(digest) => {
+                format!("Roots=sha256:{}", hirsel_core_ids::hex::encode(&digest))
+            }
+            TlsTrust::Any => panic!("grant text named the served trust"),
+        };
+        let (first, last) = rule.ports();
+        let canonical = format!("Tls {} {first}-{last} {trust}", rule.pattern_text());
+        assert_eq!(
+            TlsRule::parse(&canonical).as_ref(),
+            Some(&rule),
+            "an accepted rule's text does not read back"
+        );
+        assert_eq!(rule.intersect(&rule).as_ref(), Some(&rule));
+        for pattern in &rule.patterns {
+            if let Pattern::Exact(name) = pattern {
+                assert!(rule.permits(name, first, rule.trust()));
+            }
+        }
+        Ok(canonical)
+    }
+}

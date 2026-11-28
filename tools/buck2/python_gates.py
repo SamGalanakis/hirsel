@@ -41,6 +41,10 @@ def python_gates(out, call, Raw):
         ("test-std-native", "core/tools/test_std_native.py",
          ["core/std/tests/io.hirsel", "core/tools/std_native_owners.json"] + std_inputs),
         ("test-boat-dispatch", "tools/test_boat_dispatch.py", ["tools/boat-dispatch", "tools/sim-campaign"]),
+        ("test-decoder-fixtures", "//tools/decoder-fuzz:test_fixtures.py",
+         ["//tools/decoder-fuzz:fixtures.py", "core/std/tests/json.hirsel", "core/std/tests/jwt.hirsel",
+          "core/programs/quic/initial_laws.hirsel", "core/programs/webtransport/laws.hirsel"]
+         + ["core/tests/decoder-corpus/{}.json".format(stem) for stem in ("json", "jwt", "quic-tls", "qpack")]),
         ("test-store-chaos", "tools/store-chaos/test_harness.py",
          ["tools/store-chaos/history.py", "tools/store-chaos/log_writes.py",
           "tools/store-chaos/recover.py", "tools/store-chaos/relay.py"]),

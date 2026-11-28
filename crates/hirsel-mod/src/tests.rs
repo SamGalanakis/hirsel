@@ -311,3 +311,180 @@ fn abi_revision_is_bumped_and_sites_section_is_validated() {
         assert_eq!(Module::parse(&bad.encode()).err(), Some(Malformed::Sites));
     }
 }
+
+// tools/decoder-fuzz builds this crate's test configuration with the libFuzzer
+// callback for nightly discovery. No other build compiles it.
+#[cfg(fuzzing)]
+#[path = "../../../tools/decoder-fuzz/host_target.rs"]
+mod host_target;
+#[path = "../../hirsel-core-driver/src/property_corpus/reviewed.rs"]
+mod reviewed;
+
+#[derive(Debug, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Facts {
+    backend: String,
+    target: u32,
+    policy: u64,
+    text_align: u32,
+    data_align: u32,
+    text: usize,
+    data: usize,
+    imports: usize,
+    text_fixups: usize,
+    data_fixups: usize,
+    entries: usize,
+    spans: usize,
+    cfi: usize,
+    sites: usize,
+    names: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Observed {
+    Parsed(Facts),
+    Malformed(String),
+}
+
+/// The owner predicate of the module reader. Bytes the structural reader
+/// accepts go on to every checked view, and the writer must give the same
+/// bytes back for what the views hold.
+fn observe(bytes: &[u8]) -> Observed {
+    let module = match Module::parse(bytes) {
+        Ok(module) => module,
+        Err(malformed) => return Observed::Malformed(format!("{malformed:?}")),
+    };
+    let imports: Vec<Import> = module.imports().collect();
+    let entries: Vec<Entry> = module.entries().collect();
+    let spans: Vec<Span> = module.spans().collect();
+    let names: Vec<String> = (0..spans.len())
+        .map(|index| module.name(index).to_owned())
+        .collect();
+    for entry in &entries {
+        assert_eq!(module.entry(&entry.identity), Some(*entry));
+    }
+    let literals = module.literals();
+    assert_eq!(literals.start, 8 * imports.len());
+    assert_eq!(literals.end, module.data().len());
+    let image = Image {
+        header: module.header,
+        text: module.text().to_vec(),
+        data: module.data()[literals.start..].to_vec(),
+        imports,
+        text_fixups: module.text_fixups().collect(),
+        data_fixups: module.data_fixups().collect(),
+        entries,
+        spans,
+        cfi: module.cfi().to_vec(),
+        sites: module.sites().to_vec(),
+        names,
+    };
+    let facts = Facts {
+        backend: match image.header.backend {
+            Backend::Cranelift => "cranelift".into(),
+            Backend::Llvm => "llvm".into(),
+        },
+        target: image.header.target.index() as u32,
+        policy: image.header.policy,
+        text_align: image.header.text_align,
+        data_align: image.header.data_align,
+        text: image.text.len(),
+        data: module.data().len(),
+        imports: image.imports.len(),
+        text_fixups: image.text_fixups.len(),
+        data_fixups: image.data_fixups.len(),
+        entries: image.entries.len(),
+        spans: image.spans.len(),
+        cfi: image.cfi.len(),
+        sites: image.sites.len(),
+        names: image.names.clone(),
+    };
+    assert!(
+        image.encode() == bytes,
+        "the writer does not give back an accepted module"
+    );
+    Observed::Parsed(facts)
+}
+
+/// Discovery's entry to the owner predicate. `expect` is a declared status
+/// that the observation must also meet. Returns the observation.
+#[cfg(fuzzing)]
+fn discovered(input: &[u8], _schedule: usize, expect: Option<&str>) -> String {
+    let observation = match observe(input) {
+        Observed::Parsed(facts) => format!(
+            "parsed {} text={} data={} imports={} entries={} spans={}",
+            facts.backend, facts.text, facts.data, facts.imports, facts.entries, facts.spans
+        ),
+        Observed::Malformed(table) => format!("malformed {table}"),
+    };
+    if let Some(expect) = expect {
+        let status = observation.split(' ').next().unwrap();
+        assert_eq!(status, expect, "discovered: declared status");
+    }
+    observation
+}
+
+#[test]
+fn reviewed_module() {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Limits {
+        bytes: usize,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Setup {
+        backend: String,
+        product: String,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Schedule {
+        kind: String,
+    }
+    type Case = reviewed::Case<Limits, Setup, Observed, Schedule>;
+    let cases: Vec<(Case, Vec<u8>)> = reviewed::read(
+        include_bytes!("../../../core/tests/decoder-corpus/module.json"),
+        "module",
+        "reviewed_module",
+        "hirsel-mod",
+        "pack2-layout",
+    )
+    .unwrap();
+    let mut products = Vec::new();
+    let mut refused = 0;
+    for (case, bytes) in cases {
+        let id = &case.id;
+        assert!(bytes.len() <= case.limits.bytes, "{id}");
+        assert!(
+            matches!(case.schedules.as_slice(), [one] if one.kind == "contiguous"),
+            "{id}"
+        );
+        // Two replays, each over its own copy of the bytes.
+        let first = observe(&bytes.clone());
+        assert_eq!(observe(&bytes.clone()), first, "{id}: replay");
+        assert_eq!(first, case.expected, "{id}");
+        match &first {
+            Observed::Parsed(facts) => {
+                assert_eq!(case.setup.product, "compiler", "{id}");
+                assert_eq!(facts.backend, case.setup.backend, "{id}");
+                products.push(facts.backend.clone());
+                eprintln!(
+                    "{id}: parsed {} bytes twice, {} entries, {} spans, writer agrees",
+                    bytes.len(),
+                    facts.entries,
+                    facts.spans
+                );
+            }
+            Observed::Malformed(table) => {
+                assert_eq!(case.setup.product, "edited", "{id}");
+                refused += 1;
+                eprintln!("{id}: malformed {table} twice");
+            }
+        }
+    }
+    // One trusted product of each backend, and refusals of the structural reader.
+    assert_eq!(products, ["cranelift", "llvm"]);
+    assert!(refused > 0);
+}

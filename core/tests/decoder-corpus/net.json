@@ -1,0 +1,651 @@
+{
+  "schema_version": 1,
+  "objects": {
+    "056cc5888c65b25a41e48b10f821fbd9f5ca4380056b715bd32bd9833e94522e": "6578616d706c652e313233",
+    "17b2508d4a8aa3283a463fb7ab08ac3847c0b8e92c08da9b9fb82797e3f4b667": "5f646d6172632e6578616d706c652e636f6d",
+    "1e6923332cbe935fc89e92ef82459d8e42e6847b2f7e75f61e03d97f6dae4080": "633438323466316639666531353739663336363463383739303637373461373634613933396464343766373938376437383164393262323366343536643864620a703d746c732d7365727665722d656e642d706f696e742c2c6e3d757365722c723d724f70724e476677456265525767624e456b714f0a723d724f70724e476677456265525767624e456b714f25687659447057556132526154434166757846496c6a29684e6c46246b302c733d5732325a614a30534e5937736f457355456a623667513d3d2c693d343039360a763d56745a6f4d572f2f7641336a3942636c38573176756543716a6e336a63726350332f654771717546516a383d",
+    "1f18dd35d91534b3e08e3008ccee898eb8307c8a1ba9c528104f20e3a6c9e55c": "546c7320204c6f63616c486f73742e2020312d3109526f6f74733d7368613235363a41424142414241424142414241424142414241424142414241424142414241424142414241424142414241424142414241424142414241424142414241424142",
+    "235f80e40946f8bc263cbaae517e526e2ef3a9ca34ec51e5885f99498f07626e": "546c73206578616d706c652e636f6d20302d36353533362053797374656d",
+    "3015c186ea0dafcf94b04eb88fc428709600d8ab2af29b73e1b370040bbde21a": "546c73202a20302d363535333520416e79",
+    "37dad677cf0b3997d0f5dd0d7889f84b11002e3ca73b0ae1bdb6d7e9b46fdb8a": "3139322e302e322e37",
+    "401da6ea6a614dd6d773b1ba84c91ee6d981827bd0bdc5188aa2e5dbffba558c": "0200000000000000000000000000000000",
+    "539d6f56b55edb107e452f80dbe17ee18888c9f8230f0d31d85ff87bd7e8a9ce": "0a6e2c2c6e3d757365722c723d724f70724e476677456265525767624e456b714f0a723d724f70724e476677456265525767624e456b714f25687659447057556132526154434166757846496c6a29684e6c46246b302c733d5732325a614a30534e5937736f457355456a623667513d3d2c693d343039360a763d36727269545242693233577052522f777475702b6d4d68555a556e2f6442356e4c544a52736a6c393547343d",
+    "6de3bea88ea7c92b437d36518553a4ff4edb5fd943d366589db6dc4dc7e3c4c7": "ff2e6578616d706c65",
+    "9a9f232f93cc5ee6c489f01970df4e3ba3f7b7aeb2ad32ff627df2d17f7febbb": "546c73206170692e6578616d706c652e636f6d2c2a2e696e7465726e616c2e6578616d706c65203434332d383434332053797374656d",
+    "a666d0de3ddadb8e7f4144b859c205717f02c8a44a2b6f2399eb1fec5b6f6481": "0a6e2c2c6e3d757365722c723d724f70724e476677456265525767624e456b714f0a723d724f70724e476677456265525767624e456b714f25687659447057556132526154434166757846496c6a29684e6c46246b302c733d5732325a614a30534e5937736f457355456a623667513d3d2c693d343039360a763d56745a6f4d572f2f7641336a3942636c38573176756543716a6e336a63726350332f654771717546516a383d",
+    "a88ad6dcaad2b839f0f2e844e0126d1add1ccaf45e23ba1cbfbe854e44d2c6fc": "00000000000000000000000000c000020100000000000000000000000000c0000201",
+    "ae75cafd9d959d4ce61b5be3a8de9d9a3afd54c2f86bd0dfc3458af89e45d212": "0a703d746c732d7365727665722d656e642d706f696e742c2c6e3d757365722c723d724f70724e476677456265525767624e456b714f0a723d724f70724e476677456265525767624e456b714f25687659447057556132526154434166757846496c6a29684e6c46246b302c733d5732325a614a30534e5937736f457355456a623667513d3d2c693d343039360a763d56745a6f4d572f2f7641336a3942636c38573176756543716a6e336a63726350332f654771717546516a383d",
+    "be2a931e27a3fe773729b43d2d0c628c2c5593624c7cc42a73a6ba8a95d99892": "00000000000000000000000000c00002",
+    "c0b18e0a5caa86debe531fcc11e3940a6620314f6029a8a27af97054be5fd6d9": "0a6e2c2c6e3d757365722c723d724f70724e476677456265525767624e456b714f0a723d724f70724e476677456265525767624e456b714f25687659447057556132526154434166757846496c6a29684e6c46246b302c733d5732325a614a30534e5937736f457355456a623667513d3d2c693d343039350a763d36727269545242693233577052522f777475702b6d4d68555a556e2f6442356e4c544a52736a6c393547343d",
+    "c67cde1e5652c09670e48c938c92bb7e0821b782c74a746e2d195b7f6cd8e4cd": "00000000000000000000000000c00002010120010db8000000000000000000000001",
+    "d285a6c07a760b3c2f01319839951600b89e067c6a57a24e3fcfa314a2339b69": "546c73206578616d706c652e636f6d203434332d38302053797374656d",
+    "daba2b938f260c2a3f0809c8df4f8bdf57673c2ce67b742f2b2f4ea71e1cb252": "4578616d706c652e434f4d2e",
+    "daf2b2b38b651358cffb2df2555ccfb0e31064585d839beceacaa7d8a5a8bbbf": "0a6e2c2c6e3d757365722c723d724f70724e476677456265525767624e456b714f0a723d724f70724e476677456265525767624e456b714f25687659447057556132526154434166757846496c6a29684e6c46246b302c733d5732325a614a30534e5937736f457355456a623667513d3d2c693d34303936",
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855": "",
+    "e4d737f2a33b47bbfd56e76402c44cdb57f3e73893e22a85c7b4537c398293d9": "00010000000000000000000000c0000201",
+    "fadb2fa16aece98c09c556a916eb656a0f4096716d9f57ae9a82bbf1a14fc235": "0a6e2c2c6e3d757365722c723d724f70724e476677456265525767624e456b714f0a723d724f70724e476677456265525767624e456b714f2c733d5732325a614a30534e5937736f457355456a623667513d3d2c693d343039360a763d36727269545242693233577052522f777475702b6d4d68555a556e2f6442356e4c544a52736a6c393547343d"
+  },
+  "cases": [
+    {
+      "id": "name-dns-folded",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "daba2b938f260c2a3f0809c8df4f8bdf57673c2ce67b742f2b2f4ea71e1cb252",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "tls-name",
+        "password": null
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "accepted": "dns:example.com"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "name-ipv4",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "37dad677cf0b3997d0f5dd0d7889f84b11002e3ca73b0ae1bdb6d7e9b46fdb8a",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "tls-name",
+        "password": null
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "accepted": "ip:192.0.2.7"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "name-not-utf8",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "6de3bea88ea7c92b437d36518553a4ff4edb5fd943d366589db6dc4dc7e3c4c7",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "tls-name",
+        "password": null
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "refused": "utf8"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "name-numeric-final-label",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "056cc5888c65b25a41e48b10f821fbd9f5ca4380056b715bd32bd9833e94522e",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "tls-name",
+        "password": null
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "refused": "name"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "name-underscore",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "17b2508d4a8aa3283a463fb7ab08ac3847c0b8e92c08da9b9fb82797e3f4b667",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "tls-name",
+        "password": null
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "refused": "name"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "policy-names-and-wildcard",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "9a9f232f93cc5ee6c489f01970df4e3ba3f7b7aeb2ad32ff627df2d17f7febbb",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "tls-policy",
+        "password": null
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "accepted": "Tls api.example.com,*.internal.example 443-8443 System"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "policy-pinned-roots-folded",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "1f18dd35d91534b3e08e3008ccee898eb8307c8a1ba9c528104f20e3a6c9e55c",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "tls-policy",
+        "password": null
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "accepted": "Tls localhost 1-1 Roots=sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "policy-port-range",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "235f80e40946f8bc263cbaae517e526e2ef3a9ca34ec51e5885f99498f07626e",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "tls-policy",
+        "password": null
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "refused": "rule"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "policy-ports-reversed",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "d285a6c07a760b3c2f01319839951600b89e067c6a57a24e3fcfa314a2339b69",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "tls-policy",
+        "password": null
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "refused": "rule"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "policy-served-trust",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "3015c186ea0dafcf94b04eb88fc428709600d8ab2af29b73e1b370040bbde21a",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "tls-policy",
+        "password": null
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "refused": "rule"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "records-duplicate",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "a88ad6dcaad2b839f0f2e844e0126d1add1ccaf45e23ba1cbfbe854e44d2c6fc",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "address-records",
+        "password": null
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "refused": "records"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "records-none",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "address-records",
+        "password": null
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "accepted": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "records-short",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "be2a931e27a3fe773729b43d2d0c628c2c5593624c7cc42a73a6ba8a95d99892",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "address-records",
+        "password": null
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "refused": "records"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "records-unknown-family",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "401da6ea6a614dd6d773b1ba84c91ee6d981827bd0bdc5188aa2e5dbffba558c",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "address-records",
+        "password": null
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "refused": "records"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "records-v4-padding",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "e4d737f2a33b47bbfd56e76402c44cdb57f3e73893e22a85c7b4537c398293d9",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "address-records",
+        "password": null
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "refused": "records"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "records-v4-then-v6",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "c67cde1e5652c09670e48c938c92bb7e0821b782c74a746e2d195b7f6cd8e4cd",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "address-records",
+        "password": null
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "accepted": "192.0.2.1,2001:db8::1"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "scram-binding-absent",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "ae75cafd9d959d4ce61b5be3a8de9d9a3afd54c2f86bd0dfc3458af89e45d212",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "scram",
+        "password": "pencil"
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "refused": "Binding"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "scram-channel-bound",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "1e6923332cbe935fc89e92ef82459d8e42e6847b2f7e75f61e03d97f6dae4080",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "scram",
+        "password": "pencil"
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "accepted": "iterations=4096 final=c=cD10bHMtc2VydmVyLWVuZC1wb2ludCwsxIJPH5/hV582ZMh5BndKdkqTndR/eYfXgdkrI/RW2Ns=,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=vscmRQfinf1pSrHVTAg8csuWI8pmIGiCr0s0i4jE8ZA="
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "scram-few-iterations",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "c0b18e0a5caa86debe531fcc11e3940a6620314f6029a8a27af97054be5fd6d9",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "scram",
+        "password": "pencil"
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "refused": "Iterations"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "scram-missing-message",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "daf2b2b38b651358cffb2df2555ccfb0e31064585d839beceacaa7d8a5a8bbbf",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "scram",
+        "password": "pencil"
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "refused": "frame"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "scram-nonce-not-extended",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "fadb2fa16aece98c09c556a916eb656a0f4096716d9f57ae9a82bbf1a14fc235",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "scram",
+        "password": "pencil"
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "refused": "Transcript"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "scram-rfc7677",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "539d6f56b55edb107e452f80dbe17ee18888c9f8230f0d31d85ff87bd7e8a9ce",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "scram",
+        "password": "pencil"
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "accepted": "iterations=4096 final=c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "scram-server-signature",
+      "target": "net",
+      "law": "reviewed_net",
+      "input_kind": "socket-free-input",
+      "generator_version": 1,
+      "digest": "a666d0de3ddadb8e7f4144b859c205717f02c8a44a2b6f2399eb1fec5b6f6481",
+      "limits": {
+        "bytes": 512
+      },
+      "setup": {
+        "surface": "scram",
+        "password": "pencil"
+      },
+      "oracle": {
+        "name": "net-published-vectors",
+        "version": 1
+      },
+      "expected": {
+        "refused": "ServerSignature"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    }
+  ]
+}

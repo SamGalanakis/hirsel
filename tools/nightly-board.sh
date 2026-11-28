@@ -442,20 +442,24 @@ if (( sanitizers_status == 75 )); then
 elif (( sanitizers_status != 0 )); then
   printf 'Sanitizers & Miri exited %s. See %s/sanitizers.log.\n' "$sanitizers_status" "$run" >>"$run/run.log"
 fi
-# Decoder discovery (tools/decoder-fuzz/discover.py): the libFuzzer archive host and the
-# covered HTTP/1 image, one input per fresh child, 60 child CPU-seconds of search and 10 of
-# reduction per target. It runs after the stages above have released 8-11, so their
-# allocations stay whole, and it defers (75) unless one of those CPUs is measured idle.
-# A confirmed red adds one line to the day's alert file.
+# Decoder discovery (tools/decoder-fuzz/discover.py): the libFuzzer hosts of the Rust
+# cohorts and the covered law images of the native ones, 60 child CPU-seconds of search
+# and 10 of reduction per target. It runs after the stages above have released 8-11, so
+# their allocations stay whole, and it defers (75) unless one of those CPUs is measured
+# idle. A confirmed red adds one line to the day's alert file.
 run_decoder_discovery() (
-  local output host compiler runtime
+  local output compiler runtime
+  local -a hosts
   output=$(taskset -c 8-11 .buck2/bin/buck2 build -j4 --show-json-output //:hirsel-core-driver-decoder-fuzz \
+    //:hirsel-data-decoder-fuzz //:hirsel-mod-decoder-fuzz //:hirsel-core-net-decoder-fuzz \
     //:hirsel-core-driver-bin-hirsel //:core-driver-runtime-pic) || return
-  read -r host compiler runtime < <(python3 -c 'import json, sys; j = json.load(sys.stdin); print(*(j["root//:" + target] for target in ("hirsel-core-driver-decoder-fuzz", "hirsel-core-driver-bin-hirsel", "core-driver-runtime-pic")))' <<<"$output") || return
+  mapfile -t hosts < <(python3 -c 'import json, sys; j = json.load(sys.stdin); print(*(j["root//:" + target] for target in ("hirsel-core-driver-bin-hirsel", "core-driver-runtime-pic")), *(option for target in sorted(j) if target.endswith("-decoder-fuzz") for option in ("--host", j[target])), sep="\n")' <<<"$output") || return
+  compiler=${hosts[0]} runtime=${hosts[1]}
+  (( ${#hosts[@]} == 10 )) || return
   export LLVM_SYS_231_PREFIX="$checkout/tools/buck2/toolchains/llvm-files"
   export LD_LIBRARY_PATH="$LLVM_SYS_231_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   exec taskset -c 8-11 python3 tools/decoder-fuzz/discover.py nightly --seed "$started" \
-    --search-cpu-seconds 60 --reduction-cpu-seconds 10 --host "$host" --compiler "$compiler" \
+    --search-cpu-seconds 60 --reduction-cpu-seconds 10 "${hosts[@]:2}" --compiler "$compiler" \
     --runtime "$runtime" --out "$run/decoder-discovery" --alert "$run/decoder-discovery/alert.txt"
 )
 

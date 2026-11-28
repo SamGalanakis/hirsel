@@ -6,10 +6,19 @@ genrule(
     visibility = ["PUBLIC"],
 )
 
-# Nightly discovery's Rust host (tools/decoder-fuzz/discover.py). It is the
-# libFuzzer callback over the package archive reader, compiled into the
-# driver's own test configuration as `//:hirsel-core-driver-decoder-fuzz`
-# (tools/buck2/defs.bzl). No test and no pre-push action depends on it.
+# The native cohorts' embedded projections against their bundles
+# (`//:test-decoder-fixtures`), read at their repository paths.
+[export_file(name = path, mode = "reference", visibility = ["PUBLIC"])
+ for path in ["fixtures.py", "test_fixtures.py"]]
+
+# Nightly discovery's Rust hosts (tools/decoder-fuzz/discover.py). This is the
+# one libFuzzer callback, compiled into each owner crate's own test
+# configuration as `//:<crate>-decoder-fuzz` (DECODER_FUZZ_HOSTS in
+# tools/buck2/defs.bzl): the driver's archive reader and registry verifier,
+# hirsel-data's `.hcfg` reader, hirsel-mod's module reader and hirsel-core-net's
+# address, TLS and SCRAM readers. A host with several surfaces takes the
+# surface from the input's first byte. No test and no pre-push action depends
+# on a host.
 export_file(
     name = "host_target.rs",
     visibility = ["PUBLIC"],

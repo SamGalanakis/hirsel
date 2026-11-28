@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Covered native images of std's decoder laws, run warm or one input per fresh child.
+"""Covered native images of the native decoder laws, run warm or one input per fresh child.
 
-`prepare_warm` builds the laws of ADAPTER with std given as source and
-`hirsel test --coverage`, once per build. It keeps each test executable and its
-`.covmap`. `Warm` serves many inputs in one worker (hirsel-core-rt's
+`prepare_warm` builds one target of TARGETS with `hirsel test --coverage`, once
+per build: the owner's law file with the target's adapter appended, std's given
+as source, a package's in a copy of the package. It keeps the test executable
+and its `.covmap`. `Warm` serves many inputs in one worker (hirsel-core-rt's
 coverage::warm): it clears and reads back only the flags of the target's
 records. `fresh` runs one input in a fresh child whose flags map a raw file
 that no other run names (docs/coverage.md, "The raw file"). Only sites of the
@@ -26,13 +27,10 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "core/tools"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from contract_exec import source_manifest
-from fixtures import partition
+from std_native import fixture_source
+from fixtures import NATIVE, native_cases, partition
 
-SCOPE = "std@1/http1/"
 INPUT_LIMIT = 4096
-STATUSES = ("complete", "partial", "bad", "too-large")
-ACCEPTED = "complete"
-CONTROLS = ("control-get", "control-get-leading-crlf")
 VARIABLES = ("HIRSEL_DECODER_INPUT", "HIRSEL_DECODER_ENDS", "HIRSEL_DECODER_EXPECT")
 RAW_MAGIC = b"HIRSELCV"
 RAW_END = 0x45444F4E
@@ -40,19 +38,41 @@ RECORD_MAGIC = 0x56434948
 
 # The laws (hirsel-core-rt's coverage::warm): serial, they do not wait, read
 # one immutable input from the Env grant, write nothing and answer through the
-# exit status. 0 passes; 10 + k a law held with result class k; 20, 30, 40 + k
-# a law broke (expectation, resume_parity, partition); 3 the input is missing.
-# Each executes on fresh case state. HTTP/1's owner predicates are the module's
-# own: resume_parity (every two-way split and the byte drip) and same_head. An
-# absent expectation checks them alone.
-ADAPTER = '''
+# exit status. 0 passes; 10 + k a law held with result class k; 20 + k the
+# declared expectation is not class k; 3 the input is missing. Each executes on
+# fresh case state. An absent expectation checks the owner predicates alone.
+# `{hex}` is std's hex module as the owner's source names it.
+DISCOVERY = '''
 fn discovery_bytes(e: Env, name: String) -> Option[Bytes] {
     match env.get(e, name) {
-        Ok(Some(text)) => hex.decode(string.as_bytes(text)),
+        Ok(Some(text)) => {hex}.decode(string.as_bytes(text)),
         _ => None
     }
 }
 
+fn discovery_exit(status: u8) -> Result[(), Exit] {
+    if status == 0u8 {
+        Ok(())
+    } else {
+        Error(Exit(status: status))
+    }
+}
+
+@test
+pub fn {entry}(native_env: Env) -> Result[(), Exit] {
+    let Some(raw) = discovery_bytes(native_env, "HIRSEL_DECODER_INPUT") else {
+        return Error(Exit(status: 3u8))
+    }
+    let Some(ends) = discovery_bytes(native_env, "HIRSEL_DECODER_ENDS") else {
+        return Error(Exit(status: 3u8))
+    }
+    discovery_exit({entry}_law(take raw, ends, discovery_bytes(native_env, "HIRSEL_DECODER_EXPECT")))
+}
+'''
+
+# HTTP/1's owner predicates are the module's own: resume_parity (every two-way
+# split and the byte drip) and same_head. 30 + k and 40 + k: one of them broke.
+HTTP1 = '''
 fn discovery_name(p: http1.Progress) -> String {
     match p {
         Complete => "complete",
@@ -78,14 +98,6 @@ fn discovered_partition(raw: Bytes, ends: Bytes, expected: http1.Progress, whole
     progress == expected && same_head(h, whole)
 }
 
-fn warm_exit(status: u8) -> Result[(), Exit] {
-    if status == 0u8 {
-        Ok(())
-    } else {
-        Error(Exit(status: status))
-    }
-}
-
 fn warm_progress(p: http1.Progress) -> u8 {
     match p {
         Complete => 0u8,
@@ -95,36 +107,11 @@ fn warm_progress(p: http1.Progress) -> u8 {
     }
 }
 
-fn warm_empty_law(raw: Bytes) -> u8 {
-    0u8
-}
-
-// A decimal u64, as a scalar field decoder reads one.
-fn warm_scalar_law(raw: Bytes) -> u8 {
-    let n = list.len(raw)
-    if n == 0u64 {
-        return 11u8
-    }
-    let mut value = 0u64
-    for i in 0u64 .. n {
-        let b = raw[i]
-        if b < 48u8 || b > 57u8 {
-            return 12u8
-        }
-        let digit: u64 = int.widen(b - 48u8)
-        if value > 1844674407370955161u64 || (value == 1844674407370955161u64 && digit > 5u64) {
-            return 13u8
-        }
-        value = value * 10u64 + digit
-    }
-    0u8
-}
-
-fn warm_http1_law(raw: Bytes, ends: Bytes, expect: Option[Bytes]) -> u8 {
+fn warm_http1_law(take raw: Bytes, ends: Bytes, declared: Option[Bytes]) -> u8 {
     let mut whole = http1.head()
     let progress = http1.request(raw, mut whole)
     let k = warm_progress(progress)
-    if let Some(name) = expect {
+    if let Some(name) = declared {
         if name != string.as_bytes(discovery_name(progress)) {
             return 20u8 + k
         }
@@ -141,72 +128,27 @@ fn warm_http1_law(raw: Bytes, ends: Bytes, expect: Option[Bytes]) -> u8 {
         10u8 + k
     }
 }
+'''
 
-fn warm_json_kind(e: json.Error) -> u8 {
-    match e {
-        Syntax(_) => 1u8,
-        NotFinite(_) => 2u8,
-        Build(_) => 3u8,
-        Depth => 4u8,
-        WrongKind(_) => 5u8,
-        IntegerRange(_) => 6u8
+# A reviewed cohort's law is its owner test's predicate (`{case}`), which runs
+# the cohort's owner laws and answers class 9 when one broke: exit 30. `{name}`
+# is the owner's name of a class, the status a declared expectation names.
+REVIEWED = '''
+fn {entry}_law(take raw: Bytes, ends: Bytes, declared: Option[Bytes]) -> u8 {
+    {case}
+    if class == 9u8 {
+        return 30u8
     }
-}
-
-// The sizing pass and the parse agree on every input.
-fn warm_json_law(take raw: Bytes) -> u8 {
-    match string.from_utf8(take raw) {
-        Error(_) => 17u8,
-        Ok(text) => {
-            let sized = json.size(text)
-            region r {
-                match (sized, json.parse(r, text)) {
-                    (Ok(_), Ok(_)) => 0u8,
-                    (Error(a), Error(b)) => if warm_json_kind(a) == warm_json_kind(b) {
-                        10u8 + warm_json_kind(a)
-                    } else {
-                        20u8
-                    },
-                    _ => 21u8
-                }
-            }
+    if let Some(name) = declared {
+        if name != string.as_bytes({name}(class)) {
+            return 20u8 + class
         }
     }
-}
-
-@test
-pub fn warm_empty(native_env: Env) -> Result[(), Exit] {
-    let Some(raw) = discovery_bytes(native_env, "HIRSEL_DECODER_INPUT") else {
-        return Error(Exit(status: 3u8))
+    if class == 0u8 {
+        0u8
+    } else {
+        10u8 + class
     }
-    warm_exit(warm_empty_law(raw))
-}
-
-@test
-pub fn warm_scalar(native_env: Env) -> Result[(), Exit] {
-    let Some(raw) = discovery_bytes(native_env, "HIRSEL_DECODER_INPUT") else {
-        return Error(Exit(status: 3u8))
-    }
-    warm_exit(warm_scalar_law(raw))
-}
-
-@test
-pub fn warm_http1(native_env: Env) -> Result[(), Exit] {
-    let Some(raw) = discovery_bytes(native_env, "HIRSEL_DECODER_INPUT") else {
-        return Error(Exit(status: 3u8))
-    }
-    let Some(ends) = discovery_bytes(native_env, "HIRSEL_DECODER_ENDS") else {
-        return Error(Exit(status: 3u8))
-    }
-    warm_exit(warm_http1_law(raw, ends, discovery_bytes(native_env, "HIRSEL_DECODER_EXPECT")))
-}
-
-@test
-pub fn warm_json(native_env: Env) -> Result[(), Exit] {
-    let Some(raw) = discovery_bytes(native_env, "HIRSEL_DECODER_INPUT") else {
-        return Error(Exit(status: 3u8))
-    }
-    warm_exit(warm_json_law(take raw))
 }
 '''
 
@@ -257,20 +199,33 @@ def read_raw(path, records):
     return reached, outcome, None
 
 
-def reviewed_control(case_id):
-    bundle = json.loads((ROOT / "core/tests/decoder-corpus/http1.json").read_text())
-    case = next(case for case in bundle["cases"] if case["id"] == case_id)
-    raw = bytes.fromhex(bundle["objects"][case["digest"]])
-    return raw, partition(case["schedules"][0], len(raw))
+def reviewed_cases(name):
+    """A target's reviewed cases as the worker takes them: the input, with its surface's
+    selector byte first when the cohort has several, and its first reviewed partition."""
+    if name not in NATIVE:
+        bundle = json.loads((ROOT / "core/tests/decoder-corpus" / f"{name}.json").read_text())
+        cases = {}
+        for case in bundle["cases"]:
+            raw = bytes.fromhex(bundle["objects"][case["digest"]])
+            cases[case["id"]] = {"input": raw, "schedule": partition(case["schedules"][0], len(raw))}
+        return cases
+    selected = len(NATIVE[name].get("selectors", ())) > 0
+    return {case["id"]: {"input": bytes([case["selector"]] * selected) + case["input"],
+                         "schedule": case["ends"][0] if case["ends"] else [len(case["input"])]}
+            for case in native_cases(name)}
 
 
-def schedule(raw, seed):
-    """A generated legal partition: the reviewed bundle's generator over this input."""
-    return partition({"seed": seed & 0xffffffff, "max_chunk": max(1, min(len(raw), 1 + seed % 7))}, len(raw))
+def schedule(name, raw, seed):
+    """A generated legal partition of the bytes after the selector: the reviewed bundle's
+    generator over this input. A decoder that takes its input whole has the one fragment."""
+    size = max(0, len(raw) - TARGETS[name]["selector"])
+    if not TARGETS[name]["streaming"]:
+        return [size]
+    return partition({"seed": seed & 0xffffffff, "max_chunk": max(1, min(size, 1 + seed % 7))}, size)
 
 
-def case_environment(raw, ends, expect=None):
-    if len(raw) > INPUT_LIMIT or not ends or ends[-1] != len(raw):
+def case_environment(name, raw, ends, expect=None):
+    if len(raw) > INPUT_LIMIT or not ends or ends[-1] != max(0, len(raw) - TARGETS[name]["selector"]):
         raise ValueError("input over the worker limit or partition does not cover it")
     environment = {"HIRSEL_DECODER_INPUT": raw.hex(),
                    "HIRSEL_DECODER_ENDS": b"".join(struct.pack(">H", end) for end in ends).hex()}
@@ -284,14 +239,16 @@ def supervise(command, environment, timeout, cwd, fault=None):
     if fault == "timeout":
         # The qualification's hung worker: it never reaches the image within the bound.
         command, timeout = ["sh", "-c", 'sleep 30; exec "$@"', "sh", *command], 1
+    elif fault == "kill":
+        # The qualification's killed worker. It signals itself: a signal from here could
+        # land after a short law has finished.
+        command = ["sh", "-c", 'kill -KILL $$; exec "$@"', "sh", *command]
     before = child_cpu()
     try:
         child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  env=environment, cwd=cwd, start_new_session=True)
     except OSError as error:
         return False, None, b"", str(error).encode(), False, 0.0
-    if fault == "kill":
-        os.killpg(child.pid, signal.SIGKILL)
     timed_out = False
     try:
         stdout, stderr = child.communicate(timeout=timeout)
@@ -324,16 +281,55 @@ def stopped(row, status, timed_out, timeout):
     return row["failure"] is not None
 
 
-# Each target is one law of ADAPTER: its test entry, the sites that count and
-# the law's body site, which marks an attributed case.
-WARM = "std@1/tests/http1/"
-WARM_TARGETS = {
-    "empty": {"entry": WARM + "warm_empty", "scope": WARM + "warm_empty_law", "body": WARM + "warm_empty_law#e"},
-    "scalar": {"entry": WARM + "warm_scalar", "scope": WARM + "warm_scalar_law", "body": WARM + "warm_scalar_law#e"},
-    "http1": {"entry": WARM + "warm_http1", "scope": SCOPE, "body": WARM + "warm_http1_law#e"},
-    "json": {"entry": WARM + "warm_json", "scope": "std@1/json/", "body": WARM + "warm_json_law#e"},
+def target(name, *, home, file, scope, control, case=None, law=None):
+    """One native target: its owner law file with the adapter appended, the test entry,
+    the sites that count (`scope`: definition path prefixes) and the law's body site,
+    which marks an attributed case. `home` is ("std", test module) or ("package",
+    package, the packages its copy needs beside it). `control` is the accepted reviewed
+    case the preparation must pass. `laws` name what an exit's tens digit broke."""
+    identifier = name.replace("-", "_")
+    entry = f"warm_{identifier}"
+    module = f"std@1/tests/{home[1]}/" if home[0] == "std" else f"{home[1]}@1/laws/"
+    adapter = DISCOVERY.replace("{hex}", "hex" if home[0] == "std" else "std.hex").replace("{entry}", entry)
+    if case is None:
+        adapter += HTTP1
+        statuses, laws = ("complete", "partial", "bad", "too-large"), {
+            2: "mismatch expectation", 3: "mismatch resume_parity", 4: "mismatch partition"}
+    else:
+        adapter += REVIEWED.replace("{entry}", entry).replace("{case}", case).replace("{name}", law)
+        statuses, laws = NATIVE[name]["classes"], {2: "mismatch expectation"}
+    return {"home": home, "file": file, "entry": module + entry, "scope": scope, "body": f"{module}{entry}_law#e",
+            "adapter": adapter, "statuses": statuses, "laws": laws, "control": control,
+            "streaming": case is None or NATIVE[name].get("streaming", False),
+            "selector": int(case is not None and "selectors" in NATIVE[name])}
+
+
+TARGETS = {
+    "http1": target("http1", home=("std", "http1"), file="core/std/tests/http1.hirsel", scope=("std@1/http1/",),
+                    control="control-get"),
+    "json": target("json", home=("std", "json"), file="core/std/tests/json.hirsel", scope=("std@1/json/",),
+                   control="accepted-scalars", law="reviewed_json_name",
+                   case="let (class, _) = reviewed_json_case(take raw)"),
+    "jwt": target("jwt", home=("std", "jwt"), file="core/std/tests/jwt.hirsel", scope=("std@1/jwt/",),
+                  control="accepted-rfc7515-a1", law="reviewed_jwt_name",
+                  case="let (class, _) = reviewed_jwt_case(take raw)"),
+    # The CRYPTO stream's reassembly and framing, then the handshake module's message and
+    # ClientHello readers.
+    "quic-tls": target("quic-tls", home=("package", "quic", ()), file="core/programs/quic/initial_laws.hirsel",
+                       scope=("quic@1/handshake/", "quic@1/quic/receive_crypto", "quic@1/quic/tls_message"),
+                       control="accepted-rfc9001-a2", law="reviewed_crypto_name",
+                       case="let (class, _, _) = reviewed_crypto_case(raw, ends)"),
+    # The first byte selects the surface (fixtures.NATIVE's selectors); without one the
+    # law answers class 6.
+    "qpack": target("qpack", home=("package", "webtransport", ("quic",)),
+                    file="core/programs/webtransport/laws.hirsel", scope=("webtransport@1/qpack/",),
+                    control="accepted-rfc9204-b1", law="reviewed_qpack_name",
+                    case="""let (class, _, _) = if list.len(raw) == 0 {
+        (6u8, b"", 0u64)
+    } else {
+        reviewed_qpack_case(raw[0], list.slice(raw, 1, list.len(raw)), ends)
+    }"""),
 }
-WARM_LAWS = {2: "mismatch expectation", 3: "mismatch resume_parity", 4: "mismatch partition"}
 WARM_GREETING = b"HIRSELWM"
 WARM_CASE, WARM_SAMPLE, WARM_FINISH = 1, 2, 3
 WARM_COUNTERS = ("heap_held", "heap_arena", "maps", "resident_pages", "descriptors", "threads")
@@ -345,23 +341,51 @@ def executable_name(entry):
     return hashlib.sha256(b"".join(len(part).to_bytes(8, "little") + part for part in parts)).hexdigest()
 
 
-def prepare_warm(compiler, runtime, work, backend="cranelift", targets=tuple(WARM_TARGETS)):
-    """Build the targets' covered images in one request. Returns the images by target.
+def stage(name, work):
+    """Write the target's law file with its adapter under `work`. Returns what `hirsel test` reads."""
+    target = TARGETS[name]
+    kind, owner, *rest = target["home"]
+    if kind == "std":
+        source = fixture_source(ROOT / target["file"]) + target["adapter"]
+        staged = work / f"{owner}.hirsel"
+        staged.write_text(source)
+        inputs = work / "inputs.json"
+        inputs.write_text(json.dumps(source_manifest(ROOT, "std", ["tests", owner], staged)))
+        return ["--inputs", str(inputs), "--source-core", "--source-std", "--limit", str(64 << 20),
+                "--grant", "Env=" + ",".join(VARIABLES)]
+    # A package's tests take their grants from its manifest: the copy's adds the Env grant.
+    members = (owner, *rest[0])
+    packages = work / "packages"
+    for member in members:
+        (packages / member).mkdir(parents=True, exist_ok=True)
+        for path in (ROOT / "core/programs" / member).iterdir():
+            if path.suffix == ".hirsel" or path.name == "hirsel.hcfg":
+                (packages / member / path.name).write_bytes(path.read_bytes())
+    (packages / "hirsel.hcfg").write_text(
+        "pkg_v1.Workspace(\n    members: [\n" + "".join(f'        "{member}",\n' for member in members) + "    ],\n)\n")
+    (packages / owner / Path(target["file"]).name).write_text((ROOT / target["file"]).read_text() + target["adapter"])
+    manifest = packages / owner / "hirsel.hcfg"
+    declared, tests, grants = manifest.read_text().partition("tests: Some(Tests(")
+    before, found, after = grants.partition("grants: [")
+    if not found:
+        raise ValueError(f"{manifest}: the tests declare no grants")
+    grant = "Env([" + ", ".join(f'"{variable}"' for variable in VARIABLES) + "]), "
+    manifest.write_text(declared + tests + before + found + grant + after)
+    return [str(packages / owner), "--libraries", str(ROOT / "core")]
+
+
+def prepare_warm(compiler, runtime, work, name, backend="cranelift"):
+    """Build the target's covered image. Returns it.
     Cranelift by default: its warm HTTP/1 search completes more cases per CPU-second than LLVM's."""
+    target = TARGETS[name]
     work = work.resolve()
     work.mkdir(parents=True, exist_ok=True)
-    source = work / "http1.hirsel"
-    source.write_text((ROOT / "core/std/tests/http1.hirsel").read_text() + ADAPTER)
-    inputs = work / "inputs.json"
-    inputs.write_text(json.dumps(source_manifest(ROOT, "std", ["tests", "http1"], source)))
     programs = work / "programs"
-    control = case_environment(*reviewed_control(CONTROLS[0]))
-    command = [str(compiler), "test", "--inputs", str(inputs), "--source-core", "--source-std", "--backend", backend,
-               "--runtime", str(runtime), "--store", str(work / "store"), "--json", "--limit", str(64 << 20),
-               "--coverage", "--rerun", "--grant", "Env=" + ",".join(VARIABLES), "--test-timeout", "60",
-               "-o", str(programs)]
-    for name in targets:
-        command += ["--exact", WARM_TARGETS[name]["entry"]]
+    case = reviewed_cases(name)[target["control"]]
+    control = case_environment(name, case["input"], case["schedule"])
+    command = [str(compiler), "test", *stage(name, work), "--backend", backend, "--runtime", str(runtime),
+               "--store", str(work / "store"), "--json", "--coverage", "--rerun", "--test-timeout", "60",
+               "--exact", target["entry"], "-o", str(programs)]
     started, wall = child_cpu(), time.monotonic()
     built = subprocess.run(command, capture_output=True, text=True, env={**os.environ, **control}, cwd=work)
     cpu, wall = child_cpu() - started, time.monotonic() - wall
@@ -369,22 +393,19 @@ def prepare_warm(compiler, runtime, work, backend="cranelift", targets=tuple(WAR
         tests = {row["definition"]: row for row in json.loads(built.stdout)["tests"]}
     except (ValueError, KeyError, TypeError):
         raise ValueError(f"preparation exited {built.returncode}: {built.stdout[-2000:]} {built.stderr[-2000:]}")
-    if "http1" in targets and not tests.get(WARM_TARGETS["http1"]["entry"], {}).get("passed"):
-        raise ValueError(f"preparation must pass the http1 law's control: {tests}")
-    images = {}
-    for name in targets:
-        target = WARM_TARGETS[name]
-        executable = programs / executable_name(target["entry"])
-        if target["entry"] not in tests or not executable.is_file():
-            raise ValueError(f"preparation produced no executable for {target['entry']}")
-        image = {"target": name, "executable": str(executable), "map": f"{executable}.covmap", "backend": backend,
-                 "prepare_cpu": cpu, "prepare_wall": wall, **target}
-        sites = warm_sites(image)
-        if target["body"] not in sites["all"] or not sites["decoder"]:
-            raise ValueError(f"{name}: coverage map has no target site or no law body")
-        image["build"], image["decoder_sites"] = sites["build"], len(sites["decoder"])
-        images[name] = image
-    return images
+    if not tests.get(target["entry"], {}).get("passed"):
+        raise ValueError(f"preparation must pass the {name} law's control: {tests}")
+    executable = programs / executable_name(target["entry"])
+    if not executable.is_file():
+        raise ValueError(f"preparation produced no executable for {target['entry']}")
+    image = {"target": name, "executable": str(executable), "map": f"{executable}.covmap", "backend": backend,
+             "prepare_cpu": cpu, "prepare_wall": wall,
+             **{key: target[key] for key in ("entry", "scope", "body", "statuses", "laws")}}
+    sites = warm_sites(image)
+    if target["body"] not in sites["all"] or not sites["decoder"]:
+        raise ValueError(f"{name}: coverage map has no target site or no law body")
+    image["build"], image["decoder_sites"] = sites["build"], len(sites["decoder"])
+    return image
 
 
 def warm_sites(image):
@@ -392,24 +413,22 @@ def warm_sites(image):
 
 
 def warm_variables(image, case):
-    if image["target"] == "http1":
-        return case_environment(case["input"], case["schedule"], case.get("expect"))
-    if len(case["input"]) > INPUT_LIMIT:
-        raise ValueError("input over the worker limit")
-    return {"HIRSEL_DECODER_INPUT": case["input"].hex()}
+    return case_environment(image["target"], case["input"], case["schedule"], case.get("expect"))
 
 
 def warm_status(image, status, row):
     """Fill a completed run's status and failure from the law's exit status."""
-    names = STATUSES if image["target"] == "http1" else ("ok",) + tuple(f"class-{k}" for k in range(1, 10))
+    names, laws = image["statuses"], image["laws"]
     tens, k = divmod(status, 10) if 0 <= status < 50 else (None, None)
     if status == 0:
         row["status"] = names[0]
     elif tens == 1 and k < len(names):
         row["status"] = names[k]
-    elif tens in WARM_LAWS and k < len(names):
+    elif tens in laws and k < len(names):
         row["status"] = names[k]
-        row["failure"] = f"{WARM_LAWS[tens] if image['target'] == 'http1' else f'law {status}'}: observed {names[k]}"
+        row["failure"] = f"{laws[tens]}: observed {names[k]}"
+    elif status == 30:
+        row["status"], row["failure"] = "law", "mismatch owner law"
     else:
         row["failure"] = f"exit {status}"
     row["observation"] = f"observed {row['status']}"
@@ -532,7 +551,8 @@ class Warm:
         row = new_row()
         row["started"] = True
         status, flags = self.call(warm_variables(self.image, case), timeout)
-        reached = self.reached(flags)
+        # Two records can hold one site name (a generic's instances): the reach is a set, as a raw file's is.
+        reached = set(self.reached(flags))
         row["entered"] = self.image["body"] in reached
         row["reached"] = sorted(site for site in reached if site.startswith(self.image["scope"]))
         if not row["entered"]:

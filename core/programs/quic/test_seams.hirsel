@@ -140,3 +140,26 @@ pub fn rotate_peer_cid(mut e: Endpoint, c: ConnectionHandle) -> bool {
 pub fn receive_packets(mut e: Endpoint, at: u64, packets: List[UdpPacket], mut buf: Bytes, mut events: List[Event]) {
     receive_batch(mut e, at, packets, mut buf, mut events)
 }
+
+/// Decoder-corpus seam: one CRYPTO stream's reassembly on its own, as a packet number
+/// space holds it, so a law can deliver fragments and read framed TLS messages without a
+/// connection.
+pub opaque type CryptoReader {
+    stream: Reassembly
+}
+
+pub fn crypto_reader() -> CryptoReader {
+    CryptoReader(stream: Reassembly(at: 0, data: b"", present: list.new()))
+}
+
+/// Deliver CRYPTO `data` at `offset`; false when it passes the stream's buffer
+/// (CRYPTO_BUFFER_EXCEEDED, RFC 9000 §7.5).
+pub fn crypto_receive(mut c: CryptoReader, offset: u64, data: Bytes) -> bool {
+    receive_crypto(mut c.stream, offset, data)
+}
+
+/// The next whole TLS handshake message, None while the stream has less, or the QUIC
+/// error that ends the connection.
+pub fn crypto_message(mut c: CryptoReader) -> Result[Option[Bytes], u64] {
+    tls_message(mut c.stream)
+}

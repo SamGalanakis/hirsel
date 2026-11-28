@@ -817,3 +817,6 @@ fn status_advisory_is_bound_to_release_and_withdrawal_keeps_other_advisories() {
     assert_eq!(state.disposition, Disposition::Active);
     assert_eq!(state.advisories.keys().collect::<Vec<_>>(), &["OSV-2"]);
 }
+
+// The reviewed decoder cohort `registry` over the fixtures above.
+mod reviewed;

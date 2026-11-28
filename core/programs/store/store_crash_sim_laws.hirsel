@@ -10,17 +10,24 @@
 // sharing nothing with the store's code: per branch name and per pin name,
 // the rows each one holds, as key -> edit. It asserts:
 //   (a) L3 (§1.6, §1.9, §3.6): after any crash, the reopened store equals one
-//       world of the history since the last acknowledged durable point
-//       (`durable` Ok, a cut, a cut-made pin/unpin/fork/delete_branch, a
-//       residency change, `close` Ok). In write-fault seeds (D6) the floor is
-//       not trusted and any recorded world is allowed.
+//       world of the history since the last cut-level point (a cut, a
+//       cut-made pin/unpin/delete_branch, a residency change, a recovery),
+//       no older than the last acknowledged one (`durable` Ok, a fork,
+//       `close` Ok, which makes no cut: §T1). Only D6 (§3.4) may go below
+//       that floor, and only as far as the disk's receipts explain: a write
+//       fault delivered to a journal segment since the cut-level point,
+//       whose damaged bytes the recovery read, drops its frame's commits and
+//       later ones. A rollback without that evidence fails as unresolved.
 //   (b) every head, pin, fork and held Snapshot reads exactly its reference
 //       rows after every step, and a held Snapshot keeps reading them across
 //       cuts, probes, unpins and branch deletes;
 //   (c) a backup leased at a head and restored reads exactly that head's
 //       reference rows, not the writes made after the lease;
-//   (d) damage surfaces only as Corrupt or Unsupported, only when the disk was
-//       damaged; a value that decodes but differs from its edit is a failure.
+//   (d) damage surfaces only as Corrupt or Unsupported, only after the store
+//       read damaged bytes (Corrupt: of the file it names), and Io or
+//       Poisoned only after the disk delivered an Eio or failed barrier
+//       (store_crash_sim_oracle.hirsel); a value that decodes but differs
+//       from its edit is a failure.
 // Every value carries its edit in byte 0 and a fill derived from key and
 // edit, so a read is checked without trusting the store's own encoding.
 // ---- the run ---------------------------------------------------------------
@@ -29,9 +36,15 @@ type CsimState {
     held: List[CsimHeld],
     // 0 Memory, 1 Tiered, 2 unknown after an uncertain residency change.
     tiered: u8,
+    // Configured write-fault rates: silent damage may reach files no call
+    // reports, so teardown verification is off. No oracle excuse reads it.
     write_faults: bool,
-    scripted: bool,
     damage_seen: bool,
+    // The current mount's receipt tap and what was drained from it, and the
+    // index in history of the last acknowledged durable point.
+    tap: Option[Receiver[std.sim.world.Receipt]],
+    ev: CsimEvidence,
+    floor: u64,
     // The fork and pin names whose catalog may hold the table as Tiered:
     // each was once made from a head or held Snapshot that was or may have
     // been Tiered. A residency change moves main only, and export refuses
@@ -39,8 +52,6 @@ type CsimState {
     // (store_has_tiered, §13.10). A name is never cleared, so a reused name
     // can only widen the allowed refusals, never fail a correct store.
     tiered_names: Map[String, u8],
-    // The last Corrupt or Unsupported the store returned, for (d)'s message.
-    damage: String,
     // An injected fault reached the store: teardown verification is off for
     // this store from then on (store_trust_laws.hirsel, "crash-sim/fault").
     faulted: bool,
@@ -73,6 +84,7 @@ fn csim_fail(st: CsimState, what: String) -> String {
             string.push_u64(mut text, st.stats[i])
         }
     }
+    csim_show_evidence(st.ev, mut text)
     string.push(mut text, "; replay: hirsel test core/programs/store --libraries core --exact store@1/store/test_store_crash_sim --seed <sim seed>")
     take text
 }
@@ -86,8 +98,15 @@ fn csim_stat_name(i: u64) -> String {
     }
 }
 
-fn csim_fault_active(st: CsimState) -> bool {
-    st.write_faults || st.scripted
+// Moves the receipts the disk has sent so far into the evidence.
+fn csim_drain(mut st: CsimState) {
+    let Some(take rx) = replace(mut st.tap, None) else {
+        return
+    }
+    while let Ok(take r) = channel.try_receive(rx) {
+        csim_note(mut st.ev, take r, list.len(st.history))
+    }
+    st.tap = Some(take rx)
 }
 
 // Whether a head's catalog may hold the table as Tiered.
@@ -118,14 +137,21 @@ fn csim_tiered_holder(st: CsimState, cur: CsimWorld) -> bool {
     false
 }
 
-// A durable point: every world before the current one is unreachable.
-fn csim_collapse(mut st: CsimState) {
-    if st.write_faults {
-        return
-    }
+// An acknowledged durable point: short of D6 no recovery shows an older
+// world.
+fn csim_ack(mut st: CsimState) {
+    st.floor = list.len(st.history) - 1
+}
+
+// A cut-level point: every world before the current one is unreachable, D6
+// included. Receipts not yet drained (the cut's own writes) stay in the D6
+// window.
+fn csim_cut_point(mut st: CsimState) {
     let newest = csim_last(st.history)
     list.clear(mut st.history)
     list.push(mut st.history, take newest)
+    st.floor = 0
+    st.ev.journal = list.new()
 }
 
 fn csim_record(mut st: CsimState, take w: CsimWorld) {
@@ -139,8 +165,8 @@ fn csim_record(mut st: CsimState, take w: CsimWorld) {
 // uncertain: its world (if any) stays possible and the driver crashes.
 // Otherwise it fails the law.
 fn csim_error(mut st: CsimState, what: String, e: Error, take maybe: Option[CsimWorld]) -> Result[CsimNext, String] {
-    let allowed = (st.scripted && csim_io(e)) || (st.write_faults && (csim_damage(e) || csim_io(e)))
-    if !allowed {
+    csim_drain(mut st)
+    if !csim_excused(st.ev, e) {
         let mut text = string.from(what)
         string.push(mut text, " returned ")
         string.push(mut text, csim_error_name(e))
@@ -148,7 +174,6 @@ fn csim_error(mut st: CsimState, what: String, e: Error, take maybe: Option[Csim
     }
     if csim_damage(e) {
         st.damage_seen = true
-        st.damage = csim_error_name(e)
     }
     st.faulted = true
     if let Some(take w) = take maybe {
@@ -201,8 +226,11 @@ fn csim_check_views(db: Db, rows: Table[u64, Bytes], mut st: CsimState) -> Resul
 }
 
 // (a): the reopened store is one allowed world of the history.
-fn csim_recovered(db: Db, rows: Table[u64, Bytes], mut st: CsimState) -> Result[bool, String] waits {
-    let seen = match csim_observe(db, rows) {
+// `mark` is how many journal receipts were drained before the open.
+fn csim_recovered(db: Db, rows: Table[u64, Bytes], mut st: CsimState, mark: u64) -> Result[bool, String] waits {
+    let observed = csim_observe(db, rows)
+    csim_drain(mut st)
+    let seen = match observed {
         Ok(take w) => take w,
         Error(Wrong(k)) => {
             let mut text = string.from("(d) recovery read a value no write stored, key ")
@@ -210,12 +238,9 @@ fn csim_recovered(db: Db, rows: Table[u64, Bytes], mut st: CsimState) -> Result[
             return Error(csim_fail(st, take text))
         },
         Error(Unreadable(e)) => {
-            if (st.write_faults && csim_damage(e)) || (csim_fault_active(st) && csim_io(e)) {
+            if csim_excused(st.ev, e) {
                 st.faulted = true
-                if csim_damage(e) {
-                    st.damage_seen = true
-                    st.damage = csim_error_name(e)
-                }
+                st.damage_seen = st.damage_seen || csim_damage(e)
                 return Ok(false)
             }
             let mut text = string.from("recovery read returned ")
@@ -232,11 +257,15 @@ fn csim_recovered(db: Db, rows: Table[u64, Bytes], mut st: CsimState) -> Result[
             break
         }
     }
-    if found == n {
-        let mut text = string.from("(a) L3: the recovered store is no allowed prefix of the acknowledged history: store ")
+    if found == n || !csim_rollback_allowed(st.ev, found, st.floor) {
+        let mut text = string.from(if found == n {
+            "(a) L3: the recovered store is no allowed prefix of the acknowledged history: store "
+        } else {
+            "(a) L3 unresolved: the recovered store lost an acknowledged durable point and no delivered journal write fault explains it (D6): store "
+        })
         csim_show_world(seen, mut text)
         string.push(mut text, "; durable floor ")
-        csim_show_world(st.history[0], mut text)
+        csim_show_world(st.history[st.floor], mut text)
         string.push(mut text, "; newest ")
         csim_show_world(st.history[n - 1], mut text)
         string.push(mut text, "; ")
@@ -245,19 +274,21 @@ fn csim_recovered(db: Db, rows: Table[u64, Bytes], mut st: CsimState) -> Result[
         return Error(csim_fail(st, take text))
     }
     st.stats[16] += 1
-    if found != 0 {
+    if found > st.floor {
         let _ = std.prop.sometimes("crash sim recovered past the durable floor", true)
+    }
+    if found < st.floor {
+        let _ = std.prop.sometimes("crash sim D6 rollback past an acknowledgment", true)
     }
     if found + 1 != n {
         let _ = std.prop.sometimes("crash sim lost unacknowledged commits", true)
     }
-    if st.write_faults {
-        csim_record(mut st, take seen)
-    } else {
-        // Open syncs what it recovered (§3.6), so that world is the floor.
-        list.clear(mut st.history)
-        list.push(mut st.history, take seen)
-    }
+    // Open syncs what it recovered (§3.6), so that world is the floor. The
+    // faults open's own journal writes took stay in the D6 window.
+    list.clear(mut st.history)
+    list.push(mut st.history, take seen)
+    st.floor = 0
+    csim_recovery_spends(mut st.ev, mark)
     Ok(true)
 }
 
@@ -339,7 +370,7 @@ fn csim_step(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: 
                 if let Error(e) = durable(mut db, tk) {
                     return csim_error(mut st, "durable", e, None)
                 }
-                csim_collapse(mut st)
+                csim_ack(mut st)
             }
             Ok(Go)
         },
@@ -348,7 +379,7 @@ fn csim_step(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: 
                 if let Error(e) = checkpoint(mut db) {
                     return csim_error(mut st, "checkpoint", e, None)
                 }
-                csim_collapse(mut st)
+                csim_cut_point(mut st)
                 rt_cut(db, root, mut st)?
             }
             Ok(Go)
@@ -388,7 +419,7 @@ fn csim_step(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: 
             match pin(mut db, name, s) {
                 Ok(_) if !exists => {
                     csim_record(mut st, take after)
-                    csim_collapse(mut st)
+                    csim_cut_point(mut st)
                 },
                 Error(Exists(_)) if exists => (),
                 Error(Reclaimed(_)) if held_pin && !exists => {
@@ -442,7 +473,7 @@ fn csim_step(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: 
             match unpin(mut db, name) {
                 Ok(_) if exists => {
                     csim_record(mut st, take after)
-                    csim_collapse(mut st)
+                    csim_cut_point(mut st)
                 },
                 Error(Missing(_)) if !exists => (),
                 Ok(_) => return Error(csim_fail(st, "unpin of an absent name returned Ok")),
@@ -489,7 +520,7 @@ fn csim_step(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: 
             match fork(mut db, name, s) {
                 Ok(_) if !exists => {
                     csim_record(mut st, take after)
-                    csim_collapse(mut st)
+                    csim_ack(mut st)
                 },
                 Error(Exists(_)) if exists => (),
                 Error(Reclaimed(_)) if from_held && !exists => {
@@ -520,7 +551,7 @@ fn csim_step(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: 
             match delete_branch(mut db, handle) {
                 Ok(_) => {
                     csim_record(mut st, take after)
-                    csim_collapse(mut st)
+                    csim_cut_point(mut st)
                 },
                 Error(e) => return csim_error(mut st, "delete_branch", e, Some(take after)),
             }
@@ -539,7 +570,7 @@ fn csim_step(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: 
                     } else {
                         0
                     }
-                    csim_collapse(mut st)
+                    csim_cut_point(mut st)
                     if to_tiered {
                         rt_arm(db, mut st)
                     }
@@ -644,7 +675,8 @@ fn csim_backup(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options
     let got = match csim_read(twin, child_rows, snapshot(twin)) {
         Ok(take got) => take got,
         Error(bad) => {
-            if csim_fault_active(st) {
+            csim_drain(mut st)
+            if st.write_faults || list.len(st.ev.seen) != 0 {
                 trust_opt_out("crash-sim/fault", mut twin)
             }
             drop(take twin)
@@ -664,13 +696,12 @@ fn csim_backup(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options
     Ok(Go)
 }
 
-fn csim_mount_plan(plan: CsimPlan, world_seed: u64, epoch: u64) -> (std.sim.world.Plan, bool) {
+fn csim_mount_plan(plan: CsimPlan, world_seed: u64, epoch: u64) -> std.sim.world.Plan {
     let seed = std.prop.world_seed(world_seed, 100 + epoch)
     let mut p = std.sim.world.plan(seed)
     std.sim.world.set_write_faults(mut p, plan.faults)
     let mut g = std.rand.new(seed, 0x9e3779b97f4a7c15)
-    let scripted = plan.script_permille > 0 && std.rand.below(mut g, 1000) < plan.script_permille
-    if scripted {
+    if plan.script_permille > 0 && std.rand.below(mut g, 1000) < plan.script_permille {
         let site = std.rand.below(mut g, 400)
         let fault: std.sim.world.Fault = if std.rand.below(mut g, 2) == 0 {
             Eio
@@ -679,7 +710,7 @@ fn csim_mount_plan(plan: CsimPlan, world_seed: u64, epoch: u64) -> (std.sim.worl
         }
         std.sim.world.script(mut p, site, fault)
     }
-    (take p, scripted)
+    take p
 }
 
 fn csim_case(take case: std.prop.Case[CsimPlan]) -> Result[(), String] waits {
@@ -693,7 +724,7 @@ fn csim_run(take case: std.prop.Case[CsimPlan], take trace: Option[RtTrace]) -> 
     let (c, _hand) = provide.clock(0, 0)
     let r = provide.random(world_seed)
     let write_faults = plan.faults.corrupt + plan.faults.misdirect + plan.faults.lost_write > 0
-    let mut st = CsimState(history: list.new(), held: list.new(), tiered: 0, write_faults, scripted: false, damage_seen: false, tiered_names: map.new(), damage: string.new(), faulted: false, stats: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], at: 0, note: string.new(), trace: take trace)
+    let mut st = CsimState(history: list.new(), held: list.new(), tiered: 0, write_faults, damage_seen: false, tap: None, ev: csim_evidence(int.widen(plan.options.group_commits)), floor: 0, tiered_names: map.new(), faulted: false, stats: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], at: 0, note: string.new(), trace: take trace)
     list.push(mut st.history, csim_empty())
     // A clean setup mount: the store directory and the one table.
     let (clean, clean_server) = sim_disk_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(world_seed), CSIM_ROOM)
@@ -715,11 +746,14 @@ fn csim_run(take case: std.prop.Case[CsimPlan], take trace: Option[RtTrace]) -> 
         if epoch > CSIM_STEPS + 16 {
             return Error(csim_fail(st, "the store never reopened"))
         }
-        let (mount_plan, scripted) = csim_mount_plan(plan, world_seed, epoch)
-        st.scripted = scripted
-        let (root, server) = sim_disk_mount(tasks, c, take image, take mount_plan, CSIM_ROOM)
+        let (tx, rx): (Sender[std.sim.world.Receipt], Receiver[std.sim.world.Receipt]) = channel.new(CSIM_TAP)
+        st.tap = Some(take rx)
+        st.ev.seen = list.new()
+        let (root, server) = sim_disk_mount_tapped(tasks, c, take image, csim_mount_plan(plan, world_seed, epoch), CSIM_ROOM, Some(take tx))
         let mut power = false
         while !power && !done {
+            csim_drain(mut st)
+            let mark = list.len(st.ev.journal)
             let opened = match host.open_dir(root, "s") {
                 Ok(dir) => open(tasks, dir, c, r, clone(plan.options)),
                 Error(e) => Error(Io(e)),
@@ -728,14 +762,14 @@ fn csim_run(take case: std.prop.Case[CsimPlan], take trace: Option[RtTrace]) -> 
                 Ok(take db) => take db,
                 Error(e) => {
                     st.faulted = true
-                    if st.write_faults && csim_damage(e) {
+                    csim_drain(mut st)
+                    if csim_damage_excused(st.ev, e) {
                         st.damage_seen = true
-                        st.damage = csim_error_name(e)
                         terminal = true
                         done = true
                         break
                     }
-                    if csim_fault_active(st) && csim_io(e) {
+                    if csim_io_excused(st.ev, e) {
                         // The scripted site hit open: cut power and remount.
                         power = true
                         break
@@ -750,7 +784,7 @@ fn csim_run(take case: std.prop.Case[CsimPlan], take trace: Option[RtTrace]) -> 
                 // reports it; (d) is this law's check for it.
                 trust_opt_out("crash-sim/fault", mut db)
             }
-            match csim_recovered(db, rows, mut st)? {
+            match csim_recovered(db, rows, mut st, mark)? {
                 true => rt_reopen(db, root, mut st)?,
                 false => {
                     trust_opt_out("crash-sim/fault", mut db)
@@ -766,10 +800,18 @@ fn csim_run(take case: std.prop.Case[CsimPlan], take trace: Option[RtTrace]) -> 
             }
             let mut after = Go
             while st.at < list.len(plan.steps) {
+                csim_drain(mut st)
                 let step = plan.steps[st.at]
                 st.note = string.from(csim_op_name(step.op))
                 st.stats[step.op] += 1
-                after = csim_step(mut db, tasks, c, r, root, plan.options, rows, mut st, step)?
+                after = match csim_step(mut db, tasks, c, r, root, plan.options, rows, mut st, step) {
+                    Ok(n) => n,
+                    Error(text) => {
+                        // The law's own failure, not the teardown check's.
+                        trust_opt_out("crash-sim/fault", mut db)
+                        return Error(text)
+                    },
+                }
                 if csim_go(after) {
                     rt_cut(db, root, mut st)?
                 }
@@ -789,17 +831,24 @@ fn csim_run(take case: std.prop.Case[CsimPlan], take trace: Option[RtTrace]) -> 
                 Go => {
                     // The steps ran out: a clean close, then one more reopen
                     // that must give the newest world.
-                    match close(take db) {
+                    let closed = close(take db)
+                    csim_drain(mut st)
+                    match closed {
                         Ok(()) => {
-                            csim_collapse(mut st)
+                            csim_ack(mut st)
                             st.note = string.from("final reopen")
+                            let final_mark = list.len(st.ev.journal)
                             let final_dir = host.open_dir(root, "s") ?=> |_| csim_fail(st, "open_dir failed")
-                            match open(tasks, final_dir, c, r, clone(plan.options)) {
-                                Ok(reopened) => {
-                                    let _ = csim_recovered(reopened, rows, mut st)?
-                                    match close(take reopened) {
+                            let final_open = open(tasks, final_dir, c, r, clone(plan.options))
+                            csim_drain(mut st)
+                            match take final_open {
+                                Ok(take reopened) => {
+                                    let _ = csim_recovered(reopened, rows, mut st, final_mark)?
+                                    let final_close = close(take reopened)
+                                    csim_drain(mut st)
+                                    match final_close {
                                         Ok(()) => (),
-                                        Error(e) if csim_fault_active(st) && (csim_io(e) || csim_damage(e)) => (),
+                                        Error(e) if csim_excused(st.ev, e) => (),
                                         Error(e) => {
                                             let mut text = string.from("final close returned ")
                                             string.push(mut text, csim_error_name(e))
@@ -807,12 +856,11 @@ fn csim_run(take case: std.prop.Case[CsimPlan], take trace: Option[RtTrace]) -> 
                                         },
                                     }
                                 },
-                                Error(e) if st.write_faults && csim_damage(e) => {
+                                Error(e) if csim_damage_excused(st.ev, e) => {
                                     st.damage_seen = true
-                                    st.damage = csim_error_name(e)
                                     terminal = true
                                 },
-                                Error(e) if csim_fault_active(st) && csim_io(e) => (),
+                                Error(e) if csim_io_excused(st.ev, e) => (),
                                 Error(e) => {
                                     let mut text = string.from("final open returned ")
                                     string.push(mut text, csim_error_name(e))
@@ -820,7 +868,7 @@ fn csim_run(take case: std.prop.Case[CsimPlan], take trace: Option[RtTrace]) -> 
                                 },
                             }
                         },
-                        Error(e) if csim_fault_active(st) && (csim_io(e) || csim_damage(e)) => (),
+                        Error(e) if csim_excused(st.ev, e) => (),
                         Error(e) => {
                             let mut text = string.from("close returned ")
                             string.push(mut text, csim_error_name(e))
@@ -834,25 +882,26 @@ fn csim_run(take case: std.prop.Case[CsimPlan], take trace: Option[RtTrace]) -> 
                     drop(take db)
                     power = true
                 },
-                Reopen => match close(take db) {
-                    Ok(()) => csim_collapse(mut st),
-                    Error(e) if csim_fault_active(st) && (csim_io(e) || csim_damage(e)) => (),
-                    Error(e) => {
-                        let mut text = string.from("close returned ")
-                        string.push(mut text, csim_error_name(e))
-                        return Error(csim_fail(st, take text))
-                    },
+                Reopen => {
+                    let closed = close(take db)
+                    csim_drain(mut st)
+                    match closed {
+                        Ok(()) => csim_ack(mut st),
+                        Error(e) if csim_excused(st.ev, e) => (),
+                        Error(e) => {
+                            let mut text = string.from("close returned ")
+                            string.push(mut text, csim_error_name(e))
+                            return Error(csim_fail(st, take text))
+                        },
+                    }
                 },
             }
         }
         image = sim_disk_unmount(take root, take server)
-        // (d): Corrupt or Unsupported only on a damaged disk. Checked per
-        // mount, before a power cut can drop a damaged unsynced version.
-        if st.damage_seen && !std.sim.fs.has_write_damage(image) {
-            let mut text = string.from("(d) the store returned ")
-            string.push(mut text, st.damage)
-            string.push(mut text, " on an undamaged disk")
-            return Error(csim_fail(st, take text))
+        csim_drain(mut st)
+        st.tap = None
+        if std.sim.fs.receipts_dropped(image) != 0 {
+            return Error(csim_fail(st, "unresolved: the disk's receipt tap overflowed, so the fault evidence is incomplete"))
         }
         st.damage_seen = false
         if power {

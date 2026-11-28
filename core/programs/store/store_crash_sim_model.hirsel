@@ -41,6 +41,9 @@ const CSIM_TX_STEPS: u64 = 10000000
 
 const CSIM_ROOM: u64 = 67108864
 
+// Receipts the disk may send between two drains of the tap.
+const CSIM_TAP: u64 = 4096
+
 const CS_PUT: u64 = 0
 
 const CS_DURABLE: u64 = 1

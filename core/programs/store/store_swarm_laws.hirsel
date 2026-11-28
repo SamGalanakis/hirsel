@@ -38,6 +38,9 @@ const SWARM_SCAN: u64 = 14
 
 const SWARM_MARKS: u64 = 15
 
+// Receipts the arm's one mount may send; the tap is drained at unmount.
+const SWARM_TAP: u64 = 65536
+
 fn swarm_draw(mut src: std.prop.Source) -> StoreSwarm {
     let group_commits: Inline[u32, 3] =[1, 4, 64]
     let group_bytes: Inline[u64, 3] =[65536, 262144, 4194304]
@@ -140,12 +143,22 @@ fn swarm_case(take case: std.prop.Case[StoreSwarm]) -> Result[(), String] waits 
     let image = sim_disk_unmount(take clean, take init_server)
     let mut faults = std.sim.world.plan(std.prop.world_seed(world_seed, 1))
     std.sim.world.set_write_faults(mut faults, swarm.faults)
-    let (disk, fault_server) = sim_disk_mount(tasks, c, take image, take faults, 33554432)
+    let (tx, rx): (Sender[std.sim.world.Receipt], Receiver[std.sim.world.Receipt]) = channel.new(SWARM_TAP)
+    let (disk, fault_server) = sim_disk_mount_tapped(tasks, c, take image, take faults, 33554432, Some(take tx))
     let verdict = random_arm(disk, c, r, tasks, world_seed, take fixture, swarm)
     let final_image = sim_disk_unmount(take disk, take fault_server)
+    // Corrupt is expected only after the store read damaged bytes of the
+    // file it names (store_crash_sim_oracle.hirsel).
+    let mut ev = csim_evidence(1)
+    while let Ok(take receipt) = channel.try_receive(rx) {
+        csim_note(mut ev, take receipt, 0)
+    }
+    if std.sim.fs.receipts_dropped(final_image) != 0 {
+        return Error("L69 swarm: the disk's receipt tap overflowed, so the fault evidence is incomplete")
+    }
     match take verdict {
         Ok(()) => Ok(()),
-        Error(take problem) if std.sim.fs.has_write_damage(final_image) && trust_expected_reopen_fault("L69/seeded-write", clone(problem)) => {
+        Error(take problem) if csim_damage_excused(ev, problem) && trust_expected_reopen_fault("L69/seeded-write", clone(problem)) => {
             let _ = std.prop.sometimes("disk fault detected", true)
             Ok(())
         },

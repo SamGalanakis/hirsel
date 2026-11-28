@@ -1,0 +1,516 @@
+// The Store recovery decision table (TigerBeetle Tier 1 item 1.1).
+//
+// Every cell of the product of the axes below is either impossible, with a
+// stated reason, or reachable, with exactly one expected answer taken from
+// STORE-SPEC.md §3.4 step 5 (owner reopen) and §3.3b "Reader captures" plus
+// "The monotone rule" (live Directory follower capture). The shards drive
+// every reachable cell through `open` or through the follower worker's
+// `initial_follow_capture` and `follower_step(Apply)`, over a forwarding Dir
+// that changes the image at the observation the cell names. The oracle below
+// never calls the code under test.
+//
+// The image. Segment P = first_live holds one COMMIT (version 1) and a good
+// END at 114. The subject segment S = P + 1 has HEADER prev_end 114 and three
+// 42-byte COMMITs: C1 (v2) at 72, C2 (v3) at 114 and C3 (v4) at 156, ending
+// at 198. Its certified boundary is 156 (135 for a straddle): the successor's
+// prev_end when S is a middle segment, else S's END d. A fault at "below" is
+// placed in C2, a fault at "at or above" in C3. A good successor U = S + 1
+// holds C4 (v4) and C5 (v5) after prev_end, with END 156. A torn successor is
+// a 40-byte HEADER with no END: a crash during its creation.
+//
+// The predecessor axis drops P: S is then first_live itself, its HEADER has
+// prev_end 0, and every version above is one lower (P held only v1).
+const TABLE_OWNER: u64 = 0
+
+const TABLE_FOLLOWER: u64 = 1
+
+const TABLE_MIDDLE: u64 = 0
+
+const TABLE_TERMINAL: u64 = 1
+
+const TABLE_NO_SUCCESSOR: u64 = 0
+
+const TABLE_GOOD_SUCCESSOR: u64 = 1
+
+const TABLE_TORN_SUCCESSOR: u64 = 2
+
+const TABLE_GOOD: u64 = 0
+
+const TABLE_BAD: u64 = 1
+
+const TABLE_END_GOOD: u64 = 0
+
+const TABLE_END_MISSING: u64 = 1
+
+const TABLE_END_BAD: u64 = 2
+
+const TABLE_BELOW: u64 = 0
+
+const TABLE_ABOVE: u64 = 1
+
+const TABLE_CLEAN_EOF: u64 = 0
+
+const TABLE_ZERO_TAIL: u64 = 1
+
+const TABLE_TRUNCATED: u64 = 2
+
+const TABLE_BAD_LENGTH: u64 = 3
+
+const TABLE_BAD_CHECKSUM: u64 = 4
+
+const TABLE_BAD_FRAME_HEAD: u64 = 5
+
+const TABLE_STRADDLE: u64 = 6
+
+const TABLE_NA: u64 = 0
+
+const TABLE_STABLE: u64 = 1
+
+const TABLE_CHANGING: u64 = 2
+
+const TABLE_GRANTED: u64 = 1
+
+const TABLE_LOCK_HELD: u64 = 2
+
+const TABLE_WAIT: u64 = 3
+
+const TABLE_DEADLINE: u64 = 4
+
+const TABLE_INITIAL: u64 = 1
+
+const TABLE_ADVANCING: u64 = 2
+
+const TABLE_PREDECESSOR: u64 = 0
+
+const TABLE_FIRST_LIVE: u64 = 1
+
+const TABLE_AXES: u64 = 11
+
+const TABLE_TOTAL: u64 = 90720
+
+// Answers.
+const TABLE_ACCEPT: u64 = 0
+
+const TABLE_TORN_STOP: u64 = 1
+
+const TABLE_ABSENT: u64 = 2
+
+const TABLE_RETAIN_PREVIOUS: u64 = 3
+
+const TABLE_DIVERGED: u64 = 4
+
+const TABLE_CORRUPT_HEADER: u64 = 5
+
+const TABLE_CORRUPT_FRAME: u64 = 6
+
+const TABLE_DEADLINE_HIT: u64 = 7
+
+// Dispositions that carry the walk or fence state an accepted answer went through.
+const TABLE_RESTART_FIRST_WALK: u64 = 8
+
+const TABLE_WAITED: u64 = 9
+
+const TABLE_DISPOSITIONS: u64 = 10
+
+// Impossibility reasons.
+const TABLE_OWNER_HAS_NO_READER_STATE: u64 = 0
+
+const TABLE_CAPTURE_NEEDS_READER_STATE: u64 = 1
+
+const TABLE_MIDDLE_IS_GOOD_SUCCESSOR: u64 = 2
+
+const TABLE_NOTHING_BELOW_HEADER: u64 = 3
+
+const TABLE_STRADDLE_STARTS_BELOW: u64 = 4
+
+const TABLE_SINGLE_WALK: u64 = 5
+
+const TABLE_INITIAL_HAS_NO_DEADLINE: u64 = 6
+
+const TABLE_NO_SEGMENT_TO_FENCE: u64 = 7
+
+const TABLE_REASONS: u64 = 8
+
+const TABLE_P_END: u64 = 114
+
+const TABLE_BOUNDARY: u64 = 156
+
+const TABLE_STRADDLE_BOUNDARY: u64 = 135
+
+const TABLE_FULL: u64 = 198
+
+const TABLE_PUBLISHED_VERSION: u64 = 4
+
+const TABLE_CEILING: u64 = 1048576
+
+const TABLE_NO_DEADLINE: u64 = 18446744073709551615u64
+
+const TABLE_LONG_DEADLINE: u64 = 1000000000000u64
+
+const TABLE_SHORT_DEADLINE: u64 = 3000000u64
+
+type TableCell: send {
+    entry: u64,
+    position: u64,
+    successor: u64,
+    header: u64,
+    end: u64,
+    at: u64,
+    fault: u64,
+    walk: u64,
+    fence: u64,
+    previous: u64,
+    predecessor: u64
+}
+
+type TableExpect: send {
+    answer: u64,
+    version: u64,
+    walks: u64,
+    probes: u64
+}
+
+type TableVerdict: send = TableImpossible(u64) | TableReachable(TableExpect)
+
+type TableSeen: send = SeenAccept(u64) | SeenRetained | SeenDiverged(u64) | SeenCorrupt(String, u64) | SeenDeadline | SeenOther(String)
+
+type TableTrace: send {
+    walks: u64,
+    probes: u64
+}
+
+fn table_axis_size(axis: u64) -> u64 {
+    if axis == 0 {
+        2
+    } else if axis == 1 {
+        2
+    } else if axis == 2 {
+        3
+    } else if axis == 3 {
+        2
+    } else if axis == 4 {
+        3
+    } else if axis == 5 {
+        2
+    } else if axis == 6 {
+        7
+    } else if axis == 7 {
+        3
+    } else if axis == 8 {
+        5
+    } else if axis == 9 {
+        3
+    } else {
+        2
+    }
+}
+
+// Mixed-radix decoding of a cell slot, axis 0 fastest.
+fn table_cell(slot: u64) -> TableCell {
+    let mut digits: List[u64] = list.with_capacity(TABLE_AXES)
+    let mut rest = slot
+    for axis in 0u64 .. TABLE_AXES {
+        let size = table_axis_size(axis)
+        list.push(mut digits, rest % size)
+        rest = rest / size
+    }
+    TableCell(entry: digits[0], position: digits[1], successor: digits[2], header: digits[3], end: digits[4], at: digits[5], fault: digits[6], walk: digits[7], fence: digits[8], previous: digits[9], predecessor: digits[10])
+}
+
+fn table_push_value(mut out: String, axis: u64, value: u64) {
+    if axis == 0 {
+        string.push(mut out, if value == TABLE_OWNER {
+            "owner"
+        } else {
+            "follower"
+        })
+    } else if axis == 1 {
+        string.push(mut out, if value == TABLE_MIDDLE {
+            "middle"
+        } else {
+            "terminal"
+        })
+    } else if axis == 2 {
+        string.push(mut out, if value == TABLE_NO_SUCCESSOR {
+            "no-successor"
+        } else if value == TABLE_GOOD_SUCCESSOR {
+            "good-successor"
+        } else {
+            "torn-successor"
+        })
+    } else if axis == 3 {
+        string.push(mut out, if value == TABLE_GOOD {
+            "header-good"
+        } else {
+            "header-bad"
+        })
+    } else if axis == 4 {
+        string.push(mut out, if value == TABLE_END_GOOD {
+            "end-good"
+        } else if value == TABLE_END_MISSING {
+            "end-missing"
+        } else {
+            "end-bad"
+        })
+    } else if axis == 5 {
+        string.push(mut out, if value == TABLE_BELOW {
+            "below"
+        } else {
+            "at-or-above"
+        })
+    } else if axis == 6 {
+        string.push(mut out, if value == TABLE_CLEAN_EOF {
+            "clean-eof"
+        } else if value == TABLE_ZERO_TAIL {
+            "zero-tail"
+        } else if value == TABLE_TRUNCATED {
+            "truncated"
+        } else if value == TABLE_BAD_LENGTH {
+            "bad-length"
+        } else if value == TABLE_BAD_CHECKSUM {
+            "bad-checksum"
+        } else if value == TABLE_BAD_FRAME_HEAD {
+            "bad-frame-head"
+        } else {
+            "straddle"
+        })
+    } else if axis == 7 {
+        string.push(mut out, if value == TABLE_NA {
+            "walk-na"
+        } else if value == TABLE_STABLE {
+            "stable-walk"
+        } else {
+            "changing-first-walk"
+        })
+    } else if axis == 8 {
+        string.push(mut out, if value == TABLE_NA {
+            "fence-na"
+        } else if value == TABLE_GRANTED {
+            "fence-granted"
+        } else if value == TABLE_LOCK_HELD {
+            "fence-refused-lock-held"
+        } else if value == TABLE_WAIT {
+            "fence-refused-lock-free-then-granted"
+        } else {
+            "fence-refused-to-deadline"
+        })
+    } else if axis == 9 {
+        string.push(mut out, if value == TABLE_NA {
+            "previous-na"
+        } else if value == TABLE_INITIAL {
+            "initial-capture"
+        } else {
+            "advancing-from-published"
+        })
+    } else {
+        string.push(mut out, if value == TABLE_PREDECESSOR {
+            "after-predecessor"
+        } else {
+            "first-live"
+        })
+    }
+}
+
+fn table_cell_text(cell: TableCell) -> String {
+    let mut values: List[u64] = list.with_capacity(TABLE_AXES)
+    list.push(mut values, cell.entry)
+    list.push(mut values, cell.position)
+    list.push(mut values, cell.successor)
+    list.push(mut values, cell.header)
+    list.push(mut values, cell.end)
+    list.push(mut values, cell.at)
+    list.push(mut values, cell.fault)
+    list.push(mut values, cell.walk)
+    list.push(mut values, cell.fence)
+    list.push(mut values, cell.previous)
+    list.push(mut values, cell.predecessor)
+    let mut out = string.with_capacity(256)
+    for axis in 0u64 .. TABLE_AXES {
+        if axis != 0 {
+            string.push(mut out, "/")
+        }
+        table_push_value(mut out, axis, values[axis])
+    }
+    take out
+}
+
+fn table_push_answer(mut out: String, answer: u64) {
+    string.push(mut out, if answer == TABLE_ACCEPT {
+        "accept"
+    } else if answer == TABLE_TORN_STOP {
+        "torn_stop"
+    } else if answer == TABLE_ABSENT {
+        "absent"
+    } else if answer == TABLE_RETAIN_PREVIOUS {
+        "retain_previous_capture"
+    } else if answer == TABLE_DIVERGED {
+        "diverged"
+    } else if answer == TABLE_CORRUPT_HEADER {
+        "corrupt_header"
+    } else if answer == TABLE_CORRUPT_FRAME {
+        "corrupt_frame"
+    } else if answer == TABLE_DEADLINE_HIT {
+        "deadline"
+    } else if answer == TABLE_RESTART_FIRST_WALK {
+        "restart_first_walk"
+    } else {
+        "wait"
+    })
+}
+
+fn table_expected(answer: u64, wanted: u64, walks: u64, probes: u64) -> TableVerdict {
+    TableReachable(TableExpect(answer: answer, version: wanted, walks: walks, probes: probes))
+}
+
+// The oracle, from STORE-SPEC.md text alone.
+fn table_verdict(cell: TableCell) -> TableVerdict {
+    let owner = cell.entry == TABLE_OWNER
+    // An owner holds LOCK, takes each fence with no deadline and publishes no
+    // capture (§3.4 step 5), so the reader axes do not exist for it.
+    if owner && (cell.walk != TABLE_NA || cell.fence != TABLE_NA || cell.previous != TABLE_NA) {
+        return TableImpossible(TABLE_OWNER_HAS_NO_READER_STATE)
+    }
+    // Every capture walks, takes or is refused the terminal fence, and either
+    // has a published capture or is the first (§3.3b steps 1-2, §12.5).
+    if !owner && (cell.walk == TABLE_NA || cell.fence == TABLE_NA || cell.previous == TABLE_NA) {
+        return TableImpossible(TABLE_CAPTURE_NEEDS_READER_STATE)
+    }
+    // "For each segment except the last, the next segment's HEADER gives its
+    // valid end" and "the last segment present is the terminal segment": a
+    // middle segment is exactly one with a good-header successor. A torn
+    // successor is absent, so its predecessor is the last one.
+    let middle = cell.position == TABLE_MIDDLE
+    if middle != (cell.successor == TABLE_GOOD_SUCCESSOR) {
+        return TableImpossible(TABLE_MIDDLE_IS_GOOD_SUCCESSOR)
+    }
+    // A terminal segment without a good END reads "from the HEADER on". No
+    // frame starts below 72, and a clean end below 72 is a short HEADER.
+    let certified = cell.end == TABLE_END_GOOD
+    if !middle && !certified && cell.at == TABLE_BELOW {
+        return TableImpossible(TABLE_NOTHING_BELOW_HEADER)
+    }
+    if cell.fault == TABLE_STRADDLE && cell.at == TABLE_ABOVE {
+        return TableImpossible(TABLE_STRADDLE_STARTS_BELOW)
+    }
+    // A first walk is abandoned only on a bad HEADER with a successor
+    // present: the case a creator mid-write can show (§3.3b step 1, BL7).
+    // Any other walk is the capture's only walk.
+    let walk_restarts = cell.header == TABLE_BAD && cell.successor != TABLE_NO_SUCCESSOR
+    if cell.walk == TABLE_CHANGING && !walk_restarts {
+        return TableImpossible(TABLE_SINGLE_WALK)
+    }
+    // "open_read_only has no deadline and waits like the opener"; a
+    // follower's first capture likewise has none.
+    if cell.previous == TABLE_INITIAL && cell.fence == TABLE_DEADLINE {
+        return TableImpossible(TABLE_INITIAL_HAS_NO_DEADLINE)
+    }
+    // A first-live S that is absent leaves no segment, and the fence is the
+    // terminal segment's (§3.3b step 2), so nothing can refuse a capture.
+    let first_live = cell.predecessor == TABLE_FIRST_LIVE
+    let leaves_none = first_live && cell.header == TABLE_BAD && cell.successor == TABLE_NO_SUCCESSOR && !certified
+    if !owner && leaves_none && cell.fence != TABLE_GRANTED {
+        return TableImpossible(TABLE_NO_SEGMENT_TO_FENCE)
+    }
+    // Without P every version is one lower, and the published capture too.
+    let shift = if first_live {
+        1u64
+    } else {
+        0u64
+    }
+    // Walk (§3.3b step 1; §3.4 step 5 "A bad last header").
+    let mut walks = 1u64
+    let mut absent = false
+    if cell.header == TABLE_BAD {
+        if walk_restarts {
+            // "A bad HEADER on any segment that has a successor" is
+            // Corrupt(Header) when it holds still. A changing first walk sees
+            // the HEADER land and the second walk reads it good.
+            if owner || cell.walk == TABLE_STABLE {
+                return table_expected(TABLE_CORRUPT_HEADER, 0, 0, 0)
+            }
+            walks = 2
+        } else if certified {
+            // "A durable END name implies a durable header" (§3.2).
+            return table_expected(TABLE_CORRUPT_HEADER, 0, 0, 0)
+        } else {
+            // A crash during segment creation: the segment is absent and P,
+            // with its own END, is the last one. Without P nothing is left
+            // and the answer is the MANIFEST checkpoint (version 0). Only this
+            // one segment is dropped: with a successor file present the bad
+            // HEADER is Corrupt above, whether or not S is first_live.
+            absent = true
+        }
+    }
+    // Bound (§3.3b step 2). The owner always reads final bytes to the torn tail.
+    let torn = owner || cell.fence != TABLE_LOCK_HELD
+    let probes = if !owner && (cell.fence == TABLE_LOCK_HELD || cell.fence == TABLE_WAIT) {
+        1u64
+    } else {
+        0u64
+    }
+    if !owner && cell.fence == TABLE_DEADLINE {
+        return table_expected(TABLE_DEADLINE_HIT, 0, 0, 0)
+    }
+    // Read (§3.4 step 5; §3.3b step 4).
+    let mut answer = TABLE_ACCEPT
+    let mut candidate = 0u64
+    if absent {
+        answer = TABLE_ABSENT
+        candidate = 1
+    } else if middle {
+        // "A bad frame starting below prev_end is Corrupt. Bytes from
+        // prev_end on are ignored." A segment shorter than its prev_end, or a
+        // frame across it, misses bytes the successor certified (§3.5 step 0).
+        if cell.at == TABLE_BELOW {
+            return table_expected(TABLE_CORRUPT_FRAME, 0, 0, 0)
+        }
+        candidate = 5
+    } else if torn {
+        // "Shorter than d is Corrupt(Truncated)", "a bad frame starting
+        // below d, or a frame starting below d and ending past it, is
+        // Corrupt", and "from d on, or from the HEADER on when there is no d,
+        // recovery reads until the first bad frame".
+        if cell.at == TABLE_BELOW {
+            return table_expected(TABLE_CORRUPT_FRAME, 0, 0, 0)
+        }
+        if cell.fault == TABLE_CLEAN_EOF {
+            candidate = 4
+        } else {
+            answer = TABLE_TORN_STOP
+            candidate = 3
+        }
+    } else if certified {
+        // The END bound "applies only frames ... that end at or below d".
+        // Bytes below d were acknowledged, so damage there is Corrupt as it
+        // is for the owner.
+        if cell.at == TABLE_BELOW {
+            return table_expected(TABLE_CORRUPT_FRAME, 0, 0, 0)
+        }
+        candidate = 3
+    } else {
+        // "An unreadable terminal END giving d = 72."
+        candidate = 1
+    }
+    // The monotone rule: behind and END-bounded keeps P (Captured(None));
+    // behind and torn-tail-bounded is Diverged(b) with b = main.
+    if cell.previous == TABLE_ADVANCING && candidate < TABLE_PUBLISHED_VERSION {
+        if torn {
+            return table_expected(TABLE_DIVERGED, 0, walks, probes)
+        }
+        return table_expected(TABLE_RETAIN_PREVIOUS, TABLE_PUBLISHED_VERSION - shift, walks, probes)
+    }
+    table_expected(answer, candidate - shift, walks, probes)
+}
+
+// The one disposition a reachable cell is counted under.
+fn table_disposition(cell: TableCell, expect: TableExpect) -> u64 {
+    if expect.answer >= TABLE_RETAIN_PREVIOUS {
+        expect.answer
+    } else if expect.walks == 2 {
+        TABLE_RESTART_FIRST_WALK
+    } else if cell.fence == TABLE_WAIT {
+        TABLE_WAITED
+    } else {
+        expect.answer
+    }
+}

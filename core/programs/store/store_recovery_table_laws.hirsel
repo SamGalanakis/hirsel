@@ -1,0 +1,633 @@
+// Fixtures, witnesses and shards of the Store recovery decision table; the
+// axes and the oracle are in store_recovery_table_oracle.hirsel.
+fn table_ctx(id: StoreId, seq: u64) -> format.DiskContext {
+    format.DiskContext(store: store_key_to_rep(id), role: 2, seq: seq)
+}
+
+fn table_header(id: StoreId, seq: u64, prev_end: u64) -> Bytes {
+    result.unwrap(format.disk_header_bytes(table_ctx(id, seq), prev_end, 0))
+}
+
+fn table_flip(mut raw: Bytes, at: u64) {
+    let changed = raw[at] ^ 1u8
+    let _ = list.set(mut raw, at, changed)
+}
+
+fn table_predecessor(id: StoreId, seq: u64) -> Bytes {
+    let mut raw = table_header(id, seq, 0)
+    list.append(mut raw, journal_empty_commit(table_ctx(id, seq), 72, 1))
+    take raw
+}
+
+// The version P leaves behind: 1, or the checkpoint's 0 without P.
+fn table_base(cell: TableCell) -> u64 {
+    if cell.predecessor == TABLE_FIRST_LIVE {
+        0u64
+    } else {
+        1u64
+    }
+}
+
+fn table_subject_seq(cell: TableCell, first: u64) -> u64 {
+    first + table_base(cell)
+}
+
+fn table_subject_prev_end(cell: TableCell) -> u64 {
+    if cell.predecessor == TABLE_FIRST_LIVE {
+        0u64
+    } else {
+        TABLE_P_END
+    }
+}
+
+fn table_subject_frames(id: StoreId, seq: u64, cell: TableCell) -> Bytes {
+    let ctx = table_ctx(id, seq)
+    let base = table_base(cell)
+    let mut raw = table_header(id, seq, table_subject_prev_end(cell))
+    list.append(mut raw, journal_empty_commit(ctx, 72, base + 1))
+    list.append(mut raw, journal_empty_commit(ctx, 114, base + 2))
+    list.append(mut raw, journal_empty_commit(ctx, 156, base + 3))
+    take raw
+}
+
+fn table_prefix(raw: Bytes, size: u64) -> Bytes {
+    result.unwrap(failure_result_from_rep(types.copied(list.slice(raw, 0, size))))
+}
+
+fn table_boundary(cell: TableCell) -> u64 {
+    if cell.fault == TABLE_STRADDLE {
+        TABLE_STRADDLE_BOUNDARY
+    } else {
+        TABLE_BOUNDARY
+    }
+}
+
+// S's bytes on disk for the cell: the frame fault, then the HEADER fault.
+fn table_subject(cell: TableCell, id: StoreId, seq: u64) -> Bytes {
+    let full = table_subject_frames(id, seq, cell)
+    let at = if cell.at == TABLE_BELOW {
+        114u64
+    } else {
+        156u64
+    }
+    let mut raw = if cell.fault == TABLE_CLEAN_EOF {
+        if cell.at == TABLE_BELOW {
+            table_prefix(full, 114)
+        } else {
+            table_prefix(full, TABLE_FULL)
+        }
+    } else if cell.fault == TABLE_TRUNCATED {
+        table_prefix(full, at + 20)
+    } else if cell.fault == TABLE_ZERO_TAIL {
+        let mut zeroed = table_prefix(full, at)
+        list.fill(mut zeroed, TABLE_FULL - at, 0u8)
+        take zeroed
+    } else {
+        table_prefix(full, TABLE_FULL)
+    }
+    if cell.fault == TABLE_BAD_LENGTH {
+        for k in 4u64 .. 8 {
+            let _ = list.set(mut raw, at + k, 255u8)
+        }
+    } else if cell.fault == TABLE_BAD_CHECKSUM {
+        table_flip(mut raw, at + 30)
+    } else if cell.fault == TABLE_BAD_FRAME_HEAD {
+        let _ = list.set(mut raw, at + 2, 255u8)
+        let _ = list.set(mut raw, at + 3, 255u8)
+    }
+    if cell.header == TABLE_BAD {
+        // The HEADER frame's checksum field.
+        table_flip(mut raw, 8)
+    }
+    take raw
+}
+
+fn table_successor(id: StoreId, seq: u64, prev_end: u64, base: u64) -> Bytes {
+    let ctx = table_ctx(id, seq)
+    let mut raw = table_header(id, seq, prev_end)
+    list.append(mut raw, journal_empty_commit(ctx, 72, base + 3))
+    list.append(mut raw, journal_empty_commit(ctx, 114, base + 4))
+    take raw
+}
+
+fn table_path(seq: u64, suffix: String) -> String {
+    result.unwrap(failure_result_from_rep(manifest.journal_path(seq, suffix)))
+}
+
+fn table_write(d: Dir, path: String, raw: Bytes) waits {
+    result.unwrap(failure_result_from_rep(manifest.disk_write_synced(d, path, raw)))
+}
+
+fn table_clear(d: Dir, first: u64) waits {
+    for seq in first .. first + 6 {
+        let _ = host.remove(d, table_path(seq, ""))
+        let _ = host.remove(d, table_path(seq, ".end"))
+    }
+}
+
+fn table_write_predecessor(d: Dir, id: StoreId, first: u64, cell: TableCell) waits {
+    if cell.predecessor == TABLE_PREDECESSOR {
+        table_write(d, table_path(first, ""), table_predecessor(id, first))
+        table_write(d, table_path(first, ".end"), journal_end_bytes(id, first, TABLE_P_END))
+    }
+}
+
+// The image a published capture at v4 (v3 without P) was taken from: P, then
+// S whole with an END covering C3, and no successor.
+fn table_write_published(d: Dir, id: StoreId, first: u64, cell: TableCell) waits {
+    let subject = table_subject_seq(cell, first)
+    table_clear(d, first)
+    table_write_predecessor(d, id, first, cell)
+    table_write(d, table_path(subject, ""), table_subject_frames(id, subject, cell))
+    table_write(d, table_path(subject, ".end"), journal_end_bytes(id, subject, TABLE_FULL))
+}
+
+fn table_write_cell(d: Dir, id: StoreId, first: u64, cell: TableCell) waits {
+    let subject = table_subject_seq(cell, first)
+    let successor = subject + 1
+    table_clear(d, first)
+    table_write_predecessor(d, id, first, cell)
+    table_write(d, table_path(subject, ""), table_subject(cell, id, subject))
+    if cell.end != TABLE_END_MISSING {
+        let mut end = journal_end_bytes(id, subject, table_boundary(cell))
+        if cell.end == TABLE_END_BAD {
+            table_flip(mut end, 90)
+        }
+        table_write(d, table_path(subject, ".end"), end)
+    }
+    if cell.successor == TABLE_GOOD_SUCCESSOR {
+        table_write(d, table_path(successor, ""), table_successor(id, successor, table_boundary(cell), table_base(cell)))
+        table_write(d, table_path(successor, ".end"), journal_end_bytes(id, successor, TABLE_BOUNDARY))
+    } else if cell.successor == TABLE_TORN_SUCCESSOR {
+        table_write(d, table_path(successor, ""), table_prefix(table_header(id, successor, table_boundary(cell)), 40))
+    }
+}
+
+// A fresh store directory: genesis, then close. Returns the identity and the
+// MANIFEST's first_live.
+fn table_store(d: Dir, c: Clock, r: Random, tasks: Tasks) -> (Dir, StoreId, u64) waits {
+    let dir = disk_test_directory(d)
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let genesis = result.unwrap(open(tasks, dir, c, r, options))
+    let id = identity(genesis)
+    result.unwrap(close(take genesis))
+    let (_, _, take page) = result.unwrap(capture.read_only_manifest(dir))
+    (dir, id, page.first_live)
+}
+
+fn table_seen_error(take problem: Error) -> TableSeen {
+    match take problem {
+        Corrupt(take fault) => SeenCorrupt(string.from(fault.file), fault.offset),
+        Diverged(b) => SeenDiverged(int.widen(b)),
+        Remote(Retriable(Deadline)) => SeenDeadline,
+        _ => SeenOther(string.from("another error")),
+    }
+}
+
+fn table_push_seen(mut out: String, seen: TableSeen) {
+    match seen {
+        SeenAccept(v) => {
+            string.push(mut out, "published v")
+            string.push_u64(mut out, v)
+        },
+        SeenRetained => string.push(mut out, "kept the previous capture"),
+        SeenDiverged(b) => {
+            string.push(mut out, "Diverged(")
+            string.push_u64(mut out, b)
+            string.push(mut out, ")")
+        },
+        SeenCorrupt(file, offset) => {
+            string.push(mut out, "Corrupt in ")
+            string.push(mut out, file)
+            string.push(mut out, " at ")
+            string.push_u64(mut out, offset)
+        },
+        SeenDeadline => string.push(mut out, "deadline"),
+        SeenOther(what) => string.push(mut out, what),
+    }
+}
+
+// The comparison of one witness to the cell's single expected answer.
+fn table_matches(cell: TableCell, expect: TableExpect, seen: TableSeen, trace: TableTrace, subject: String) -> bool {
+    let answer_matches = match seen {
+        SeenAccept(v) => (expect.answer == TABLE_ACCEPT || expect.answer == TABLE_TORN_STOP || expect.answer == TABLE_ABSENT) && v == expect.version,
+        SeenRetained => expect.answer == TABLE_RETAIN_PREVIOUS,
+        SeenDiverged(b) => expect.answer == TABLE_DIVERGED && b == 0,
+        SeenCorrupt(file, offset) => file == subject && ((expect.answer == TABLE_CORRUPT_HEADER && offset == 0) || (expect.answer == TABLE_CORRUPT_FRAME && offset >= 72)),
+        SeenDeadline => expect.answer == TABLE_DEADLINE_HIT,
+        SeenOther(_) => false,
+    }
+    if !answer_matches {
+        return false
+    }
+    if cell.entry == TABLE_OWNER || expect.answer >= TABLE_DIVERGED {
+        return true
+    }
+    trace.walks == expect.walks && trace.probes == expect.probes
+}
+
+fn table_mismatch(mut report: String, mut shown: u64, cell: TableCell, expect: TableExpect, seen: TableSeen) {
+    shown += 1
+    if shown > 8 {
+        return
+    }
+    string.push(mut report, "\n  ")
+    string.push(mut report, table_cell_text(cell))
+    string.push(mut report, ": expected ")
+    table_push_answer(mut report, expect.answer)
+    string.push(mut report, " v")
+    string.push_u64(mut report, expect.version)
+    string.push(mut report, " walks ")
+    string.push_u64(mut report, expect.walks)
+    string.push(mut report, " probes ")
+    string.push_u64(mut report, expect.probes)
+    string.push(mut report, ", saw ")
+    table_push_seen(mut report, seen)
+}
+
+// Owner witness: the real `open` over the cell's image.
+fn table_owner_witness(d: Dir, c: Clock, r: Random, tasks: Tasks, cell: TableCell) -> (TableSeen, String) waits {
+    let (dir, id, first) = table_store(d, c, r, tasks)
+    table_write_cell(dir, id, first, cell)
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
+    options.create = false
+    let seen = match open(tasks, dir, c, r, options) {
+        Ok(take db) => {
+            let head = pages.holder_heads(db.holders)[0].head
+            result.unwrap(close(take db))
+            SeenAccept(head)
+        },
+        Error(take problem) => table_seen_error(take problem),
+    }
+    (take seen, table_path(table_subject_seq(cell, first), ""))
+}
+
+// The forwarding Dir a live capture reads through.
+type TablePort: send {
+    directory: Dir,
+    port: core.Served[DirOp],
+    first: String,
+    successor: String,
+    subject: String,
+    landed: Option[Bytes],
+    hold: Option[String],
+    hold_lock: bool,
+    release_on_probe: bool,
+    reports: Sender[TableTrace]
+}
+
+fn table_release(mut held: Option[HostFile]) waits {
+    if let Some(take file) = replace(mut held, None) {
+        let mut released = take file
+        result.unwrap(host.unlock(mut released))
+        result.unwrap(host.close(take released))
+    }
+}
+
+fn table_hold(directory: Dir, path: String, mode: OpenMode) -> HostFile waits {
+    let mut file = result.unwrap(host.open(directory, path, mode))
+    if !result.unwrap(host.try_lock(mut file)) {
+        fail("recovery table: the fixture could not hold its exclusive lock")
+    }
+    take file
+}
+
+fn table_serve(take fixture: TablePort) waits {
+    let TablePort(directory, port: take port, first: take first, successor: take successor, subject: take subject, landed: take landed, hold: take hold, hold_lock, release_on_probe, reports: take reports) = take fixture
+    let mut server = take port
+    let mut pending = take landed
+    let mut segment: Option[HostFile] = match hold {
+        Some(path) => Some(table_hold(directory, path, Read)),
+        None => None,
+    }
+    let mut lock: Option[HostFile] = if hold_lock {
+        Some(table_hold(directory, "LOCK", Write))
+    } else {
+        None
+    }
+    let mut files: List[Option[HostFile]] = list.new()
+    list.push(mut files, None)
+    let mut walks = 0u64
+    let mut probes = 0u64
+    while let Some(take submitted) = provide.next(mut server) {
+        let mut call = take submitted
+        let reply: DirReply = match provide.dir_op(call) {
+            Open(path: width, mode: mode, ..) => {
+                let mut name_bytes: Bytes = list.with_capacity(width)
+                provide.payload(call, 1, mut name_bytes)
+                let name = result.unwrap(string.from_utf8(take name_bytes))
+                if name == first {
+                    walks += 1
+                }
+                if name == "LOCK" {
+                    probes += 1
+                    if release_on_probe {
+                        table_release(mut segment)
+                    }
+                }
+                let opened = host.open(directory, name, mode)
+                // The successor is first opened by the walk's existence check
+                // after it read S's bad HEADER; the HEADER lands then.
+                if name == successor && walks == 1 {
+                    if let Some(take header) = replace(mut pending, None) {
+                        let mut target = result.unwrap(host.open(directory, subject, ReadWrite))
+                        result.unwrap(host.write_at(mut target, 0, header))
+                        result.unwrap(host.sync(mut target))
+                        result.unwrap(host.close(take target))
+                    }
+                }
+                match opened {
+                    Ok(take file) => {
+                        let id = list.len(files)
+                        list.push(mut files, Some(take file))
+                        File(id)
+                    },
+                    Error(e) => Failed(e),
+                }
+            },
+            ReadAt(file: id, at: at, room: room) => follower_deadline_read(mut server, mut call, mut files, id, room, Some(at)),
+            Read(file: id, room: room) => follower_deadline_read(mut server, mut call, mut files, id, room, None),
+            StatFile(file: id) => {
+                follower_deadline_reply(follower_deadline_file(mut files, id, host.stat_file), fn(take s) {
+                    Stat(take s)
+                })
+            },
+            SyncDir(..) => follower_deadline_reply(host.sync_dir(directory), fn(take ignored) {
+                Done
+            }),
+            Sync(file: id) => {
+                follower_deadline_reply(follower_deadline_file(mut files, id, host.sync), fn(take ignored) {
+                    Done
+                })
+            },
+            TryLockShared(file: id) => {
+                follower_deadline_reply(follower_deadline_file(mut files, id, host.try_lock_shared), fn(take held) {
+                    Locked(held)
+                })
+            },
+            Unlock(file: id) => {
+                follower_deadline_reply(follower_deadline_file(mut files, id, host.unlock), fn(take ignored) {
+                    Done
+                })
+            },
+            Close(file: id) => {
+                let file = option.unwrap(replace(mut files[id], None))
+                follower_deadline_reply(host.close(take file), fn(take ignored) {
+                    Done
+                })
+            },
+            Released(id: id) => {
+                let _ = replace(mut files[id], None)
+                continue
+            },
+            _ => fail("recovery table: unexpected filesystem operation from a capture"),
+        }
+        result.unwrap(provide.reply(mut server, take call, provide.dir_reply(reply)))
+    }
+    table_release(mut segment)
+    table_release(mut lock)
+    result.unwrap(channel.send(reports, TableTrace(walks, probes)))
+}
+
+// Advances the test clock to each pending sleep once every task waits, so a
+// refused fence's 1 ms polls and a deadline happen in observation order.
+fn table_drive(take hand: ClockHand) waits {
+    let mut held = take hand
+    loop {
+        let Some(due) = clock.idle(mut held) else {
+            return
+        }
+        clock.advance_to(mut held, due)
+    }
+}
+
+// Only reached for cells with a terminal segment; an absent first-live S
+// has none (TABLE_NO_SEGMENT_TO_FENCE).
+fn table_terminal(cell: TableCell, first: u64) -> String {
+    let subject = table_subject_seq(cell, first)
+    if cell.successor == TABLE_GOOD_SUCCESSOR {
+        table_path(subject + 1, "")
+    } else if cell.header == TABLE_BAD && cell.successor == TABLE_NO_SUCCESSOR && cell.end != TABLE_END_GOOD {
+        table_path(first, "")
+    } else {
+        table_path(subject, "")
+    }
+}
+
+// Follower witness: the worker's real capture functions over the cell's image.
+fn table_follower_witness(d: Dir, c: Clock, r: Random, tasks: Tasks, cell: TableCell) -> (TableSeen, TableTrace, String) waits {
+    let (dir, id, first) = table_store(d, c, r, tasks)
+    let subject = table_subject_seq(cell, first)
+    let (time, take hand) = provide.clock(0, 1369353600000)
+    let mut progress = object_writer.LogCaptureProgress(next_id: 1, last: None)
+    let previous: Option[Arc[object_writer.FollowCapture]] = if cell.previous == TABLE_ADVANCING {
+        table_write_published(dir, id, first, cell)
+        let published = match log_follow_capture(dir, time, TABLE_NO_DEADLINE, mut progress, Some(id), TABLE_CEILING, None) {
+            Ok(Some(take captured)) => take captured,
+            _ => fail("recovery table: the fixture's published capture failed"),
+        }
+        if published.state.tips[0u64].head != TABLE_PUBLISHED_VERSION - 1 + table_base(cell) {
+            fail("recovery table: the fixture's published capture is not at its version")
+        }
+        Some(take published)
+    } else {
+        None
+    }
+    let published_id = match previous {
+        Some(p) => p.log_id,
+        None => 0u64,
+    }
+    table_write_cell(dir, id, first, cell)
+    let landed = if cell.walk == TABLE_CHANGING {
+        let good = table_header(id, subject, table_subject_prev_end(cell))
+        Some(take good)
+    } else {
+        None
+    }
+    let held = cell.fence == TABLE_LOCK_HELD || cell.fence == TABLE_WAIT || cell.fence == TABLE_DEADLINE
+    // A served port's room is held until the run ends (core.md, Served
+    // ports), so each cell's proxy takes only what one capture stages.
+    let (proxy, take port) = provide.dir(bytes 16384)
+    let (reports, read_reports): (Sender[TableTrace], Receiver[TableTrace]) = channel.new(1)
+    let observer = task.spawn(tasks, bytes 1048576, TablePort(directory: dir, port: take port, first: table_path(first, ""), successor: table_path(subject + 1, ""), subject: table_path(subject, ""), landed: take landed, hold: if held {
+        Some(table_terminal(cell, first))
+    } else {
+        None
+    }, hold_lock: cell.fence == TABLE_LOCK_HELD, release_on_probe: cell.fence == TABLE_WAIT, reports: take reports), table_serve)
+    let driver = if cell.fence == TABLE_WAIT || cell.fence == TABLE_DEADLINE {
+        Some(task.spawn(tasks, bytes 65536, take hand, table_drive))
+    } else {
+        drop(take hand)
+        None
+    }
+    let outcome: Result[Option[Arc[object_writer.FollowCapture]], Error] = {
+        let mut source: object_writer.FollowerSource = DirectorySource(proxy, time)
+        match take previous {
+            Some(take published) => {
+                let deadline = if cell.fence == TABLE_DEADLINE {
+                    TABLE_SHORT_DEADLINE
+                } else {
+                    TABLE_LONG_DEADLINE
+                }
+                let request: object_writer.FollowerRequest = Apply(take published, deadline)
+                match follower_step(mut source, mut progress, TABLE_CEILING, take request) {
+                    Ok(Captured(take selected)) => Ok(take selected),
+                    Ok(_) => fail("recovery table: Apply answered other than Captured"),
+                    Error(take problem) => Error(take problem),
+                }
+            },
+            None => initial_follow_capture(mut source, mut progress, Some(id), TABLE_CEILING),
+        }
+    }
+    drop(take proxy)
+    result.unwrap(task.join(take observer))
+    let trace = result.unwrap(channel.receive(read_reports))
+    if let Some(take running) = take driver {
+        result.unwrap(task.join(take running))
+    }
+    let seen = match take outcome {
+        Ok(Some(take captured)) => SeenAccept(captured.state.tips[0u64].head),
+        Ok(None) => {
+            let kept = if let Some(attempt) = progress.last {
+                cell.previous == TABLE_ADVANCING && attempt.capture_id == published_id
+            } else {
+                false
+            }
+            if kept {
+                SeenRetained
+            } else {
+                SeenOther(string.from("no capture and no kept attempt"))
+            }
+        },
+        Error(take problem) => table_seen_error(take problem),
+    }
+    (take seen, trace, table_path(subject, ""))
+}
+
+// Runs every reachable cell of one entry point and requires one matching
+// executed witness per cell.
+fn table_shard(d: Dir, c: Clock, r: Random, tasks: Tasks, entry: u64) -> Result[(), Error] waits {
+    let mut reachable = 0u64
+    let mut witnessed = 0u64
+    let mut wrong = 0u64
+    let mut shown = 0u64
+    let mut report = string.with_capacity(4096)
+    let mut witnessed_by: List[u64] = list.with_capacity(TABLE_DISPOSITIONS)
+    list.fill(mut witnessed_by, TABLE_DISPOSITIONS, 0u64)
+    for slot in 0u64 .. TABLE_TOTAL {
+        let cell = table_cell(slot)
+        if cell.entry != entry {
+            continue
+        }
+        let TableReachable(take expect) = table_verdict(cell) else {
+            continue
+        }
+        reachable += 1
+        let (take seen, take trace, take subject) = if entry == TABLE_OWNER {
+            let (take owner_seen, take owner_subject) = table_owner_witness(d, c, r, tasks, cell)
+            (take owner_seen, TableTrace(walks: 0, probes: 0), take owner_subject)
+        } else {
+            table_follower_witness(d, c, r, tasks, cell)
+        }
+        witnessed += 1
+        if table_matches(cell, expect, seen, trace, subject) {
+            let disposition = table_disposition(cell, expect)
+            let _ = list.set(mut witnessed_by, disposition, witnessed_by[disposition] + 1)
+        } else {
+            wrong += 1
+            table_mismatch(mut report, mut shown, cell, expect, seen)
+        }
+    }
+    if wrong != 0 {
+        let mut message = string.from("recovery table: ")
+        string.push_u64(mut message, wrong)
+        string.push(mut message, " of ")
+        string.push_u64(mut message, reachable)
+        string.push(mut message, " reachable cells disagree with the table:")
+        string.push(mut message, report)
+        fail(take message)
+    }
+    if witnessed != reachable || reachable == 0 {
+        fail("recovery table: a reachable cell has no executed witness")
+    }
+    // Every disposition this entry point can give has a witness.
+    for disposition in 0u64 .. TABLE_DISPOSITIONS {
+        let possible = if entry == TABLE_OWNER {
+            disposition <= TABLE_ABSENT || disposition == TABLE_CORRUPT_HEADER || disposition == TABLE_CORRUPT_FRAME
+        } else {
+            true
+        }
+        if possible && witnessed_by[disposition] == 0 {
+            let mut message = string.from("recovery table: no witnessed cell has disposition ")
+            table_push_answer(mut message, disposition)
+            fail(take message)
+        }
+    }
+    Ok(())
+}
+
+// The full product is accounted for: each cell is impossible for one stated
+// reason or reachable by exactly one entry point, and each reason and each
+// expected disposition occurs.
+@test
+fn recovery_table_accounts_for_every_cell() -> Result[(), Error] {
+    let mut product = 1u64
+    for axis in 0u64 .. TABLE_AXES {
+        product = product * table_axis_size(axis)
+    }
+    if product != TABLE_TOTAL {
+        fail("recovery table: the axes do not span TABLE_TOTAL cells")
+    }
+    let mut reasons: List[u64] = list.with_capacity(TABLE_REASONS)
+    list.fill(mut reasons, TABLE_REASONS, 0u64)
+    let mut dispositions: List[u64] = list.with_capacity(TABLE_DISPOSITIONS)
+    list.fill(mut dispositions, TABLE_DISPOSITIONS, 0u64)
+    let mut impossible = 0u64
+    let mut owner = 0u64
+    let mut captures = 0u64
+    for slot in 0u64 .. TABLE_TOTAL {
+        let cell = table_cell(slot)
+        match table_verdict(cell) {
+            TableImpossible(reason) => {
+                if reason >= TABLE_REASONS {
+                    fail("recovery table: an impossible cell has no stated reason")
+                }
+                impossible += 1
+                let _ = list.set(mut reasons, reason, reasons[reason] + 1)
+            },
+            TableReachable(take expect) => {
+                if cell.entry == TABLE_OWNER {
+                    owner += 1
+                } else {
+                    captures += 1
+                }
+                let disposition = table_disposition(cell, expect)
+                let _ = list.set(mut dispositions, disposition, dispositions[disposition] + 1)
+            },
+        }
+    }
+    if impossible + owner + captures != TABLE_TOTAL {
+        fail("recovery table: a cell is neither impossible nor reachable")
+    }
+    for reason in 0u64 .. TABLE_REASONS {
+        if reasons[reason] == 0 {
+            fail("recovery table: an impossibility reason covers no cell")
+        }
+    }
+    for disposition in 0u64 .. TABLE_DISPOSITIONS {
+        if dispositions[disposition] == 0 {
+            fail("recovery table: a disposition has no reachable cell")
+        }
+    }
+    Ok(())
+}
+
+@test
+fn recovery_table_owner_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    table_shard(d, c, r, tasks, TABLE_OWNER)
+}
+
+@test
+fn recovery_table_live_follower_capture(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    table_shard(d, c, r, tasks, TABLE_FOLLOWER)
+}

@@ -32,11 +32,14 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: page
             Error(Corrupt(take fault)) => {
                 // A bad last HEADER without a good END is an incomplete
                 // segment creation. Valid headers with bad frames follow d.
+                // Only one segment is ever dropped: with a file after it, the
+                // segment was complete when that file was created (§3.4 step 5).
                 let no_end = match boundary {
                     None => true,
                     Some(_) => false
                 }
-                if final_item && no_end && seq == first {
+                let next_path = failure_result_from_rep(manifest.journal_path(seq + 1, ""))?
+                if final_item && no_end && seq == first && !failure_result_from_rep(journal.disk_exists(d, next_path))? {
                     if let Error(Corrupt(_)) = failure_result_from_rep(manifest.journal_header(d, store_key_to_rep(id), seq, None)) {
                         return Ok(journal.JournalRecovered(replay: take replay, seq: seq - 1, end: 0, uncovered: uncovered))
                     }

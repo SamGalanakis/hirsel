@@ -1,4 +1,4 @@
-# Store spec v2.184
+# Store spec v2.185
 
 `store@1` provides typed tables and indexes, cells, logs, transactions and snapshots.
 A writer publishes new roots at commit. Its journal acknowledges a durable prefix,
@@ -1901,6 +1901,7 @@ The briefed "FSYNC only for `sync_dir`" holds for the journal path. It does not 
    - **A bad last header.** If the last segment's HEADER is short or bad:
      - and its END file is good, the result is `Corrupt(Header)`. A durable END name implies a durable header (§3.2).
      - and its END file is missing or bad, recovery treats the segment as absent: it was a crash during segment creation. The segment before it then becomes the last one and follows the rule above. Its own END file gives its `d`.
+     - **At most one segment is absent (v2.185).** A bad HEADER on a segment that has a successor file `j-<n+1>`, complete or not, is `Corrupt(Header)`, as it is for a reader (§3.3b step 1). This holds when the segment is `first_live`, and when it became the last one because its successor was absent: its successor was created only after its HEADER and END(72), so it may hold acknowledged commits.
    - **A zero window (v2.80, v2.82; §3.3a).** Zeros past the last frame are a kind-0 head, a bad frame. This rule reads them with no change: past `d` they are the torn tail, and below `d` they are `Corrupt`. The size is used only as the bound of reads and for "shorter than `d`". Windows exist only on an admitted provider, so nothing past the last frame is a stale block. A recycled segment is not a case, because Store does not recycle. A reserved kind in unused space after media damage is refused (`Unsupported`), as §3.3a states.
    - **What a damaged END file costs.** Only detection. A flip in the END file, or an END not yet rewritten, falls back to the torn-tail rule over a longer region. It never makes a good store refuse to open.
 6. **Apply.** Apply COMMIT frames in order. The branch must exist, else `Corrupt(Gap)`. The version must be the head + 1. New nodes take ids from `next_node` upward.

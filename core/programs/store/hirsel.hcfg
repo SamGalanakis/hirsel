@@ -407,6 +407,8 @@ pkg_v1.Package(
             ("store_ace_crash_laws.hirsel", "store"),
             ("store_journal_laws_6.hirsel", "store"),
             ("store_journal_laws_7.hirsel", "store"),
+            ("store_recovery_table_laws.hirsel", "store"),
+            ("store_recovery_table_oracle.hirsel", "store"),
             ("store_pages_paged_laws.hirsel", "store"),
             ("tiered_laws.hirsel", "store"),
             ("tiered_read_laws.hirsel", "store"),

@@ -8,8 +8,7 @@ use super::inlay_hints::{self, Hint};
 use super::navigation::{self, Location, absolute};
 use super::references::{Key, References};
 use super::rename::Graph;
-use super::workspace::EditorInputs;
-use crate::package_resolve::Resolution as WorkspaceResolution;
+use super::workspace::{EditorInputs, Project};
 use crate::reachability::authority::Cards;
 use crate::{CheckProduct, ContentHash, FileProduct};
 use hirsel_core_ids::{DefPath, PackageId};
@@ -166,13 +165,13 @@ impl EditorSnapshot {
         check: &Check,
         origins: &InputOrigins,
         wanted: &BTreeSet<PathBuf>,
-        workspace: &WorkspaceResolution,
+        project: Project<'_>,
         source_cache: &Path,
     ) {
         let mut context = Context {
             product,
             check,
-            workspace,
+            project,
             source_cache,
             files: BTreeMap::new(),
             definitions: BTreeMap::new(),
@@ -192,6 +191,7 @@ impl EditorSnapshot {
         let graph = self.graphs.len();
         self.graphs.push(Graph {
             index: Arc::clone(&product.index),
+            base: check.rename_base.clone(),
             files: product.files.clone(),
             paths: context.files.clone(),
             resolutions: check.resolutions.clone(),
@@ -301,7 +301,7 @@ pub(super) type Types<'a> = BTreeMap<(u32, u32), (Arc<str>, Option<&'a DefPath>)
 struct Context<'a> {
     product: &'a CheckProduct,
     check: &'a Check,
-    workspace: &'a WorkspaceResolution,
+    project: Project<'a>,
     source_cache: &'a Path,
     files: BTreeMap<SourceId, PathBuf>,
     definitions: BTreeMap<DefinitionId, Arc<Declaration>>,
@@ -684,7 +684,7 @@ impl Context<'_> {
         head: bool,
     ) -> Key {
         let index = &self.product.index;
-        let workspace = &self.workspace.workspace.directory;
+        let project = self.project.identity();
         if head
             && self
                 .binding(owner, index.symbols.text(name))
@@ -695,18 +695,20 @@ impl Context<'_> {
                 })
         {
             return Key::Alias(
-                workspace.clone(),
+                project.to_owned(),
                 owner.clone(),
                 index.symbols.text(name).to_owned(),
             );
         }
         let module = index.module_path(target);
-        Key::Module(workspace.clone(), module.package, module.modules)
+        Key::Module(project.to_owned(), module.package, module.modules)
     }
 
     fn binding(&self, package: &PackageId, name: &str) -> Option<(PackageId, Option<u16>)> {
-        if let Some((_, member)) = self
-            .workspace
+        let Project::Workspace(resolved) = self.project else {
+            return None;
+        };
+        if let Some((_, member)) = resolved
             .workspace
             .members
             .iter()
@@ -715,12 +717,11 @@ impl Context<'_> {
             let id = member.aliases.get(name)?;
             return Some((id.compiler_id(), member.ceilings.get(name).copied()));
         }
-        let (_, root) = self
-            .workspace
+        let (_, root) = resolved
             .published
             .iter()
             .find(|(id, _)| id.compiler_id() == *package)?;
-        let (id, _) = self.workspace.libraries[root].content.bindings.get(name)?;
+        let (id, _) = resolved.libraries[root].content.bindings.get(name)?;
         Some((id.compiler_id(), None))
     }
 
@@ -788,10 +789,17 @@ impl Context<'_> {
         let image = self.product.image.as_ref()?;
         let (name, text) = image.source_file(source).ok()?;
         let file = image.declaration_file(source).ok()?;
-        let name = name.as_deref()?;
+        let name = name.unwrap_or_else(|| {
+            let module = self.product.index.module_path(def.site.module);
+            format!(
+                "{}/{}.hirsel",
+                module.package.name,
+                module.modules.join("/")
+            )
+        });
         let bytes = bytes::Bytes::from(text);
         let digest = ContentHash::of_bytes(&bytes);
-        let path = immutable_path(self.source_cache, image.identity, digest, name)?;
+        let path = immutable_path(self.source_cache, image.identity, digest, &name)?;
         snapshot.immutable.insert(path.clone());
         snapshot
             .origins

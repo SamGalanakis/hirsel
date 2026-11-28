@@ -1,22 +1,11 @@
 import * as vscode from "vscode";
-import { LanguageClient } from "vscode-languageclient/node";
 import type { Tree } from "web-tree-sitter";
 import { createHighlighter, highlightRanges, splitLines, tokenModifiers, tokenTypes } from "./highlights";
+import { Server, documentSelector } from "./server";
 
-const documentSelector = [{ scheme: "file", language: "hirsel" }];
-let client: LanguageClient | undefined;
+let server: Server | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-  const output = vscode.window.createOutputChannel("Hirsel");
-  context.subscriptions.push(output);
-
-  const executable = vscode.workspace.getConfiguration("hirsel").get<string>("executable");
-  client = new LanguageClient("hirsel", "Hirsel", {
-    command: executable || "hirsel",
-    args: ["lsp"],
-    // The default transport is stdio and keeps the CLI arguments as written.
-  }, { documentSelector, outputChannel: output });
-
   const { parser, query } = await createHighlighter(context.asAbsolutePath("dist/grammar"));
   const trees = new Map<vscode.TextDocument, { version: number; tree: Tree }>();
   const release = (document: vscode.TextDocument) => {
@@ -57,11 +46,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     } },
   );
 
-  // Keep the local highlighter available if the installed server cannot start.
-  void client.start().catch((error: unknown) => output.appendLine(String(error)));
+  server = new Server(context);
+  void server.restart();
 }
 
 export async function deactivate(): Promise<void> {
-  await client?.dispose();
-  client = undefined;
+  await server?.stop();
+  server = undefined;
 }

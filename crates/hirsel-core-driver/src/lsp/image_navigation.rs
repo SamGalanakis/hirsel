@@ -92,6 +92,7 @@ fn image_definition_requires_available_source() {
             generation: 1,
             folders: None,
             overlay: BTreeMap::from([(path.clone(), document)]),
+            ..EditorInputs::default()
         });
         let origins = InputOrigins::from([(
             (member.compiler_id(), String::from("main.hirsel")),
@@ -105,7 +106,7 @@ fn image_definition_requires_available_source() {
             &check,
             &origins,
             &BTreeSet::from([path.clone()]),
-            &resolved,
+            super::super::workspace::Project::Workspace(&resolved),
             &temporary.join("sources"),
         );
         snapshot

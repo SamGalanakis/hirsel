@@ -51,7 +51,7 @@ def serve():
         uri = document.get("uri")
 
         if method:
-            record(method=method, uri=uri, root=params.get("rootUri"))
+            record(method=method, uri=uri, root=params.get("rootUri"), changes=params.get("changes"))
         match method:
             case "initialize":
                 result = {"capabilities": CAPABILITIES}
@@ -99,4 +99,7 @@ def serve():
 
 
 if __name__ == "__main__":
-    serve()
+    if sys.argv[1:] == ["--version"]:
+        print("hirsel 0.0.1-test")
+    else:
+        serve()

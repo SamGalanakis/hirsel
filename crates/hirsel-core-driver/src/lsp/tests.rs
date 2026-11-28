@@ -1,3 +1,5 @@
+#[path = "dx_tests.rs"]
+mod dx_tests;
 #[path = "image_navigation.rs"]
 mod image_navigation;
 
@@ -252,6 +254,7 @@ fn revision_cache_rechecks_owners_and_rebinds_sites() {
                 path.clone(),
                 Document::open(file_uri(&path), revision as i64, text.to_owned()),
             )]),
+            ..EditorInputs::default()
         };
         session.check(inputs, || false)
     };

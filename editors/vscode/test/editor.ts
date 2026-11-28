@@ -1,16 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { setTimeout } from "node:timers/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import * as vscode from "vscode";
-
-async function waitFor(check: () => boolean | Promise<boolean>, description: string) {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    if (await check()) return;
-    await setTimeout(50);
-  }
-  throw new Error("Timed out waiting for " + description);
-}
+import { waitFor } from "./wait";
 
 async function wire() {
   const content = await readFile(process.env.HIRSEL_MOCK_LOG!, "utf8").catch((error) => {
@@ -18,7 +9,11 @@ async function wire() {
     throw error;
   });
   return content.trim().split("\n").filter(Boolean)
-    .map((line) => JSON.parse(line) as { argv?: string[]; method?: string });
+    .map((line) => JSON.parse(line) as {
+      argv?: string[];
+      method?: string;
+      changes?: { uri: string }[];
+    });
 }
 
 export async function run() {
@@ -27,6 +22,9 @@ export async function run() {
   const document = await vscode.workspace.openTextDocument(uri);
   const editor = await vscode.window.showTextDocument(document);
   assert.equal(document.languageId, "hirsel");
+  const extension = vscode.extensions.getExtension("hirsel.hirsel");
+  assert.ok(extension);
+  await extension.activate();
   await waitFor(async () => (await wire()).some((message) => message.method === "textDocument/didOpen"),
     "didOpen");
 
@@ -65,5 +63,26 @@ export async function run() {
     assert.ok(methods.includes(method === "initialize" ? method : "textDocument/" + method), method);
   }
   assert.equal(methods.filter((method) => method === "textDocument/formatting").length, 2);
-  console.log("VS Code stdio, semantic tokens and two format-on-save operations passed");
+
+  const watched = ["hirsel.toml", "hirsel.lock", "app.hcfg"].map((file) =>
+    vscode.Uri.joinPath(workspace.uri, file));
+  for (const file of watched) await writeFile(file.fsPath, "# watched\n");
+  await waitFor(async () => {
+    const changes = (await wire()).filter(({ method }) => method === "workspace/didChangeWatchedFiles")
+      .flatMap(({ changes }) => changes ?? []);
+    return watched.every((file) => changes.some(({ uri }) => uri === file.toString()));
+  }, "notifications for all three watched files");
+
+  const reopened = async (count: number) =>
+    (await wire()).filter(({ method }) => method === "textDocument/didOpen").length === count;
+  await vscode.commands.executeCommand("hirsel.restartServer");
+  await waitFor(() => reopened(2), "didOpen after command restart");
+  const config = vscode.workspace.getConfiguration("hirsel");
+  await config.update("executable", uri.fsPath + ".missing", vscode.ConfigurationTarget.Global);
+  await waitFor(async () => (await wire()).filter(({ method }) => method === "shutdown").length === 2,
+    "old server shutdown after executable change");
+  assert.ok(await reopened(2));
+  await config.update("executable", "", vscode.ConfigurationTarget.Global);
+  await waitFor(() => reopened(3), "PATH discovery after executable change");
+  console.log("VS Code stdio, semantic tokens, format-on-save, file watchers and restarts passed");
 }

@@ -114,16 +114,6 @@ enum Phase {
     Shutdown,
 }
 
-impl Default for EditorInputs {
-    fn default() -> Self {
-        Self {
-            generation: 0,
-            folders: None,
-            overlay: BTreeMap::new(),
-        }
-    }
-}
-
 #[derive(Default)]
 struct State {
     phase: Phase,
@@ -360,14 +350,12 @@ impl State {
                 if let Ok(DocumentParams { document }) =
                     serde_json::from_value::<DocumentParams<OpenDocument>>(params.clone())
                     && let Some(path) = file_path(&document.uri)
-                    && let std::collections::btree_map::Entry::Vacant(entry) =
-                        self.inputs.overlay.entry(path)
+                    && path.file_name().is_some()
+                    && self.inputs.open(
+                        path,
+                        Document::open(document.uri, document.version, document.text),
+                    )
                 {
-                    entry.insert(Document::open(
-                        document.uri,
-                        document.version,
-                        document.text,
-                    ));
                     self.invalidate();
                 }
             }
@@ -390,6 +378,7 @@ impl State {
                     && let Some(path) = file_path(&document.uri)
                     && let Some(open) = self.inputs.overlay.remove(&path)
                 {
+                    self.inputs.detached.remove(&path);
                     self.clear(&path, &open.uri)?;
                     self.invalidate();
                 }
@@ -410,6 +399,9 @@ impl State {
                             .into_iter()
                             .filter_map(|folder| file_path(&folder.uri)),
                     );
+                    self.inputs
+                        .detached
+                        .retain(|path| !folders.iter().any(|folder| path.starts_with(folder)));
                     let removed = self
                         .published
                         .iter()

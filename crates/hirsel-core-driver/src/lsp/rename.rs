@@ -21,6 +21,7 @@ pub(super) struct Edit {
 
 pub(super) struct Graph {
     pub(super) index: Arc<NameIndex>,
+    pub(super) base: Option<Arc<NameIndex>>,
     pub(super) files: Vec<Arc<FileProduct>>,
     pub(super) paths: BTreeMap<hirsel_core_resolve::SourceId, PathBuf>,
     pub(super) resolutions: Vec<Vec<Arc<Resolution>>>,
@@ -34,7 +35,7 @@ impl Graph {
         if !self.paths.values().any(|path| changed.contains_key(path)) {
             return true;
         }
-        if !self.complete || self.index.definitions.base_len() != 0 {
+        if !self.complete || (self.base.is_none() && self.index.definitions.base_len() != 0) {
             return false;
         }
         let mut symbols = self.index.symbols.as_ref().clone();
@@ -69,9 +70,14 @@ impl Graph {
             let syntax = parsed.get(&file.file).unwrap_or(&file.syntax);
             (file.module, file.file, syntax)
         });
-        let mut index = self.index.as_ref().clone();
+        let mut index = if let Some(base) = &self.base {
+            base.as_ref().clone()
+        } else {
+            let mut index = self.index.as_ref().clone();
+            index.clear_editor_headers();
+            index
+        };
         index.symbols = Arc::new(symbols);
-        index.clear_editor_headers();
         for (module, source, syntax) in files.clone() {
             for (ordinal, item) in syntax.items().enumerate() {
                 index.index_item(module, source, ordinal as u32, item);
@@ -84,10 +90,11 @@ impl Graph {
             (def.site.module, def.site.source, def.site.item, def.kind)
         };
         if !index.diagnostics.is_empty()
-            || !index
-                .definitions()
-                .map(|(_, def)| identities(def))
-                .eq(self.index.definitions().map(|(_, def)| identities(def)))
+            || !index.definitions.own_iter().map(identities).eq(self
+                .index
+                .definitions
+                .own_iter()
+                .map(identities))
         {
             return false;
         }

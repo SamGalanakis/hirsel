@@ -1,7 +1,7 @@
 use super::completion::Callable;
 use crate::{ContentHash, ModuleInput, Resolution};
 use hirsel_core_ids::DefPath;
-use hirsel_core_resolve::SourceId;
+use hirsel_core_resolve::{NameIndex, SourceId};
 use hirsel_core_syntax::{Derive, Item, ParseMode, ParseOutput, Span, Symbols};
 use std::collections::{BTreeMap, HashMap};
 use std::io;
@@ -45,6 +45,7 @@ pub(crate) struct Check {
     pub(super) callables: BTreeMap<DefPath, Callable>,
     pub(super) declared_types: BTreeMap<DefPath, Arc<str>>,
     pub(super) field_types: FieldTypes,
+    pub(super) rename_base: Option<Arc<NameIndex>>,
 }
 
 impl Check {

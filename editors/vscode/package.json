@@ -16,14 +16,14 @@
   "categories": [
     "Programming Languages"
   ],
-  "main": "./dist/src/extension.js",
-  "files": [
-    "dist/src",
-    "dist/grammar",
-    "language-configuration.json",
-    "README.md"
-  ],
+  "main": "./dist/extension.js",
   "contributes": {
+    "commands": [
+      {
+        "command": "hirsel.restartServer",
+        "title": "Hirsel: Restart Language Server"
+      }
+    ],
     "languages": [
       {
         "id": "hirsel",
@@ -43,7 +43,7 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "description": "Path to the installed Hirsel executable. Leave empty to use hirsel from PATH."
+          "description": "Path to the Hirsel executable. Leave empty to search PATH, ~/.local/bin, and ~/.cargo/bin in that order."
         }
       }
     },
@@ -91,21 +91,28 @@
     ]
   },
   "scripts": {
-    "build": "node scripts/build-grammar.mjs && tsc",
-    "test": "npm run build && node --test dist/test/extension.test.js",
-    "test:editor": "node test/run-editor.mjs",
+    "build": "tsc --noEmit && node scripts/build.mjs",
+    "package": "vsce package --no-dependencies",
+    "test": "npm run build && tsc && node --test .test-build/test/extension.test.js",
+    "test:editor": "tsc && node test/run-editor.mjs",
+    "test:bundle": "tsc && node test/run-editor.mjs --real",
     "vscode:prepublish": "npm run build"
   },
-  "dependencies": {
-    "vscode-languageclient": "9.0.1",
-    "web-tree-sitter": "0.25.10"
+  "overrides": {
+    "@vscode/vsce": {
+      "minimatch": "11.0.1"
+    }
   },
   "devDependencies": {
     "@types/emscripten": "1.41.5",
     "@types/node": "20.19.30",
     "@types/vscode": "1.90.0",
     "@vscode/test-electron": "2.5.2",
+    "@vscode/vsce": "4.1.1",
+    "esbuild": "0.28.2",
     "tree-sitter-cli": "0.25.10",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vscode-languageclient": "9.0.1",
+    "web-tree-sitter": "0.25.10"
   }
 }

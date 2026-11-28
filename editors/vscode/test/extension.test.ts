@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { createHighlighter, highlightRanges, splitLines, tokenTypes } from "../src/highlights";
 
-const grammar = join(__dirname, "../grammar");
+const grammar = join(__dirname, "../../dist/grammar");
 const canonical = join(__dirname, "../../../tree-sitter-hirsel/queries/highlights.scm");
 
 test("the compiled grammar and staged query produce UTF-16 ranges", async () => {

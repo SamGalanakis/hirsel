@@ -866,6 +866,19 @@ Compute, granted, transact, query and fenced-attempt entries retain their regist
 order, identities, schemas, authority checks, store replay and bounds. Local typed
 calls use PACK-15 directly. A wire or journal boundary still runs its declared codec.
 
+The installed image is the serving realization of a v5 recipe: it is emitted from the
+`Serve` export's closure only and holds no `Replay` factory, no object reached only from
+one, and no per-Place replay state
+([launch](launch.md#release-recipe-and-host-assembly), "Serving image and replay directory
+commitment"). Its image metadata carries the replay directory commitment, which the installer
+reads like any other image datum. Offline recorded-code replay materializes the selected
+`Replay` export separately, on demand, and runs its registration once at the recorded
+activation's `n_place`; the recorded revision and bounds must equal what that registration
+selects, as for any serving task of that activation, or the call is `RevisionUnknown`.
+Publication, transfer and retention carry the objects reached only from `Replay` exports
+and the export directory; nothing else of replay is paid by a serving image or a dormant
+Place beyond the 32-byte commitment and its framing.
+
 Each dormant synchronous Place holds its checkout/identity, selected image slot and
 version, and the references needed to bind its own execution, limits and grants. It
 owns no resident registry copy, worker context, fiber stack or private dispatch maps.

@@ -385,6 +385,18 @@ inherits the workspace row's `authority` with the rest of it (section 4) and add
 no `program` the entry is `main` in module `main`, as today. A command that needs an entry
 refuses a package without that function. A dependency's `program` is never read.
 
+`Program.exports` declares the program's other exports, the recipe's export directory
+([launch](launch.md#release-recipe-and-host-assembly), "Exports"), as a list of
+`(name, Export(role: Role, module: Option[String], function: String))` rows with distinct
+names, none of them `main`; `module` defaults to `main`. The entry above is always the export
+`main` with role `Serve`. `Role` has two variants: `Replay`, whose `pub fn` must be
+`fn() -> runner.ReplayEntry[G, H]` with no parameters, and `Publish`, a `pub fn` that is not
+`waits`, takes no capability parameter, and whose parameter and result types have a PACK-15
+adapter. A program that reaches the toolchain's
+runner and no foreign function declares at least one `Replay` row; `hirsel new` writes one
+for its Place. `exports` enters no `C`, like the rest of `program`, and it enters R through
+the recipe's exports part. Declaring an export grants it nothing.
+
 `Program.limit` and `Program.grants` configure execution. Directory grants appear in
 parameter order. Relative paths resolve where the executable starts. Build, publish, run
 and dev read these fields. Dev fills the first directory slot with its store at launch.

@@ -412,7 +412,10 @@ child root and version when packing its parent. Obtain separate authorization pe
 origin. Stop at the first refusal and identify committed members, failed member and unattempted
 members. Rerunning confirms existing matching releases before continuing. There is no
 workspace-wide commit across labels or registries. `hirsel build --emit recipe --code-store DIR` still emits an executable
-release recipe.
+release recipe, a v5 recipe with its declared exports ([launch](launch.md#release-recipe-and-host-assembly)).
+A registry release carries package root P and no recipe: it names no `Serve` or `Replay`
+export and authorizes invoking none, and the Card's per-export facts describe a library's
+`pub` interface, not recipe exports.
 
 Named add accepts `HOST[/TENANT]/NAME`, optionally followed by `@MAJOR` or `@VERSION`.
 An unqualified new name takes the highest eligible stable version. Update of an existing

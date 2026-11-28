@@ -368,8 +368,12 @@ DIR.
 bodies, groups, annexes and values (PROG-10), and recipes. A **recipe** has a version, the normal-form
 version and these parts:
 
-- the entry, the program's `main`, as its identity encoding (PROG-10) and its address;
-- every group in the entry's closure, as its hash and byte length, in strictly ascending order
+- the **exports** (below): each declared export as its name, its role, its member's identity
+  encoding (PROG-10), its address and its closed signature, in strictly ascending order of
+  name. The program's `main` is always the export `main` with role `Serve`;
+- the **closure**: the union of the closures of every export's member. Each of the parts
+  below lists that union once;
+- every group in the closure, as its hash and byte length, in strictly ascending order
   of hash;
 - every body in that closure, as its hash and byte length with its annex's hash and byte
   length, in strictly ascending order of body hash;
@@ -388,6 +392,65 @@ version and these parts:
 - the launch inputs: the backend (Cranelift or LLVM release), the target, the root limit,
   `n_place`, and the **grant bindings**.
 
+**Exports.** An export is a member of the program that the recipe declares invocable under a
+**role**. The role fixes the export's required signature, who may invoke it, and which
+grants it receives. An export is identified by (R, name, role). Exports are declared in the package's files and
+nowhere else: no request, deploy or command adds one. A member that is not a declared export
+is never addressable from outside the program, even by its correct address, identity or hash.
+A private helper reached by an export is code of the closure and stays uninvocable, even when
+its signature equals an export's. The package manifest declares exports
+([packages](packages.md), `program`); the compiler checks each export's signature against its
+role and derives its PACK-15 adapter ([packing](packing.md#pack-15-the-typed-export-adapter)),
+and the recipe records the export's closed signature, so that adapter is a function of the
+recipe. The role is a tag of a closed set, and a recipe naming a role the host does not
+implement is `Unsupported`. There are three roles:
+
+| Role | Exports | Required signature | Grants | Invoked by |
+|---|---|---|---|---|
+| `Serve` | exactly one, named `main` | PROG-3's entry | the grant bindings, approved by the operator for each deploy or by the caller of `hirsel run` | a launch of the assembled executable: `hirsel run`, the host's describe, preview, prepare and serving children, a standalone install |
+| `Replay` | zero or more, one per Place pairing the package offers for replay | `pub fn NAME() -> runner.ReplayEntry[G, H]`, no parameters and not `waits` | none, ever | the offline replay resolver (below, "Recorded-code replay"), on a release the local principal has installed, and `hirsel replay --candidate`<!-- doc-ref: planned --> on a package the local principal names |
+| `Publish` | zero or more, each a function the package publishes for invocation by name | a `pub fn`, not `waits`, whose parameter and result types have a PACK-15 adapter and that takes no capability parameter | none: no grant binding names it | only an explicit owner authorization over the exact (R, name, `Publish`) (below, "Authority"); the invocation path is not specified yet, so no host invokes one today |
+
+Roles are compared exactly, also between exports of equal signature: a `Replay` export is
+never launched as a program, and `main` is never run by the replay resolver, even when `main`
+takes no parameters. A program whose closure includes the runner's Place code (the `place`
+bit, "Describe launch") and reaches no foreign function declares at least one `Replay` export, so turning CALL
+recording on for an installed release never needs a rebuild: any call it records has a grant-free factory to replay under; the build refuses such a
+program without one and names the `exports` field. A program without the `place` bit, and a
+program that reaches foreign code, which is never replayed
+([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)),
+has an empty `Replay` set. Which
+`Replay` export pairs with which activation is decided when a recording is resolved, never at
+admission, because only the activation's own registration says which `place`, `migrate` and
+`schema` it selected.
+
+**Authority.** Knowing an export grants nothing. Its name, its member's address or identity,
+R, the replay directory commitment (below) and the image digest are names: holding one lets a
+party ask for nothing it could not ask for without it. `Serve` runs only through a launch the
+host or the local caller makes, with the grants that launch approves. `Replay` runs only in
+the offline replay runtime with no grant; the factory takes no parameter, so it holds no
+capability (CAP-4), and the replay runtime supplies none to the code it returns: the only
+handles that code receives are the projected witness Store's. No wire
+request, Place, session, deploy request or other export can invoke a `Serve` or `Replay`
+export. A `Publish` export is the only kind a request may ever invoke, and only under this
+rule: the request names an export, and the name serves discovery alone; what runs is the
+exact publication and member the owner authorized, pinned as (R, name, `Publish`) with its
+member identity and closed signature, never the newest member with that name. A member that
+is not a declared `Publish` export is refused, even when the request gives its correct
+address, identity or hash, and so is a `Serve` or `Replay` export named as one. Who may
+invoke a `Publish` export is an explicit owner authorization, never the ability to name it.
+The Store-side invocation path, and what such a call may touch, are not specified here; a
+v5 host admits `Publish` exports (step 6 walks their closures) and invokes none. A later role
+is added as one more row of this table with its own signature, grant and authorization
+rules. Its tag is new to the closed set, so under the one-reader rule it is a new recipe
+version; the export row (name, role, member identity, address, closed signature) keeps its
+shape. The export directory may also later map each (name, role) to an **entry digest** E, the
+domain-separated hash of a per-entry manifest holding that export's member address, closed
+signature and adapter, its exact closure with annexes and bound values, and its ABI,
+semantics and authority requirements. R then authenticates the choice of E for the release.
+Resolution verifies that edge before admitting E under the caller's own authority, and E,
+like R, grants nothing. Neither extension adds a second export mechanism.
+
 The grant bindings follow `main`'s capability parameters in declaration order. Each binding
 gives the parameter's ordinal, its kind, and the values that parameter receives, in order and
 with their count: each directory path a `Dir` parameter takes, each rule text a `Net`
@@ -404,9 +467,29 @@ So exchanging the paths given to two `Dir` parameters changes R. The
 manifest's sorted `grants` strings are derived from the bindings for display and comparison;
 nothing is assembled or launched from them.
 
-Its root is `R = H("hirsel.release-recipe.v4", recipe)`; the version is 4, and versions 1 (no
-foreign parts), 2 (no toolchain part) and 3 (no values) are never read or written. A place's `place`, `migrate`, handle
-and launch code is reached from `main`, so the closure covers it. The annexes hold the site
+Its root is `R = H("hirsel.release-recipe.v5", recipe)`; the version is 5, and versions 1 (no
+foreign parts), 2 (no toolchain part), 3 (no values) and 4 (one entry, `main`, and no exports)
+are never read or written. A host refuses a v4 recipe as `Unsupported`; it is republished
+from source to obtain v5 and replay support. A place's `place`, `migrate`, handle
+and launch code is reached from `main`, so the closure covers it. Code reached only from a
+`Replay` export, the factory and any helper only it calls, is in the closure too.
+
+**Serving image and replay directory commitment.** Assembly emits native code from the
+closure of the `Serve` export alone: no group, body or value reached only from a `Replay`
+export enters the executable, and the executable holds no replay factory or replay-only
+symbol. Two recipes that differ only in their `Replay` exports would then link to the same
+serving bytes, so an old recording could not tell which factory was in force when it was
+written. The serving image therefore carries, in its image metadata, the 32-byte **replay
+directory commitment**: SHA-256 over `u8 26 ‖ "hirsel.replay-directory.v1" ‖` the canonical
+encoding of the `Replay` exports (name, member identity, address and closed signature, in
+name order), followed by the hash of every group, body, annex and value reached from them,
+each list in strictly ascending order of hash. Assembly computes it from the admitted recipe
+before linking and writes it into the image, so the image digest, which is taken over the
+finished image's bytes ("Immutable launch identity"), covers it. Verification recomputes it
+from the admitted recipe and compares it with the bytes in the image. Format 15 and the
+store's `releases` rows are unchanged: the recorded replay identity already hashes the
+writer's image digest (RUNNER-SPEC §7). A program with no `Replay` export carries the
+commitment of the empty directory. The annexes hold the site
 maps failures report, so a comment that moves lines changes R but no address. The optimized
 native link stores coordinates for the site words its retained sections reference. Each
 surviving site word keeps its original value. R does not cover the host's toolchain: one R
@@ -471,9 +554,13 @@ objects it lacks.
    encoding rules, each annex against its own body, before any of it is put into a map.
    A body in a different normal-form version is `Unsupported`. Republish from source.
    Invalid frames are `Malformed`.
-6. The closure walked from the entry through the groups' `External` bindings, compared as typed
-   sets of groups, bodies, the annex paired with each body, foreign leaves and foreign
-   archives, equals the listed objects exactly (`Missing`, `Extra`). An `External` address
+6. The host walks the closure from each export's member separately through the groups'
+   `External` bindings, and keeps which exports reach each object. The union of those walks,
+   compared as typed sets of groups, bodies, the annex paired with each body, foreign leaves
+   and foreign archives, equals the listed objects exactly (`Missing`, `Extra`), and the host
+   verifies that union once: an object two exports reach is decoded, checked and admitted
+   once. Two exports with one name, an export whose member is in no listed group, and a
+   `Serve` export other than exactly one `main` are `Conflict(identity)`. An `External` address
    that is no listed group's member is resolved to a foreign function by recomputing FFI-9's
    address from each foreign leaf: its archive-set digest from the leaf's table, and each
    function's address from its identity, header text and C symbol, the leaf's prefix followed
@@ -487,14 +574,21 @@ objects it lacks.
    with that type's closure hash, to `h` (`Binding`). Admission binds each constant to its value
    here, so every body that leaves admission is lowered with its constants bound.
 7. Every slot's identity equals the bound member's or builtin's identity, every `Internal`
-   index is in range, each group's members form one strongly connected component, the entry's
-   identity matches, and the closure has one address per identity with every slot's signature
+   index is in range, each group's members form one strongly connected component, each
+   export's member identity and closed signature match its listed ones, and the closure has
+   one address per identity with every slot's signature
    equal to its target's (PROG-10), a foreign function's signature being the one its header
-   text states (`Binding`, `Conflict(identity)`). The entry annex carries the checked
-   parameter types in declaration order. Each entry parameter is a 64-bit word in
+   text states (`Binding`, `Conflict(identity)`). Each export is checked against its role
+   (`Binding` otherwise). For `Serve`: the `main` annex carries the checked
+   parameter types in declaration order. Each `main` parameter is a 64-bit word in
    CoreIR and has exactly one grant binding at its ordinal. The binding's kind must
    match the parameter type. For `Foreign[D]` the binding must also name the same
-   interface definition identity D. A mismatch is `Binding`. No two leaves have one prefix
+   interface definition identity D. A mismatch is `Binding`. For `Replay`: the signature is
+   exactly `fn() -> runner.ReplayEntry[G, H]` for the toolchain's `runner@1` (no parameter,
+   no `waits`), the export has no grant binding, and a recipe with a foreign leaf has no
+   `Replay` export (FFI-8). For `Publish`: the member is `pub`, not `waits`, takes no
+   capability parameter, its parameter and result types have a PACK-15 adapter, and no grant
+   binding names it. A grant binding always belongs to `main`. No two leaves have one prefix
    (`Conflict(identity)`, the second leaf's). Before anything is linked, each foreign archive
    passes FFI-3's format and symbol checks for the leaves that select it.
 8. Every `Builtin(n)` and every engine-operation tag is one the recipe's backend implements at
@@ -548,7 +642,8 @@ root reaches. The roots are the union of: the assembly record of each retained a
 (current, previous, and each live `releases` interval), each pending record, each recording pin, and
 each live reservation. An assembly record keeps its image, its recipe and the recipe's closure.
 The host keeps a per-store index from activation version to the assembly record that serves it,
-so the store's `releases` rows keep their format. A decided selection, a commit, an Installed
+so the store's `releases` rows keep their format. Each entry also holds what the activation's
+registration selected ("Recorded-code replay" below), and the index is searchable by selection digest. A decided selection, a commit, an Installed
 outcome (at the attempt's `v`), a genesis adoption, a no-record group's adoption (at the read's
 activation) and a host-run install write it; a probe's
 intent never does (RUNNER-SPEC §14.3 "What serves"), and a recording pin names the assembly record of
@@ -573,6 +668,73 @@ host that does not answer exits 75 "temporarily unavailable"; a reader error is 
 `ImageGone` and exits 1. Replay then refuses a recipe with a foreign leaf before reading any record of the tape
 (FFI-8), and runs the verified image from the host image store. Replay takes the
 arguments and launch metadata from the recording.
+
+**Recorded-code replay.** A Store CALL record, and a portable `.hrep` witness made from one,
+carries the recorded replay identity: the selection digest over the writer's image digest and
+the identities of the `place`, optional `migrate` and `schema` the activation selected
+(RUNNER-SPEC §7). It carries no executable or checked program bytes. `ReplayMode::RecordedCode`
+runs a recorded call under the code that wrote it, resolved only from a release installed on
+this host, and never fetches anything over the network.
+This applies to CALL records written while CALL recording was explicitly turned on; it
+assumes no Store holds any, and a Store without them has nothing for it to resolve.
+
+- **Install and retain.** A release is replayable here only after it is installed: its
+  approved assembly record and its whole v5 closure, `Replay` exports included, are in the
+  host's stores and rooted ("Durable publication"). Every Installed outcome, genesis
+  adoption, no-record adoption, decided selection and host-run install that writes the
+  activation index also writes, for that activation, the selection digest its open reported,
+  with the entry revisions and the `n` and `s` bounds its registration selected and its
+  `n_place`; a standalone install that the host adopts writes them at adoption. Retention
+  is a mechanism: an owner pin on the assembly record is a durable retention root of that
+  Store. Admission refuses before the pin is acknowledged, and an acknowledged root keeps its
+  whole closure until an explicit release and survives that Store's recovery, as a recording
+  pin is synced before `Pinned`. The bytes a root holds are measurable per root and count
+  under the Store's existing charging. After release, collection may remove the record, and
+  its calls then resolve as `RevisionUnknown`, never under other code. With no policy
+  configured a root is kept until it is released; that is a default behaviour, not a promised
+  duration. Retention windows, caps, who pays and when to release are operator policy. No
+  guarantee spans Stores beyond a self-contained exported bundle.
+- **Resolve.** The resolver looks the recorded selection digest up in the activation index.
+  The index is a hint and decides nothing. For each assembly record it names, the resolver
+  pins the record for the run, then verifies, in this order: the image's bytes hash to the
+  record's image digest; the image's replay directory commitment equals the one recomputed
+  from the record's admitted recipe; the `Replay` exports of that recipe are materialized
+  (below), and each factory's returned `place`, `migrate` and `schema` identities, with the
+  record's image digest as the writer digest, recompute the recorded selection digest. One
+  export that recomputes it is the candidate. The recorded key must then be registered by that
+  `place`, at the `n_place` of the index entry that named the record and never at a
+  constant of the factory, with the recorded revision and both recorded bounds before
+  the handler is invoked; a mismatch is `Unknown(RevisionUnknown)`. Records that share one
+  image digest share one commitment and one directory, so the entries that pass give one
+  candidate (records that differ only in grants or `n_place` are such twins). No candidate, or two candidates whose image digests or commitments differ,
+  is `Unknown(RevisionUnknown)`, and nothing runs. A record whose image or objects fail
+  verification is corruption, reported as the failure of that check and never as
+  `RevisionUnknown`. No rule resolves replay code from an entry revision, a release
+  identity or an image digest alone: each names code without saying which factory pairs with
+  the recorded selection.
+- **Materialize.** The offline driver lowers the closure of the selected `Replay` export,
+  verifying each final CoreIR module as assembly does, and links it with the replay runtime.
+  The replay runtime's provider table holds the projected witness Store and nothing else: no
+  live provider, grant constructor, foreign entry point or process launch. Any other provider
+  operation the replay closure reaches, directly or through an indirect adapter, has no
+  capability to be called with, since the factory takes none; if reached it is a run stop
+  (`Unsupported`). The registration and the handler run under the recorded limits against
+  the projected witness state. A recorded migration identity takes part in the match, and no
+  migration runs. An upload read whose body is not present locally and digest-verified is
+  `UnresolvedUpload`; a read the projection cannot answer is `Outside`. Materialized replay
+  code may be cached under the key (R, export name, toolchain fingerprint), like a native object.
+- **Commands.** `hirsel replay WITNESS [--state HOST_STATE] [--json]`<!-- doc-ref: planned -->
+  runs `RecordedCode` with this resolver. `hirsel replay WITNESS --candidate DIR [--entry NAME]`<!-- doc-ref: planned -->
+  runs `Candidate` mode on the package at DIR: it builds DIR's v5 recipe locally and selects
+  its only `Replay` export, or the one `--entry` names when DIR declares several; a package
+  with none, or several and no `--entry`, is refused before anything runs. The candidate's
+  code digest may differ from the recorded one; that is its purpose. A comparison with the
+  original first reproduces the recorded observation under `RecordedCode`, then runs the
+  candidate on the same projected witness, and reports both builds and the bounds each run
+  actually had. The candidate registers under its own adapter limits; the report claims a
+  same-limits comparison only when the candidate's registered bounds equal the recorded ones.
+  An exact-build claim also needs the retained record that recorded the call. `Outside` and
+  `UnresolvedUpload` are reported as such, in both modes.
 
 When the host starts, before any collection, it reconciles every attempt. Staging with no
 pending record is removed. A pending record that no surviving child or held answer can decide
@@ -680,7 +842,35 @@ image; `admit_refuses` covers each refusal above, and nothing is assembled until
 pass; `shared_digest`, where two recipes sharing one digest and one recipe with two digests
 each keep their own record, bytes and allowance through a host restart and a collection;
 `site_only_change`, where a moved comment keeps every address, changes R, and the failure sites
-reported move with it.
+reported move with it. Untested until v5 is built: `swapped_factory`, where two recipes whose
+serving closures are equal and whose `Replay` factories differ give two images, two
+commitments and two selection digests, and a call recorded under one resolves to its own
+factory and is `RevisionUnknown` with only the other installed; `granted_main_not_replayed`,
+where a `main` that takes a `Clock` grant and writes a startup line before `runner.main` is
+never run by the resolver (no line, no clock read) while its `Replay` export reproduces the
+recorded call; `serving_image_has_no_replay_code`, where the serving executable's symbols
+and data hold no object reached only from a `Replay` export and its dormant Places hold no
+per-Place replay state (PACK-17); `replay_export_roles`, where a `Replay` export with a
+parameter, a `waits` factory, a recipe with a foreign leaf and a `Replay` export, two
+exports with one name, and a `place`-bit program with no `Replay` export are each refused,
+a zero-parameter `main` listed as `Replay` is refused as a role mismatch, and a `Publish`
+export with a capability parameter or a grant binding is refused;
+`replay_twins_resolve`, where two records that differ only in `n_place` resolve a call
+recorded under each to one candidate at its own allowance, and a call recorded at an
+allowance no index entry names is `RevisionUnknown`. The oracle of each is the hand-derived
+outcome stated here.
+
+Version note (2026-11-28, recipe v5 with declared typed exports): the recipe lists declared
+exports with roles in place of its one entry; admission walks each export's closure and
+verifies their union once; the serving image carries the replay directory commitment;
+`RecordedCode` resolves only from an installed, verified release. Deleted in the same build
+change, with no compatibility path: the v4 recipe reader and writer (a v4 R is `Unsupported`
+and is republished from source; a host whose state holds a v4 assembly record refuses to
+start, naming the record, since recovering a retained image's launch settings reads its
+recipe, and its groups are redeployed from source onto fresh host state);
+and every path that infers a release's replay code from its revision, release identity or
+image digest alone, including a recorded-code run of another image's callbacks under the
+writer's digest outside `tape check`'s equal-commitment rule (RUNNER-SPEC §7).
 
 Version note (2026-11-21, deploy trust): the recipe lists grant bindings by parameter instead of
 sorted grant strings, and object lengths; admission is bounded before the host asks for
@@ -728,7 +918,7 @@ listener.
 
 *(See RUNNER-SPEC v2.45 and STORE-SPEC v2.57.)*
 
-`hirsel store rehearse DIR --release NEW` opens a private copy-on-write image of the place's offline store at DIR, runs NEW's `on_migrate` and then `schema` in mode `Migrate` against it, and prints what an activation would do: each table and index the declaration adds, drops or renames, each backfill with its row count, each unique index whose backfill would fail with the first conflicting key pair, and the sizes `store.sized` derives for the place's root limit with any `Shortage`. It commits nothing to DIR and exits nonzero when the activation would fail. `hirsel dev` (below) activates each edit through the ordinary install and reopen. Neither verb has a mode the serving path lacks: both run the ordinary place open (RUNNER-SPEC §6). Each backfill line names why the index rebuilds (`new index`, or the inputs whose revision changed). A store another process holds exits 75. `hirsel store verify DIR --release EXE` and `hirsel store repair DIR --release EXE` start the release the same way, verify on a copy and repair on DIR itself; launch word 20 says which (0 serves, 1 dry-run, 2 store verify, 3 store repair, 4 tape check), and [STORE-SPEC §15.6](../../core/programs/store/STORE-SPEC.md) has what verify and repair do. `hirsel tape check DIR --recorded WRITER --release WITNESS` starts WITNESS on a copy and carries WRITER's 32-byte executable digest in launch word 27. [RUNNER-SPEC §7](../../core/programs/runner/RUNNER-SPEC.md#7-recording-and-re-execution-r5-at-store-spec-v24) defines the check.
+`hirsel store rehearse DIR --release NEW` opens a private copy-on-write image of the place's offline store at DIR, runs NEW's `on_migrate` and then `schema` in mode `Migrate` against it, and prints what an activation would do: each table and index the declaration adds, drops or renames, each backfill with its row count, each unique index whose backfill would fail with the first conflicting key pair, and the sizes `store.sized` derives for the place's root limit with any `Shortage`. It commits nothing to DIR and exits nonzero when the activation would fail. `hirsel dev` (below) activates each edit through the ordinary install and reopen. Neither verb has a mode the serving path lacks: both run the ordinary place open (RUNNER-SPEC §6). Each backfill line names why the index rebuilds (`new index`, or the inputs whose revision changed). A store another process holds exits 75. `hirsel store verify DIR --release EXE` and `hirsel store repair DIR --release EXE` start the release the same way, verify on a copy and repair on DIR itself; launch word 20 says which (0 serves, 1 dry-run, 2 store verify, 3 store repair, 4 tape check), and [STORE-SPEC §15.6](../../core/programs/store/STORE-SPEC.md) has what verify and repair do. Store verify checks the store and its indexes, which says nothing about whether the store's recorded calls can be replayed: neither a clean scrub nor the executable's `place` bit establishes that. Where verify, `Status` or any report claims recorded-code replay availability, the claim comes from the host-side installed-release check of "Recorded-code replay" (the same resolver `hirsel replay`<!-- doc-ref: planned --> uses, run without invoking a handler): each activation of the store's `releases` rows whose calls it claims resolves to one verified installed candidate. `hirsel tape check DIR --recorded WRITER --release WITNESS` starts WITNESS on a copy and carries WRITER's 32-byte executable digest in launch word 27. [RUNNER-SPEC §7](../../core/programs/runner/RUNNER-SPEC.md#7-recording-and-re-execution-r5-at-store-spec-v24) defines the check.
 
 Backfill counts give the source rows read and the rows emitted into the
 preview image. A unique backfill reports the first duplicate by encoded

@@ -404,7 +404,10 @@ its record. A run concluded after a refusal for room replays as
 `Unknown(AdmissionRefused)`. A run whose step stop differs from the record's
 replays as `Unknown(Residency)`. Its recorded-code mode requires an equal replay
 identity (the launch digest with the selected constructors, derived by
-`place_head`); otherwise its verdict is `Unknown(RevisionUnknown)`. A chosen
+`place_head`); otherwise its verdict is `Unknown(RevisionUnknown)`. Offline, the
+recorded code comes only from a verified installed release's `Replay` export, a
+zero-parameter `fn() -> ReplayEntry[G, H]` the package declares
+([launch](../../../docs/spec/launch.md#release-recipe-and-host-assembly)). A chosen
 candidate always runs.
 
 **Operating a place.**

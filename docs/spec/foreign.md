@@ -290,8 +290,8 @@ and byte length, in strictly ascending order of hash. A binding selects the pinn
 of its interface whether or not the entry reaches a call to it. Only reach places functions
 in leaves. An archive's bytes are an object of the code store, named
 by that SHA-256, and they are transferred, reserved, collected and reassembled as the
-recipe's other objects are. The recipe's root is `R = H("hirsel.release-recipe.v4", recipe)`
-([launch](launch.md#release-recipe-and-host-assembly)); the version-1, version-2 and version-3 domains are never reused. A program that reaches no foreign function has an empty foreign modules part.
+recipe's other objects are. The recipe's root is `R = H("hirsel.release-recipe.v5", recipe)`
+([launch](launch.md#release-recipe-and-host-assembly)); the version-1 to version-4 domains are never reused. A recipe with a foreign leaf has no `Replay` export. A program that reaches no foreign function has an empty foreign modules part.
 Its foreign archives part holds the pins its entry grants select, if any. Recipe admission walks the leaves as launch's admission steps 6 and 7 say. So
 `hirsel build --recipe R` links exactly the pinned bytes the addresses select, and two
 programs that differ only in an archive have different roots.

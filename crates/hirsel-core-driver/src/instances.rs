@@ -639,22 +639,7 @@ impl CheckProduct {
         limit: usize,
         instances: &mut InstanceSet,
     ) -> Result<Vec<Identity>, InstanceStop> {
-        self.instances_observed(roots, limit, instances, None, |_, _| {})
-    }
-    /// Collect instances over Cranelift development instance records: a hit
-    /// takes its children and closures from its record and, unless the set
-    /// materialises hits, nothing else; a miss is materialised from its
-    /// template and its arguments' closures, which the walk's records and
-    /// materialised modules supply.
-    pub(crate) fn instances_over_records(
-        &self,
-        roots: impl IntoIterator<Item = Identity>,
-        limit: usize,
-        instances: &mut InstanceSet,
-        records: &Records,
-        expand: Expand<'_>,
-    ) -> Result<Vec<Identity>, InstanceStop> {
-        self.instances_observed(roots, limit, instances, Some((records, expand)), |_, _| {})
+        self.instances_observed(roots, limit, instances, None, false, |_, _| {})
     }
     /// Measure library loading and mechanical specialization without changing the
     /// native collection path. The ordinary path erases the no-op observer.
@@ -664,20 +649,33 @@ impl CheckProduct {
         limit: usize,
         observe: impl FnMut(&Identity, &'static str),
     ) -> Result<Vec<Identity>, InstanceStop> {
-        self.instances_observed(roots, limit, &mut InstanceSet::default(), None, observe)
+        self.instances_observed(
+            roots,
+            limit,
+            &mut InstanceSet::default(),
+            None,
+            false,
+            observe,
+        )
     }
-    fn instances_observed(
+    pub(crate) fn instances_observed(
         &self,
         roots: impl IntoIterator<Item = Identity>,
         limit: usize,
         instances: &mut InstanceSet,
         records: Option<(&Records, Expand<'_>)>,
+        store_teardown: bool,
         mut observe: impl FnMut(&Identity, &'static str),
     ) -> Result<Vec<Identity>, InstanceStop> {
         let mut resolver = Resolver::default();
-        let mut reached = collect_instances(roots, limit, |key| {
+        let step = |key: &Identity| {
             self.instance_step(key, instances, records, &mut resolver, &mut observe)
-        })?;
+        };
+        let mut reached = if store_teardown {
+            self.collect_with_teardown(roots, limit, step)?
+        } else {
+            collect_instances(roots, limit, step)?
+        };
         if !instances.foreign.is_empty() {
             reached.retain(|identity| !instances.foreign.contains(identity));
         }

@@ -4,6 +4,7 @@ use crate::native::EntryDecl;
 use crate::property_corpus;
 use crate::{CheckProduct, NativeOptions, NativeStop};
 use hirsel_core_ids::DefPath;
+use hirsel_core_ir::Identity;
 
 mod cache;
 mod coverage;
@@ -563,34 +564,29 @@ impl CheckProduct {
         store_teardown: bool,
     ) -> (
         crate::instances::InstanceSet,
-        Result<Vec<hirsel_core_ir::Identity>, crate::instances::InstanceStop>,
+        Result<Vec<Identity>, crate::instances::InstanceStop>,
     ) {
-        let walk_roots = |roots: Vec<hirsel_core_ir::Identity>| {
-            let mut materialized =
-                crate::instances::InstanceSet::for_reach(compact_recipe).for_target(target);
-            let _phase = crate::meter::trace::span("instance walk");
-            let instances = match records {
-                Some((records, prior, damaged)) => self.instances_over_records(
-                    roots,
-                    limit,
-                    &mut materialized,
-                    records,
-                    crate::instances::Expand {
-                        prior: prior.and_then(|(p, _, _)| p),
-                        changed: prior.map_or(&[], |(_, c, _)| c),
-                        damaged,
-                    },
-                ),
-                None => self.instances_into(roots, limit, &mut materialized),
-            };
-            (materialized, instances)
-        };
-        let (mut materialized, mut instances) =
-            walk_roots(vec![hirsel_core_ir::Identity::plain(entry.clone())]);
-        if let Some(extra) = self.store_teardown_extra_root(store_teardown, &instances) {
-            (materialized, instances) =
-                walk_roots(vec![hirsel_core_ir::Identity::plain(entry.clone()), extra]);
-        }
+        let mut materialized =
+            crate::instances::InstanceSet::for_reach(compact_recipe).for_target(target);
+        let records = records.map(|(records, prior, damaged)| {
+            (
+                records,
+                crate::instances::Expand {
+                    prior: prior.and_then(|(p, _, _)| p),
+                    changed: prior.map_or(&[], |(_, c, _)| c),
+                    damaged,
+                },
+            )
+        });
+        let _phase = crate::meter::trace::span("instance walk");
+        let instances = self.instances_observed(
+            [Identity::plain(entry.clone())],
+            limit,
+            &mut materialized,
+            records,
+            store_teardown,
+            |_, _| {},
+        );
         (materialized, instances)
     }
 
@@ -605,24 +601,42 @@ impl CheckProduct {
         defined.then_some(path)
     }
 
-    pub(crate) fn store_teardown_extra_root(
+    /// Keep the materialized instances when teardown adds a second root. Replay
+    /// their edges in the ordinary two-root order so limits and diagnostic
+    /// chains are identical to a fresh walk from both roots.
+    pub(crate) fn collect_with_teardown(
         &self,
-        store_teardown: bool,
-        instances: &Result<Vec<hirsel_core_ir::Identity>, crate::instances::InstanceStop>,
-    ) -> Option<hirsel_core_ir::Identity> {
-        let reached = instances.as_ref().ok()?;
-        let needs = store_teardown
-            && reached
-                .iter()
-                .any(|i| i.definition.to_string() == hirsel_core_ir::law::STORE_EMPTY_DB)
-            && !reached
-                .iter()
-                .any(|i| i.definition.to_string() == hirsel_core_ir::law::STORE_VERIFY_TEARDOWN);
-        needs
-            .then(|| {
-                self.store_teardown_def()
-                    .map(hirsel_core_ir::Identity::plain)
-            })
-            .flatten()
+        roots: impl IntoIterator<Item = Identity>,
+        limit: usize,
+        mut step: impl FnMut(&Identity) -> Result<Vec<Identity>, crate::instances::InstanceStop>,
+    ) -> Result<Vec<Identity>, crate::instances::InstanceStop> {
+        use crate::instances::collect_instances;
+
+        let roots: Vec<_> = roots.into_iter().collect();
+        let mut children = std::collections::BTreeMap::new();
+        let reached = collect_instances(roots.iter().cloned(), limit, |id| {
+            let reads = step(id)?;
+            children.insert(id.clone(), reads.clone());
+            Ok(reads)
+        })?;
+        let contains = |path: &DefPath| {
+            reached.iter().any(|id| &id.definition == path) && !self.is_foreign(path)
+        };
+        let constructor = DefPath::from_full(hirsel_core_ir::law::STORE_EMPTY_DB).unwrap();
+        let Some(extra) = self
+            .store_teardown_def()
+            .filter(|extra| contains(&constructor) && !contains(extra))
+        else {
+            return Ok(reached);
+        };
+        drop(reached);
+        collect_instances(
+            roots.into_iter().chain([Identity::plain(extra)]),
+            limit,
+            |id| match children.remove(id) {
+                Some(reads) => Ok(reads),
+                None => step(id),
+            },
+        )
     }
 }

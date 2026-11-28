@@ -443,8 +443,9 @@ elif (( sanitizers_status != 0 )); then
   printf 'Sanitizers & Miri exited %s. See %s/sanitizers.log.\n' "$sanitizers_status" "$run" >>"$run/run.log"
 fi
 # Decoder discovery (tools/decoder-fuzz/discover.py): the libFuzzer hosts of the Rust
-# cohorts and the covered law images of the native ones, 60 child CPU-seconds of search
-# and 10 of reduction per target. It runs after the stages above have released 8-11, so
+# cohorts and the covered law images of the native ones. HTTP/1 searches in a warm
+# worker. Each target has 60 child CPU-seconds for search and 10 for reduction.
+# It runs after the stages above have released 8-11, so
 # their allocations stay whole, and it defers (75) unless one of those CPUs is measured
 # idle. A confirmed red adds one line to the day's alert file.
 run_decoder_discovery() (

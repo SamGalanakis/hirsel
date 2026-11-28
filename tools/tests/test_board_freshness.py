@@ -89,8 +89,10 @@ printf 'fixture-npm:%s\\n' "$*"
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             local_bin = home / ".local/bin"
+            shims = home / ".local/share/mise/shims"
             node_bin = home / ".local/share/mise/installs/node/25.2.1/bin"
             local_bin.mkdir(parents=True)
+            shims.mkdir(parents=True)
             node_bin.mkdir(parents=True)
             npm_log = home / "npm.log"
 
@@ -105,23 +107,36 @@ if [[ $1 == which && $2 == npm ]]; then
 fi
 exit 1
 """)
+            (shims / "npm").symlink_to(local_bin / "mise")
             executable(node_bin / "npm", f"""#!/bin/bash
 printf '%s\\n' "$*" >>{shlex.quote(str(npm_log))}
 """)
             compiler = home / "hirsel"
             executable(compiler, """#!/bin/bash
 case $1 in
-  build) exit 0 ;;
   sdk) [[ $2 == ts ]] && exit 0 ;;
 esac
 printf 'unexpected compiler command: %s\\n' "$*" >&2
 exit 2
 """)
 
-            environment = {"HOME": str(home), "PATH": f"{local_bin}:/usr/local/bin:/usr/bin:/bin"}
+            environment = {
+                "HOME": str(home),
+                "PATH": f"{local_bin}:{home / '.cargo/bin'}:{shims}:/usr/local/bin:/usr/bin:/bin",
+            }
             run_py = TOOLS.parent / "core/programs/webrtc_sfu/service/run.py"
+            # Exercise web preparation without bootstrapping the config exporter
+            # for a service image that the fake compiler would never build.
+            prepare = """
+import runpy
+import sys
+from pathlib import Path
+
+script, compiler, executable, web = map(Path, sys.argv[1:])
+runpy.run_path(str(script))["prepare_web"](compiler, executable, web)
+"""
             result = subprocess.run(
-                [sys.executable, run_py, "--hirsel", compiler, "--work", home / "work", "--build-only"],
+                [sys.executable, "-c", prepare, run_py, compiler, home / "sfu", home / "web"],
                 env=environment, capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr)

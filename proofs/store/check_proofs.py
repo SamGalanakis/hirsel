@@ -84,12 +84,13 @@ BOUNDS = {
 
 BOUNDS["archive"] = {**BOUNDS["retention"], "NKeys": "1", "MaxPack": "3"}
 # Preview holds over ETag-only head writes (STORE-SPEC §15.7 "Preview holds"):
-# two children, boundaries 2 and 3, five head writes, an operator clock at most
-# Skew ahead and a retirement grace equal to it (the tight case).
+# two children, boundaries 2 and 3, five head writes of which one may erase and
+# recreate the archive, an operator clock at most Skew ahead and a retirement
+# grace equal to it (the tight case).
 BOUNDS["preview"] = {
     "NKeys": "1", "MaxStamp": "3", "MaxPack": "2", "MaxCrash": "0",
     "WithExport": "FALSE", "WithFork": "FALSE", "WithBuild": "FALSE", "WithTail": "FALSE",
-    "LastTime": "2", "MaxRev": "6", "Skew": "1", "Grace": "1", "Watch": '"none"',
+    "LastTime": "2", "MaxPut": "5", "MaxWipe": "1", "Skew": "1", "Grace": "1", "Watch": '"none"',
 }
 ARCHIVE_INVARIANTS = ["ArchiveComplete", "ArchiveIntervals", "ArchiveBounded", "ArchiveSourceReadable", "ArchiveStagedSafe"]
 
@@ -102,14 +103,17 @@ INVARIANTS = {
     "StorePreviewHold": ["ArchiveComplete", "HeldReadable", "NoResurrection"],
 }
 # Action properties a baseline also checks.
-PROPERTIES = {"StorePreviewHold": ["PromiseKept", "HoldStable"]}
+PROPERTIES = {"StorePreviewHold": ["PromiseKept", "HoldStable", "HeadNeverRepeats"]}
 # Each must occur (`Watch` set, `NoWitness` violated): a retirement applied over
 # an extension in flight and the reverse, an extension of a lapsed hold, an
 # archiver write over other PUTs in flight, a child reporting expiry, an erase
-# beside another child's live hold, a re-admission of a mounted child, and a
-# genesis published after its hold left.
+# beside another child's live hold, a re-admission of a mounted child, a
+# genesis published after its hold left, a child reporting expiry at a head
+# that lists its stamp under another incarnation, and a recreated head meeting
+# a PUT issued against the same rev of the erased one.
 PREVIEW_WATCH = ["retireOverExtend", "extendOverRetire", "lapsedExtend", "bumpOverFlight",
-                 "expiredSeen", "eraseBesideHold", "readmit", "staleMount"]
+                 "expiredSeen", "eraseBesideHold", "readmit", "staleMount",
+                 "stampRepeated", "twinRefused"]
 
 # (name, module, rules, bounds, deep). Every invariant must hold. Deep baselines
 # (about 5 minutes each on 8 workers) run only with --deep.

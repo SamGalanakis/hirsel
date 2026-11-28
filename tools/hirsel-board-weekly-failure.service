@@ -3,4 +3,4 @@ Description=Publish a weekly Hirsel board qualification alert
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 %h/.local/share/hirsel-board/weekly-main/tools/board-freshness.py --base %h/.local/share/hirsel-board --service-failure /workspace/code/hirsel-briefs/followups.md --service-failure-tier weekly
+ExecStart=/usr/bin/python3 %h/.local/share/hirsel-board/weekly-main/tools/board-freshness.py --base %h/.local/share/hirsel-board --service-failure /workspace/code/hirsel-briefs/archive/followups-to-2026-11-28.md --service-failure-tier weekly

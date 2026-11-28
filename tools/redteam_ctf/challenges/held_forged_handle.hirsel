@@ -1,0 +1,20 @@
+// ctf: class held-confusion
+// ctf: about A handle made from a number: the module asks code.take_as to open the
+// ctf: about integer 1 as if it were an erased value, guessing at the canary's handle.
+// ctf: about PACK-16: only a Held is taken; a number is not one.
+// ctf: expect refused:PACK-16
+pub type Vault: send {
+    token: Bytes
+}
+
+pub fn attack(seed: u64) -> Bytes {
+    let guess: u64 = seed + 1
+    let opened: Result[Vault, (code.TakeError, u64)] = code.take_as(take guess)
+    match take opened {
+        Ok(take vault) => {
+            let Vault(token: token) = take vault
+            token
+        }
+        Error(_) => b"TypeMismatch"
+    }
+}

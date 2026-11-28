@@ -1,0 +1,70 @@
+// The Canary Place of tools/redteam_ctf. Trusted code: the pack host compiles it
+// through the capped worker and runs it on its own execution, beside the attacker's.
+//
+// The per-run secret lives only here, as heap bytes of this execution erased in a
+// Held[send]. The host hands the 32 bytes to `seal` once and keeps no copy. A probe
+// proves the canary still holds them by answering SHA-256(token ++ 23 nonce bytes),
+// which the oracle recomputes outside the host process.
+pub type Vault: send {
+    token: Bytes
+}
+
+pub type Answer {
+    d0: u64,
+    d1: u64,
+    d2: u64,
+    d3: u64,
+    vault: Held[send]
+}
+
+pub fn seal(a: u64, b: u64, c: u64, d: u64) -> Held[send] {
+    let mut token: Bytes = list.with_capacity(32)
+    list.put_word_le(mut token, a)
+    list.put_word_le(mut token, b)
+    list.put_word_le(mut token, c)
+    list.put_word_le(mut token, d)
+    code.hold(Vault(token: take token))
+}
+
+fn pair(h: Inline[u32, 8], at: u64) -> u64 {
+    let high: u64 = int.widen(h[at])
+    let low: u64 = int.widen(h[at + 1])
+    (high << 32) | low
+}
+
+// One padded FIPS 180-4 block: 32 token bytes, 23 nonce bytes, 0x80 and the 440-bit
+// length. The nonce is n0 and n1 whole and the low seven bytes of n2, little-endian.
+pub fn respond(take vault: Held[send], n0: u64, n1: u64, n2: u64) -> Answer {
+    let opened: Result[Vault, (code.TakeError, Held[send])] = code.take_as(take vault)
+    match take opened {
+        Ok(take v) => {
+            let mut block: Inline[u8, 64] =[0; 64]
+            for i in 0u64 .. 32u64 {
+                block[i] = v.token[i]
+            }
+            for i in 0u64 .. 8u64 {
+                block[32 + i] = int.truncate(n0 >> (i * 8))
+                block[40 + i] = int.truncate(n1 >> (i * 8))
+            }
+            for i in 0u64 .. 7u64 {
+                block[48 + i] = int.truncate(n2 >> (i * 8))
+            }
+            block[55] = 128
+            block[62] = 1
+            block[63] = 184
+            let mut h: Inline[u32, 8] =[0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+            sha256.block(mut h, block)
+            Answer(d0: pair(h, 0), d1: pair(h, 2), d2: pair(h, 4), d3: pair(h, 6), vault: code.hold(take v))
+        }
+        Error(_) => fail("the canary vault is not a Vault")
+    }
+}
+
+// End of the run: the vault's bytes are freed on the canary's own execution.
+pub fn retire(take vault: Held[send]) -> u64 {
+    let opened: Result[Vault, (code.TakeError, Held[send])] = code.take_as(take vault)
+    match take opened {
+        Ok(take v) => list.len(v.token),
+        Error(_) => fail("the canary vault is not a Vault")
+    }
+}

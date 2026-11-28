@@ -53,6 +53,9 @@ def python_gates(out, call, Raw):
         ("test-store-chaos", "tools/store-chaos/test_harness.py",
          ["tools/store-chaos/history.py", "tools/store-chaos/log_writes.py",
           "tools/store-chaos/recover.py", "tools/store-chaos/relay.py"]),
+        ("test-redteam-ctf", "tools/redteam_ctf/test_oracle.py",
+         ["tools/redteam_ctf/ctf.py", "tools/redteam_ctf/oracle.py", "tools/redteam_ctf/stub_host.py",
+          "tools/redteam_ctf/challenges/control_benign.hirsel", "tools/redteam_ctf/challenges/mod_truncated.hirsel"]),
     ]
     for target, script, inputs in python_units:
         out.append("\n" + call("hirsel_script_test", name=target, script=script, data=inputs, files_env=exporter if product[0] in inputs else {}))

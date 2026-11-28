@@ -1,0 +1,14 @@
+// ctf: class type-expansion
+// ctf: about Inline arrays nested four deep, 32 of each: S8M is 8,388,608 bytes, past
+// ctf: about FAIL-17's single-frame ceiling. PROG-6: a declared type past the layout-size
+// ctf: about limit is the implementation's resource refusal; no function could hold one.
+// ctf: expect refused:resource
+type S256 { a: Inline[u64, 32] }
+type S8K { a: Inline[S256, 32] }
+type S256K { a: Inline[S8K, 32] }
+type S8M { a: Inline[S256K, 32] }
+type Pair { a: S8M, b: S8M }
+
+pub fn attack(seed: u64) -> Bytes {
+    if bytes[Pair] == seed { b"sized" } else { b"returned" }
+}

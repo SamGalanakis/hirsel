@@ -1,0 +1,15 @@
+// ctf: class stack-exhaustion
+// ctf: about Unbounded self-recursion, each activation holding a 4 KiB frame, under a step
+// ctf: about bound too large to end it first. FAIL-17: the activation whose frame would pass
+// ctf: about the stack allowance is refused with cause Stack, which isolate catches.
+// ctf: expect bounded:Stack
+// ctf: steps 4000000000
+fn dive(n: u64) -> u64 {
+    let pad: Inline[u64, 512] =[n; 512]
+    let below = dive(n + 1)
+    below + pad[0]
+}
+
+pub fn attack(seed: u64) -> Bytes {
+    if dive(seed) == 0 { b"bottom" } else { b"returned" }
+}

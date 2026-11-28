@@ -1,0 +1,13 @@
+// ctf: class capability-forgery
+// ctf: about The module was given no capability, so it makes one: it constructs a Net by
+// ctf: about name. CAP-2: a capability is an opaque type that only its own module makes,
+// ctf: about and the construction is refused by PROG-2's opacity.
+// ctf: expect refused:PROG-2
+fn forge() -> Net {
+    core.Net()
+}
+
+pub fn attack(seed: u64) -> Bytes {
+    let stolen = forge()
+    b"forged"
+}

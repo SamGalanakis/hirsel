@@ -1,0 +1,15 @@
+// ctf: class ownership
+// ctf: about A list is given away with take and then written again, which would be a
+// ctf: about use after free. OWN-5: a place that was moved out of is unavailable.
+// ctf: expect refused:OWN
+fn consume(take given: Bytes) -> u64 {
+    list.len(given)
+}
+
+pub fn attack(seed: u64) -> Bytes {
+    let mut prize: Bytes = list.new()
+    list.push(mut prize, 1)
+    let n = consume(take prize)
+    list.push(mut prize, 2)
+    prize
+}

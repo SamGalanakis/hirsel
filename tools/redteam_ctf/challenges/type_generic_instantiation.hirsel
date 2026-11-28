@@ -1,0 +1,14 @@
+// ctf: class type-expansion
+// ctf: about Polymorphic recursion: every instance of grow calls a larger instance of
+// ctf: about itself, so instantiation never ends. PROG-6 names unbounded generic
+// ctf: about instantiation as the implementation's resource refusal. Where the checker has
+// ctf: about no limit of its own, PACK-3's caps on the compile worker are that refusal: the
+// ctf: about worker ends at its memory, CPU or wall cap and the host is told Limit.
+// ctf: expect refused:resource, compile-limit:Memory, compile-limit:Cpu, compile-limit:Wall
+fn grow[T](take x: T, n: u64) -> u64 {
+    if n == 0 { 0 } else { grow(Some(take x), n - 1) + 1 }
+}
+
+pub fn attack(seed: u64) -> Bytes {
+    if grow(seed, seed) == 0 { b"bottom" } else { b"returned" }
+}

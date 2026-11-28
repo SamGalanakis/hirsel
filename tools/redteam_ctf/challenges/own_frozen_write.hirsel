@@ -1,0 +1,15 @@
+// ctf: class ownership
+// ctf: about A view of a list's first element is kept while the list grows, so the view
+// ctf: about would point into storage the growth freed. OWN-10: a live view freezes its
+// ctf: about anchor against writes.
+// ctf: expect refused:OWN
+pub fn attack(seed: u64) -> Bytes {
+    let mut grown: List[u64] = list.new()
+    list.push(mut grown, seed)
+    let stale = list.get(grown, 0)
+    list.reserve(mut grown, 1048576)
+    match stale {
+        Some(v) => if v == seed { b"read-freed" } else { b"read-other" },
+        None => b"none"
+    }
+}

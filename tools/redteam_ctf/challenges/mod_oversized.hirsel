@@ -1,0 +1,13 @@
+// ctf: class malformed-module
+// ctf: about Copies of an admitted module made too large: a section length of 2^32 - 1,
+// ctf: about a page of zeros after the last section, the real header followed by 48 MiB
+// ctf: about of zeros, and the magic followed by 64 KiB of noise. PACK-10: each is
+// ctf: about Malformed at the parse, so nothing is installed and nothing that size is
+// ctf: about mapped.
+// ctf: tamper length:0 expect raw-refused:Malformed
+// ctf: tamper grow:4096 expect raw-refused:Malformed
+// ctf: tamper bloat:48 expect raw-refused:Malformed
+// ctf: tamper noise:65536 expect raw-refused:Malformed
+pub fn attack(seed: u64) -> Bytes {
+    b"admitted-original"
+}

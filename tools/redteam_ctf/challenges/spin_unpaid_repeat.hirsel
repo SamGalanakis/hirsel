@@ -1,0 +1,19 @@
+// ctf: class metering
+// ctf: about Work hidden from the step count: each pass fills 4 MiB with a runtime repeat.
+// ctf: about MEM-30's work steps charge one step for each 4096 bytes filled, so a bound of
+// ctf: about 20,000 steps ends this after about twenty fills. Were the fills unpaid, 20,000
+// ctf: about of them (80 GiB) would outlast the 3 s wall bound and end as bounded:Wall.
+// ctf: expect bounded:OutOfTime
+// ctf: steps 20000
+// ctf: wall 3000
+fn fill(v: u8) -> u8 {
+    let page: Inline[u8, 4194304] =[v; 4194304]
+    page[4194303]
+}
+
+pub fn attack(seed: u64) -> Bytes {
+    let mut v: u8 = 1
+    loop {
+        v = int.wrapping_add(fill(v), 1)
+    }
+}

@@ -1,0 +1,15 @@
+// ctf: class literal-custody
+// ctf: about A loaded literal lives in the image's read-only data. This module appends to
+// ctf: about one, writes its first byte and grows a String literal, each of which must
+// ctf: about move the bytes to owned storage first and never write the mapping (F9). The
+// ctf: about exact text returned shows every write landed in the copy.
+// ctf: expect returned:Loaded-literal!tail-grown
+pub fn attack(seed: u64) -> Bytes {
+    let mut text: Bytes = b"loaded-literal"
+    list.push(mut text, 33)
+    text[0] = 76
+    let mut tail = "tail"
+    string.push(mut tail, "-grown")
+    list.append(mut text, string.as_bytes(tail))
+    text
+}

@@ -1,0 +1,13 @@
+// ctf: class heap-exhaustion
+// ctf: about A list doubled for ever. MEM-21: growth is admitted against the byte bound
+// ctf: about the warden set (1 MiB), and the growth that does not fit fails with Capacity.
+// ctf: expect bounded:Capacity
+// ctf: steps 4000000000
+pub fn attack(seed: u64) -> Bytes {
+    let mut hoard: List[u64] = list.new()
+    list.push(mut hoard, seed)
+    loop {
+        let twin: List[u64] = clone(hoard)
+        list.append(mut hoard, twin)
+    }
+}

@@ -1,0 +1,16 @@
+// ctf: class ownership
+// ctf: about A view into a list is carried out of the block that owns the list, which
+// ctf: about would dangle once the list is dropped. OWN-8 and OWN-19: a view cannot
+// ctf: about outlive its anchor.
+// ctf: expect refused:OWN
+pub fn attack(seed: u64) -> Bytes {
+    let dangling = {
+        let mut local: List[u64] = list.new()
+        list.push(mut local, seed)
+        list.get(local, 0)
+    }
+    match dangling {
+        Some(v) => if v == seed { b"read-freed" } else { b"read-other" },
+        None => b"none"
+    }
+}

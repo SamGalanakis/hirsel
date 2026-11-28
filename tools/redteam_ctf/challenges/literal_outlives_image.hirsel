@@ -1,0 +1,20 @@
+// ctf: class literal-custody
+// ctf: about A literal returned untouched from inside a list and a match, so the caller
+// ctf: about is left holding bytes of an image whose Code it has already dropped. The
+// ctf: about warden reclaims, then grows and writes what it was given (F3): the literal
+// ctf: about has to outlive its image and refuse the write in place.
+// ctf: expect returned:outlives-its-image
+fn pick(seed: u64) -> Bytes {
+    let mut shelf: List[Bytes] = list.new()
+    list.push(mut shelf, b"outlives-its-image")
+    list.push(mut shelf, b"second")
+    let _ = list.pop(mut shelf)
+    match list.pop(mut shelf) {
+        Some(take found) => found,
+        None => b"empty"
+    }
+}
+
+pub fn attack(seed: u64) -> Bytes {
+    pick(seed)
+}

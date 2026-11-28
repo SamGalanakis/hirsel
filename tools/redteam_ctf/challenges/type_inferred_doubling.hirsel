@@ -1,0 +1,39 @@
+// ctf: class type-expansion
+// ctf: about No type is declared: each local is a pair of the one before, so the checker
+// ctf: about must infer a type that doubles thirty times. PROG-6 names a body-inferred type
+// ctf: about past the expansion limit as a resource refusal too.
+// ctf: expect refused:resource
+pub fn attack(seed: u64) -> Bytes {
+    let x0 = (seed, seed)
+    let x1 = (x0, x0)
+    let x2 = (x1, x1)
+    let x3 = (x2, x2)
+    let x4 = (x3, x3)
+    let x5 = (x4, x4)
+    let x6 = (x5, x5)
+    let x7 = (x6, x6)
+    let x8 = (x7, x7)
+    let x9 = (x8, x8)
+    let x10 = (x9, x9)
+    let x11 = (x10, x10)
+    let x12 = (x11, x11)
+    let x13 = (x12, x12)
+    let x14 = (x13, x13)
+    let x15 = (x14, x14)
+    let x16 = (x15, x15)
+    let x17 = (x16, x16)
+    let x18 = (x17, x17)
+    let x19 = (x18, x18)
+    let x20 = (x19, x19)
+    let x21 = (x20, x20)
+    let x22 = (x21, x21)
+    let x23 = (x22, x22)
+    let x24 = (x23, x23)
+    let x25 = (x24, x24)
+    let x26 = (x25, x25)
+    let x27 = (x26, x26)
+    let x28 = (x27, x27)
+    let x29 = (x28, x28)
+    let x30 = (x29, x29)
+    b"returned"
+}

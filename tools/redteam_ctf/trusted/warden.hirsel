@@ -1,0 +1,214 @@
+// The warden of tools/redteam_ctf. Trusted code: the pack host compiles it through
+// the capped worker and calls it on the Attacker Place's execution.
+//
+// It holds the pool's Loader capability, loads one attacker entry at a fixed closed
+// type, runs it under a byte bound and a step bound inside isolate, and reports how
+// the run ended as plain words and bytes the host can read. The attacker entry
+// receives no capability: its only inputs are a seed, or in the held arena one
+// erased value whose type it cannot name.
+pub type Report {
+    stage: u64,
+    kind: u64,
+    a: u64,
+    b: u64,
+    causes: u64,
+    total: u64,
+    len: u64,
+    out: Inline[u8, 4096]
+}
+
+// The held arena's payload. The attacker's module is always `main`, so it has no
+// spelling for `warden/Decoy` and PACK-16 owes it `TypeMismatch` with the bytes unread.
+pub type Decoy: send {
+    token: Bytes
+}
+
+type Ran = Result[Result[Result[Result[Bytes, OutOfTime], Capacity], Causes], Capacity]
+
+fn blank() -> Report {
+    Report(stage: 0, kind: 0, a: 0, b: 0, causes: 0, total: 0, len: 0, out:[0; 4096])
+}
+
+fn put(mut r: Report, b: Bytes) {
+    let n = list.len(b)
+    r.total = int.saturating_add(r.total, n)
+    let mut i: u64 = 0
+    while i < n && r.len < 4096 {
+        r.out[r.len] = b[i]
+        r.len += 1
+        i += 1
+    }
+}
+
+// Stage 1: the load was refused. `kind` is the PACK-10 refusal's position.
+fn refused(e: code.LoadError) -> Report {
+    let mut r = blank()
+    r.stage = 1
+    match e {
+        NotAdmitted => { r.kind = 1 }
+        Malformed(what) => {
+            r.kind = 2
+            put(mut r, string.as_bytes(what))
+        }
+        Mismatch(field) => {
+            r.kind = 3
+            put(mut r, string.as_bytes(field))
+        }
+        Import(row) => {
+            r.kind = 4
+            r.a = int.widen(row)
+        }
+        Unbound(_) => { r.kind = 5 }
+        Fixup(index) => {
+            r.kind = 6
+            r.a = int.widen(index)
+        }
+        NoEntry => { r.kind = 7 }
+        Capacity => { r.kind = 8 }
+        Quarantined => { r.kind = 9 }
+        NotPrelinked => { r.kind = 10 }
+        Unsupported => { r.kind = 11 }
+    }
+    r
+}
+
+// Stage 2: the entry ran. `kind` is 1 returned, 2 OutOfTime, 3 the byte bound was
+// not admitted, 4 a failure isolate caught, 5 isolate's own cell was refused.
+fn settle(l: Loader, take ran: Ran) -> Report {
+    let mut r = blank()
+    r.stage = 2
+    match take ran {
+        Ok(Ok(Ok(Ok(take out)))) => {
+            r.kind = 1
+            // Custody: the entry's Code is dropped by now. Ask the loader again so a
+            // reclaim runs, then grow, write and shrink what the entry returned. A
+            // returned literal has to survive its module and refuse the write in place.
+            let zero: Inline[u8, 32] =[0; 32]
+            let again: Result[Code[fn(u64) -> Bytes], code.LoadError] = code.load(l, zero, zero)
+            match again {
+                Ok(_) => { r.b = 1 }
+                Error(_) => {}
+            }
+            let mut kept = out
+            let n = list.len(kept)
+            list.push(mut kept, 255)
+            if n > 0 {
+                let first = kept[0]
+                kept[0] = first ^ 255
+                kept[0] = first
+            }
+            let _ = list.pop(mut kept)
+            put(mut r, kept)
+        }
+        Ok(Ok(Ok(Error(spent)))) => {
+            r.kind = 2
+            r.a = spent.steps
+        }
+        Ok(Ok(Error(k))) => {
+            r.kind = 3
+            r.a = k.requested
+            r.b = k.available
+        }
+        Ok(Error(take causes)) => {
+            r.kind = 4
+            for c in causes {
+                r.causes += 1
+                let code: u64 = match c.kind {
+                    Overflow => 1,
+                    Bounds => 2,
+                    Division => 3,
+                    Unwrap => 4,
+                    Fail(text) => {
+                        put(mut r, string.as_bytes(text))
+                        5
+                    }
+                    Cancelled => 6,
+                    Capacity(k) => {
+                        r.b = k.requested
+                        7
+                    }
+                    OutOfTime => 8,
+                    Stack => 9
+                }
+                if r.a == 0 {
+                    r.a = code
+                }
+            }
+        }
+        Error(k) => {
+            r.kind = 5
+            r.a = k.requested
+            r.b = k.available
+        }
+    }
+    r
+}
+
+fn run_plain(l: Loader, key: Inline[u8, 32], id: Inline[u8, 32], step_limit: u64, byte_limit: u64, seed: u64) -> Result[Ran, code.LoadError] {
+    let loaded: Result[Code[fn(u64) -> Bytes], code.LoadError] = code.load(l, key, id)
+    match take loaded {
+        Ok(take entry) => Ok(isolate(fn() -> Result[Result[Bytes, OutOfTime], Capacity] {
+            bound bytes byte_limit {
+                bound steps step_limit {
+                    entry(seed)
+                }
+            }
+        })),
+        Error(take e) => Error(take e)
+    }
+}
+
+fn run_held(l: Loader, key: Inline[u8, 32], id: Inline[u8, 32], step_limit: u64, byte_limit: u64, a: u64, b: u64, c: u64, d: u64) -> Result[Ran, code.LoadError] {
+    let loaded: Result[Code[fn(take Held[send]) -> Bytes], code.LoadError] = code.load(l, key, id)
+    match take loaded {
+        Ok(take entry) => Ok(isolate(fn() -> Result[Result[Bytes, OutOfTime], Capacity] {
+            let mut token: Bytes = list.with_capacity(32)
+            list.put_word_le(mut token, a)
+            list.put_word_le(mut token, b)
+            list.put_word_le(mut token, c)
+            list.put_word_le(mut token, d)
+            let erased: Held[send] = code.hold(Decoy(token: take token))
+            bound bytes byte_limit {
+                bound steps step_limit {
+                    entry(take erased)
+                }
+            }
+        })),
+        Error(take e) => Error(take e)
+    }
+}
+
+// The plain arena: the attacker entry is `fn(u64) -> Bytes`.
+pub fn engage(l: Loader, key: Inline[u8, 32], id: Inline[u8, 32], step_limit: u64, byte_limit: u64, seed: u64) -> Report {
+    let attempt = run_plain(l, key, id, step_limit, byte_limit, seed)
+    match take attempt {
+        Ok(take ran) => settle(l, take ran),
+        Error(take e) => refused(take e)
+    }
+}
+
+// The held arena: the attacker entry is `fn(take Held[send]) -> Bytes` and receives
+// a `Decoy` holding the four words.
+pub fn engage_held(l: Loader, key: Inline[u8, 32], id: Inline[u8, 32], step_limit: u64, byte_limit: u64, a: u64, b: u64, c: u64, d: u64) -> Report {
+    let attempt = run_held(l, key, id, step_limit, byte_limit, a, b, c, d)
+    match take attempt {
+        Ok(take ran) => settle(l, take ran),
+        Error(take e) => refused(take e)
+    }
+}
+
+// A fixed report the host checks once before it trusts the layout it reads.
+pub fn layout() -> Report {
+    let mut r = blank()
+    r.stage = 0x1111111111111111
+    r.kind = 0x2222222222222222
+    r.a = 0x3333333333333333
+    r.b = 0x4444444444444444
+    r.causes = 0x5555555555555555
+    r.total = 0x6666666666666666
+    r.len = 3
+    r.out[0] = 0xc7
+    r.out[1] = 0xf0
+    r.out[4095] = 0xa5
+    r
+}

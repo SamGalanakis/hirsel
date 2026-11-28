@@ -1,0 +1,17 @@
+// ctf: class stack-exhaustion
+// ctf: about Two functions that call each other for ever with small frames, so the stack
+// ctf: about is exhausted by depth and not by frame size. FAIL-17 owes the same refusal:
+// ctf: about cause Stack at the activation that does not fit, caught by isolate.
+// ctf: expect bounded:Stack
+// ctf: steps 4000000000
+fn ping(n: u64) -> u64 {
+    pong(n + 1) + 1
+}
+
+fn pong(n: u64) -> u64 {
+    ping(n + 2) + 3
+}
+
+pub fn attack(seed: u64) -> Bytes {
+    if ping(seed) == 0 { b"bottom" } else { b"returned" }
+}

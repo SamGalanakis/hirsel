@@ -1,0 +1,10 @@
+// ctf: class control
+// ctf: about The negative control: a well-behaved module that returns a fixed marker. The
+// ctf: about warden drops its Code handle and reclaims before reading the marker, so the
+// ctf: about bytes it reports were copied out of a loaded literal that outlived its image.
+// ctf: about The broken-host modes of --self-check run against this module.
+// ctf: expect returned:control
+// ctf: wall 1000
+pub fn attack(seed: u64) -> Bytes {
+    b"control"
+}

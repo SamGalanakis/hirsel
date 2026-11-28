@@ -1,0 +1,18 @@
+// ctf: class metering
+// ctf: about Work hidden in glue: a 512 KiB byte list cloned and compared for ever. MEM-30
+// ctf: about charges a clone and a comparison by the bytes they touch, so 20,000 steps
+// ctf: about allow about fifty passes. Unpaid, 20,000 passes would outlast the wall bound.
+// ctf: expect bounded:OutOfTime
+// ctf: steps 20000
+// ctf: wall 3000
+pub fn attack(seed: u64) -> Bytes {
+    let mut big: Bytes = list.with_capacity(524288)
+    list.fill(mut big, 524288, 7)
+    let mut same: u64 = 0
+    loop {
+        let twin: Bytes = clone(big)
+        if twin == big {
+            same = int.wrapping_add(same, 1)
+        }
+    }
+}

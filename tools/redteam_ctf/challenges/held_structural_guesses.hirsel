@@ -1,0 +1,48 @@
+// ctf: class held-confusion
+// ctf: arena held
+// ctf: about The same erased value asked for as each type its bytes could be read as:
+// ctf: about Bytes, String, a one-field tuple, a lookalike Vault and four raw words. Each
+// ctf: about refused take hands the value back for the next guess. PACK-16 owes
+// ctf: about TypeMismatch every time; any guess that opens it returns the token.
+// ctf: expect returned:every-guess-mismatched
+pub type Vault: send {
+    token: Bytes
+}
+
+type Words: send {
+    a: u64,
+    b: u64,
+    c: u64
+}
+
+pub fn attack(take erased: Held[send]) -> Bytes {
+    let first: Result[Bytes, (code.TakeError, Held[send])] = code.take_as(take erased)
+    let after_bytes = match take first {
+        Ok(take token) => return token,
+        Error((_, take h)) => h
+    }
+    let second: Result[String, (code.TakeError, Held[send])] = code.take_as(take after_bytes)
+    let after_string = match take second {
+        Ok(take text) => return clone(string.as_bytes(text)),
+        Error((_, take h)) => h
+    }
+    let third: Result[Vault, (code.TakeError, Held[send])] = code.take_as(take after_string)
+    let after_vault = match take third {
+        Ok(take vault) => {
+            let Vault(token: token) = take vault
+            return token
+        }
+        Error((_, take h)) => h
+    }
+    let fourth: Result[Words, (code.TakeError, Held[send])] = code.take_as(take after_vault)
+    match take fourth {
+        Ok(words) => {
+            let mut out: Bytes = list.new()
+            list.put_word_le(mut out, words.a)
+            list.put_word_le(mut out, words.b)
+            list.put_word_le(mut out, words.c)
+            out
+        }
+        Error(_) => b"every-guess-mismatched"
+    }
+}

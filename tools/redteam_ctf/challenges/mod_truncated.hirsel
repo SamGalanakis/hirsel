@@ -1,0 +1,13 @@
+// ctf: class malformed-module
+// ctf: about The host admits this module, then is offered copies of it cut short: empty,
+// ctf: about the magic alone, one byte short of a header, and missing its last byte or
+// ctf: about word. PACK-10: a module whose sections do not tile the file is Malformed, and
+// ctf: about every refusal comes before anything is installed.
+// ctf: tamper keep:0 expect raw-refused:Malformed
+// ctf: tamper keep:8 expect raw-refused:Malformed
+// ctf: tamper keep:231 expect raw-refused:Malformed
+// ctf: tamper drop:1 expect raw-refused:Malformed
+// ctf: tamper drop:8 expect raw-refused:Malformed
+pub fn attack(seed: u64) -> Bytes {
+    b"admitted-original"
+}

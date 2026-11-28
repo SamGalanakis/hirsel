@@ -1330,6 +1330,7 @@ name = "hirsel-pack"
 version = "0.1.0"
 dependencies = [
  "hirsel-code",
+ "hirsel-compiler",
  "hirsel-core-driver",
  "hirsel-core-ids",
  "hirsel-core-layout",

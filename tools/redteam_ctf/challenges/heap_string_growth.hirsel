@@ -1,0 +1,14 @@
+// ctf: class heap-exhaustion
+// ctf: about Strings pushed into a list of strings for ever, so the hoard is many small
+// ctf: about allocations and not one large one. Each is charged to the same byte bound,
+// ctf: about and the one that does not fit fails with Capacity.
+// ctf: expect bounded:Capacity
+// ctf: steps 4000000000
+pub fn attack(seed: u64) -> Bytes {
+    let mut hoard: List[String] = list.new()
+    loop {
+        let mut s = string.new()
+        string.push(mut s, "sixteen byte str")
+        list.push(mut hoard, take s)
+    }
+}

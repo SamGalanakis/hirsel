@@ -1,0 +1,14 @@
+// ctf: class malformed-module
+// ctf: about Copies of an admitted module with one byte inverted: in the magic, in the
+// ctf: about backend byte, in the ABI hash, in the compiler hash, and in the first byte
+// ctf: about of the first section. PACK-10: the first three are Malformed or a Mismatch of
+// ctf: about `abi`; the others still parse, and are NotAdmitted because the host admitted
+// ctf: about a digest and these bytes do not have it.
+// ctf: tamper flip:0 expect raw-refused:Malformed
+// ctf: tamper flip:12 expect raw-refused:Malformed
+// ctf: tamper flip:24 expect raw-refused:Mismatch
+// ctf: tamper flip:56 expect raw-refused:NotAdmitted
+// ctf: tamper flip:232 expect raw-refused:NotAdmitted, raw-refused:Malformed
+pub fn attack(seed: u64) -> Bytes {
+    b"admitted-original"
+}

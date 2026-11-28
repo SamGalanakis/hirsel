@@ -1,0 +1,13 @@
+// ctf: class capability-forgery
+// ctf: about The entry declares `waits`, makes itself a virtual Dir, and opens a host
+// ctf: about path through it. A virtual Dir reaches only the program that serves it
+// ctf: about (CAP-2), and the host never runs this entry: PACK-14's typed load names a
+// ctf: about signature that does not wait, so the entry is not found.
+// ctf: expect load-refused:NoEntry
+pub fn attack(seed: u64) -> Bytes waits {
+    let (dir, take port) = provide.dir(bytes 4096)
+    match host.stat(dir, "/etc/passwd") {
+        Ok(_) => b"reached-the-host",
+        Error(_) => b"refused-by-the-port"
+    }
+}

@@ -1,0 +1,10 @@
+// ctf: class capability-forgery
+// ctf: about A virtual provider is no host authority, but it is still an import, and
+// ctf: about this host's pool admits pure, metered and task rows only. PACK-10: a module
+// ctf: about that imports a row outside the pool's mask is refused Import(row) at the
+// ctf: about load, before anything is installed.
+// ctf: expect load-refused:Import
+pub fn attack(seed: u64) -> Bytes {
+    let (dir, take port) = provide.dir(bytes 4096)
+    b"provided"
+}

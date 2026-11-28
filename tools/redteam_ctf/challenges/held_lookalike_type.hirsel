@@ -1,0 +1,21 @@
+// ctf: class held-confusion
+// ctf: arena held
+// ctf: about The warden hands over an erased `warden/Decoy { token: Bytes }`. This module
+// ctf: about declares a type of the same name, shape and bound and asks for it. PACK-16:
+// ctf: about the witness names the defining module, so the take is TypeMismatch and the
+// ctf: about token is never read. Returning the token would be a decoy leak.
+// ctf: expect returned:TypeMismatch
+pub type Decoy: send {
+    token: Bytes
+}
+
+pub fn attack(take erased: Held[send]) -> Bytes {
+    let opened: Result[Decoy, (code.TakeError, Held[send])] = code.take_as(take erased)
+    match take opened {
+        Ok(take decoy) => {
+            let Decoy(token: token) = take decoy
+            token
+        }
+        Error(_) => b"TypeMismatch"
+    }
+}

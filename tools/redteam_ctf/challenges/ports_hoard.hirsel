@@ -1,0 +1,17 @@
+// ctf: class port-exhaustion
+// ctf: pool provider
+// ctf: about Virtual ports need no capability, so the module makes them for ever and
+// ctf: about keeps every one. MEM-24: a port is charged to the limit current at its
+// ctf: about construction, here the warden's byte bound, and the one that does not fit
+// ctf: about fails with Capacity.
+// ctf: expect bounded:Capacity
+// ctf: steps 4000000000
+pub fn attack(seed: u64) -> Bytes {
+    let mut dirs: List[Dir] = list.new()
+    let mut ports: List[Served[DirOp]] = list.new()
+    loop {
+        let (dir, take port) = provide.dir(bytes 4096)
+        list.push(mut dirs, dir)
+        list.push(mut ports, take port)
+    }
+}

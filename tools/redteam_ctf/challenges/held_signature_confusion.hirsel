@@ -1,0 +1,11 @@
+// ctf: class held-confusion
+// ctf: arena held
+// ctf: about The host is about to pass an erased value, and this entry declares a u64 in
+// ctf: about its place, hoping to read the handle as a number. PACK-14: a typed load
+// ctf: about names the entry's closed signature, so the entry is not found and never runs.
+// ctf: expect load-refused:NoEntry
+pub fn attack(handle: u64) -> Bytes {
+    let mut out: Bytes = list.new()
+    list.put_word_le(mut out, handle)
+    out
+}

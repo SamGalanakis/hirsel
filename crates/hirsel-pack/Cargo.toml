@@ -13,6 +13,7 @@ hirsel-core-rt = { path = "../hirsel-core-rt" }
 hirsel-mod = { path = "../hirsel-mod" }
 
 [dev-dependencies]
+hirsel-compiler = { path = "../hirsel-compiler" }
 hirsel-core-driver = { path = "../hirsel-core-driver", default-features = false }
 hirsel-core-layout = { path = "../hirsel-core-layout" }
 hirsel-core-resolve = { path = "../hirsel-core-resolve" }

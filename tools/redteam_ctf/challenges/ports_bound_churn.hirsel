@@ -1,0 +1,27 @@
+// ctf: class port-exhaustion
+// ctf: pool provider
+// ctf: about Each pass opens a small byte bound, makes twenty virtual ports of five kinds
+// ctf: about inside it and lets the bound end. MEM-24: the ports are withdrawn with the
+// ctf: about limit that paid for them, so no pass leaves a charge or host memory behind
+// ctf: about and only the step bound ends the loop. A leak shows as Capacity or as host
+// ctf: about memory past the ceiling.
+// ctf: expect bounded:OutOfTime
+fn build() {
+    for _ in 0u64 .. 4 {
+        let _ = provide.stdout(bytes 64, None)
+        let _ = provide.stderr(bytes 64, None)
+        let _ = provide.dir(bytes 64)
+        let _ = provide.net(bytes 64)
+        let _ = provide.exec(bytes 64)
+    }
+}
+
+pub fn attack(seed: u64) -> Bytes {
+    let mut refused: u64 = 0
+    loop {
+        match (bound bytes 65536 { build() }) {
+            Ok(_) => {}
+            Error(_) => { refused += 1 }
+        }
+    }
+}

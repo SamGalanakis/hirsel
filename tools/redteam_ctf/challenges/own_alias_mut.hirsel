@@ -1,0 +1,11 @@
+// ctf: class ownership
+// ctf: about One list passed as the mut destination and the read source of one call,
+// ctf: about so a growth of the destination would free the source under the copy.
+// ctf: about OWN-9 and OWN-11: a mut argument does not overlap another argument.
+// ctf: expect refused:OWN
+pub fn attack(seed: u64) -> Bytes {
+    let mut both: Bytes = list.new()
+    list.push(mut both, 1)
+    list.append(mut both, both)
+    both
+}

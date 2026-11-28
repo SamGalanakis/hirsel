@@ -1,0 +1,25 @@
+// ctf: class stack-exhaustion
+// ctf: about A Box chain 200,000 links deep, then cloned, compared and dropped. FAIL-17:
+// ctf: about generated glue uses constant stack whatever the value's depth, so none of the
+// ctf: about three may raise Stack or stop the run; the module returns its marker.
+// ctf: expect returned:glue-survived
+// ctf: steps 100000000
+// ctf: bytes 15728640
+type Chain: key = Nil | Link(u64, Box[Chain])
+
+fn build(n: u64) -> Chain {
+    let mut c: Chain = Nil
+    let mut i: u64 = 0
+    while i < n {
+        let prev = take c
+        c = Link(i, box.new(take prev))
+        i += 1
+    }
+    c
+}
+
+pub fn attack(seed: u64) -> Bytes {
+    let deep = build(200000)
+    let twin: Chain = clone(deep)
+    if twin == deep { b"glue-survived" } else { b"glue-differs" }
+}

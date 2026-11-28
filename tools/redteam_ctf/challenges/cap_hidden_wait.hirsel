@@ -1,0 +1,13 @@
+// ctf: class capability-forgery
+// ctf: about An entry that does not declare `waits` reaches for the file system through
+// ctf: about the standard library, over a Dir it made itself. LANG-8: a function that
+// ctf: about calls a waiting function is itself `waits`, so no entry of the host's
+// ctf: about non-waiting type can hide an operation on the world.
+// ctf: expect refused:LANG-8
+pub fn attack(seed: u64) -> Bytes {
+    let (dir, take port) = provide.dir(bytes 4096)
+    match std.dir.stat(dir, "/etc/passwd") {
+        Ok(_) => b"reached-the-host",
+        Error(_) => b"refused-by-the-port"
+    }
+}

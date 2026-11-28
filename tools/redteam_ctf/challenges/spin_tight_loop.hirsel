@@ -1,0 +1,10 @@
+// ctf: class metering
+// ctf: about The plainest denial of service: a loop that never ends. MEM-30: every return
+// ctf: about to a loop head is a step, so the step bound stops it with OutOfTime.
+// ctf: expect bounded:OutOfTime
+pub fn attack(seed: u64) -> Bytes {
+    let mut i: u64 = seed
+    loop {
+        i = int.wrapping_add(i, 1)
+    }
+}

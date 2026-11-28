@@ -110,13 +110,22 @@ type TieredWrites {
 }
 
 pub fn tx_tiered_snapshot[Event: inert + shareable + send](tx: TxState[Event]) -> std.omap.OMap[Bytes, Option[Arc[Bytes]]] {
-    std.omap.snapshot(tx.tiered_writes.rows)
+    match view tx.tiered_writes {
+        Some(held) => std.omap.snapshot(held.rows),
+        None => std.omap.new(),
+    }
 }
 
 fn save_table_op[Event: inert + shareable + send](mut tx: TxState[Event], take key: Bytes, take value: Option[format.StagedValue], prior: Option[u32]) -> Result[(u64, Option[u64]), types.Failure] {
     if let Some(_) = tx.attempt {
         if read.tiered_staged_key(tx_roots(tx).collections, key) {
-            read.stage_tiered_value(mut tx.tiered_writes.ids, mut tx.tiered_writes.rows, key, value)?
+            if let Some(mut held) = tx.tiered_writes {
+                read.stage_tiered_value(mut held.ids, mut held.rows, key, value)?
+            } else {
+                let mut writes = TieredWrites(rows: std.omap.new(), ids: 0)
+                read.stage_tiered_value(mut writes.ids, mut writes.rows, key, value)?
+                tx.tiered_writes = Some(take writes)
+            }
         }
     }
     Ok(save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take key, take value, prior))

@@ -48,7 +48,7 @@ pub opaque scoped type TxState[Event: inert + shareable + send] {
     limits: types.LimitsRep,
     wrote: bool,
     ops: pages.DataOps,
-    tiered_writes: TieredWrites,
+    tiered_writes: Option[TieredWrites],
     view_tree: core.Cell[Option[TxView]],
     // The streams section's ops (§1.8). `extra_bytes` is that section with
     // its 5-byte head, when it has ops, plus the CALL section's bytes.
@@ -209,7 +209,7 @@ pub type Drafted[R, E] {
     frame_bytes: Option[u64],
     wrote: bool,
     ops: pages.DataOps,
-    tiered_writes: TieredWrites,
+    tiered_writes: Option[TieredWrites],
     view_tree: core.Cell[Option[TxView]],
     stream_ops: pages.DataOps,
     extra_bytes: u64,
@@ -826,11 +826,15 @@ pub fn begin_tx[Event: inert + shareable + send](scope: TxViews[Event], bases: p
     } else {
         None
     }
-    TxState(store: start.store, indexes: scope.indexes, base: scope.base, roots: None, base_collection: None, fetched: take fetched, bases: pages.share_tail_bases(bases), ids: start.ids, private_from: int.saturating_add(start.ids, 1), resident: start.resident, retain_old: start.retain_old, frame_tail: frame_tail, reads: scope.reads, values: scope.values, issued: scope.issued, observed_info: scope.observed_info, attempt: scope.attempt, pins: scope.pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: start.limits, wrote: false, ops: pages.empty_ops(), tiered_writes: TieredWrites(rows: std.omap.new(), ids: 0), view_tree: cell.new(None), stream_ops: pages.empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+    TxState(store: start.store, indexes: scope.indexes, base: scope.base, roots: None, base_collection: None, fetched: take fetched, bases: pages.share_tail_bases(bases), ids: start.ids, private_from: int.saturating_add(start.ids, 1), resident: start.resident, retain_old: start.retain_old, frame_tail: frame_tail, reads: scope.reads, values: scope.values, issued: scope.issued, observed_info: scope.observed_info, attempt: scope.attempt, pins: scope.pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: start.limits, wrote: false, ops: pages.empty_ops(), tiered_writes: None, view_tree: cell.new(None), stream_ops: pages.empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
 }
 
 pub fn fork_tx[Event: inert + shareable + send](tx: TxState[Event]) -> TxState[Event] in tx {
-    TxState(store: tx.store, indexes: tx.indexes, base: tx_roots(tx), roots: None, base_collection: None, fetched: Some(cell.new(map.new())), bases: pages.share_tail_bases(tx.bases), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, values: tx.values, issued: tx.issued, observed_info: tx.observed_info, attempt: tx.attempt, pins: tx.pins, refusal: tx.refusal, index_conflict: clone(tx.index_conflict), drift: None, frame_bytes: tx.frame_bytes, limits: tx.limits, wrote: tx.wrote, ops: pages.empty_ops(), tiered_writes: TieredWrites(rows: tx_tiered_snapshot(tx), ids: tx.tiered_writes.ids), view_tree: cell.new(share_tx_view(tx.view_tree)), stream_ops: pages.empty_ops(), keyed: None, extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, cell_rows: tx.cell_rows, trim_rows: tx.trim_rows, streams: tx.streams)
+    let tiered_writes = match view tx.tiered_writes {
+        Some(held) => Some(TieredWrites(rows: std.omap.snapshot(held.rows), ids: held.ids)),
+        None => None,
+    }
+    TxState(store: tx.store, indexes: tx.indexes, base: tx_roots(tx), roots: None, base_collection: None, fetched: Some(cell.new(map.new())), bases: pages.share_tail_bases(tx.bases), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, values: tx.values, issued: tx.issued, observed_info: tx.observed_info, attempt: tx.attempt, pins: tx.pins, refusal: tx.refusal, index_conflict: clone(tx.index_conflict), drift: None, frame_bytes: tx.frame_bytes, limits: tx.limits, wrote: tx.wrote, ops: pages.empty_ops(), tiered_writes: take tiered_writes, view_tree: cell.new(share_tx_view(tx.view_tree)), stream_ops: pages.empty_ops(), keyed: None, extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, cell_rows: tx.cell_rows, trim_rows: tx.trim_rows, streams: tx.streams)
 }
 
 pub fn tx_roots[Event: inert + shareable + send](tx: TxState[Event]) -> View[pages.Roots] in tx {

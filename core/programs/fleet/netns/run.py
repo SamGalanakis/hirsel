@@ -22,15 +22,15 @@ import tempfile
 import threading
 import uuid
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[4] / 'tools/toolchain-dist'))
-import hcfg
-
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 
+sys.path[:0] = [str(ROOT / 'tools/toolchain-dist'), str(ROOT / 'core/tools')]
+import hcfg
+from bench_cpus import cpu_list
+
 
 def build(args):
-    sys.path.insert(0, str(ROOT / 'core/tools'))
     from store_tests import inputs
     corpus = inputs(ROOT, package='fleet')
     fleet = corpus['packages'][-1]
@@ -211,10 +211,17 @@ def measure(args):
         namespaces(stack, prefix)
         credentials(run)
         command = [sys.executable, __file__, 'drive', str(args.work), str(run), prefix, *workload(args)]
+        env = {**os.environ, 'HIRSEL_MEMORY_LIMIT': '2G', 'HIRSEL_JOBS': '1'}
         if args.shield:
+            cpus = {16}
+            if args.cpus:
+                cpus.update(cpu_list(args.cpus.replace('/', ',')))
+            # The scope accounts for all nodes and the driver together.
+            env['HIRSEL_JOBS'] = str(len(cpus))
             command = [sys.executable, str(ROOT / 'core/tools/timing_shield.py'), 'run', '--',
-                       'taskset', '-c', '16', str(ROOT / 'tools/capped'), *command]
-        subprocess.run(command, check=True, env={**os.environ, 'HIRSEL_MEMORY_LIMIT': '2G', 'HIRSEL_JOBS': '1'})
+                       'taskset', '-c', ','.join(map(str, sorted(cpus))), str(ROOT / 'tools/capped'),
+                       'taskset', '-c', '16', *command]
+        subprocess.run(command, check=True, env=env)
 
 
 def workload(args):

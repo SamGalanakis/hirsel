@@ -266,6 +266,34 @@ pub extern "C" fn embed_abi_fixture_header() -> HirselBytes {
     HirselBytes::from_slice(HEADER_V1.as_bytes())
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn embed_abi_fixture_discriminants(visit: extern "C" fn(HirselBytes, i64)) {
+    macro_rules! visit_codes {
+        ($($code:ident),+ $(,)?) => {
+            $(visit(HirselBytes::from_slice(stringify!($code).as_bytes()), i64::from($code));)+
+        };
+    }
+    visit_codes!(
+        HIRSEL_OK,
+        HIRSEL_ABI_MISMATCH,
+        HIRSEL_REFUSED,
+        HIRSEL_STOPPED,
+        HIRSEL_UNKNOWN_ENTRY,
+        HIRSEL_BUSY,
+        HIRSEL_ALREADY_RUNNING,
+        HIRSEL_ID_IN_USE,
+        HIRSEL_DEFERRED,
+        HIRSEL_NOT_LIVE,
+        HIRSEL_FULL,
+        HIRSEL_HOST_MEMORY,
+        HIRSEL_OVER_BOUND,
+        HIRSEL_END_STOPPED,
+        HIRSEL_END_REFUSED,
+        HIRSEL_END_PLACE_FAILED,
+        HIRSEL_END_RUN_STOP,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Shared 3145 transition vector runner (`sdk/client/state.ts` == `embed::kernel`)
 // ---------------------------------------------------------------------------

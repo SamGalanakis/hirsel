@@ -100,7 +100,7 @@ def core_gates(out, call, Raw, libc_deps):
         bin_exes={"node": "//tools/buck2:sdk-node[bin/node]"},
         files_env={"HIRSEL_EMBED_ABI_FIXTURE": "//:core-embed-abi-fixture-pic",
                    "HIRSEL_NODE_EXE": "//tools/buck2:sdk-node[bin/node]"},
-        data=Raw('["crates/hirsel-core-ids/src/embed.rs", "crates/hirsel-core-rt/testdata/embed_abi_oom.c", "crates/hirsel-core-rt/testdata/embed_abi_vectors.c", "sdk/client/state.ts"]')))
+        data=Raw('["crates/hirsel-core-ids/src/embed.rs", "crates/hirsel-core-rt/src/embed/abi.rs", "crates/hirsel-core-rt/testdata/embed_abi_oom.c", "crates/hirsel-core-rt/testdata/embed_abi_vectors.c", "sdk/client/state.ts"]')))
     # host: ASan shadow memory reservation requires unbounded RLIMIT_AS.
     out.append("\n" + call("hirsel_script_test", name="core-embed-abi-asan", script="tools/tests/core_embed_abi_asan.py", host=True,
         files_env={"HIRSEL_EMBED_ABI_FIXTURE": "//:core-embed-abi-fixture-pic"},

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Slice 2 native C11 header, ASan (B1/B2/M13), refusing-allocator (M3),
-and shared 3145 leased-stream kernel transition vector laws (TS == Rust)."""
+"""Native C11 header and discriminant, refusing-allocator (M3), and shared
+3145 leased-stream kernel transition vector laws (TS == Rust)."""
 import os
 from pathlib import Path
 import re
@@ -267,6 +267,20 @@ def extract_header_v1() -> str:
     return m.group(1)
 
 
+def c_discriminant_names(header: str) -> list[str]:
+    header = re.sub(r"/\*.*?\*/|//[^\n]*", "", header, flags=re.S)
+    enums = {
+        name: body
+        for body, name in re.findall(r"typedef\s+enum\s*\{([^}]*)\}\s*(\w+)\s*;", header)
+    }
+    names = []
+    for enum in ("hirsel_status", "hirsel_end_code"):
+        names.extend(re.findall(r"(?:^|,)\s*([A-Za-z_]\w*)\s*(?==|,|$)", enums[enum]))
+    macros = re.findall(r"^\s*#\s*define[ \t]+(HIRSEL_\w+)", header, flags=re.M)
+    names.extend(name for name in macros if name not in {"HIRSEL_EMBED_ABI", "HIRSEL_EMBED_H"})
+    return names
+
+
 class EmbedAbiLaws(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -284,6 +298,63 @@ class EmbedAbiLaws(unittest.TestCase):
 
     def _link_flags(self):
         return ["-lgcc_s", "-lpthread", "-ldl", "-lm", "-lrt", "-lutil"]
+
+    def _compile_strict_c11(self, source: Path) -> Path:
+        binary = source.with_suffix("")
+        subprocess.run(
+            [
+                str(self.cc),
+                "-std=c11",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-pedantic",
+                f"-I{self.dir}",
+                str(source),
+                str(self.archive),
+                *self._link_flags(),
+                "-o",
+                str(binary),
+            ],
+            check=True,
+        )
+        return binary
+
+    def test_status_and_end_discriminants_match_compiled_rust(self):
+        self.maxDiff = None
+        c_names = c_discriminant_names(self.header_path.read_text())
+        self.assertEqual(len(c_names), len(set(c_names)), "duplicate C code names")
+        # Check declarations independently of the compiled fixture's list.
+        abi_rs = (ROOT / "crates/hirsel-core-rt/src/embed/abi.rs").read_text()
+        rust_names = re.findall(r"^\s*pub\s+const\s+(HIRSEL_\w+)\s*:", abi_rs, flags=re.M)
+
+        probe = self.dir / "discriminants.c"
+        print_c_codes = "".join(
+            f'    printf("C {name} %" PRId64 "\\n", (int64_t){name});\n' for name in c_names
+        )
+        probe.write_text(
+            '#include "hirsel_embed.h"\n'
+            '#include <inttypes.h>\n'
+            '#include <stdio.h>\n'
+            'extern void embed_abi_fixture_discriminants(void (*visit)(hirsel_bytes, int64_t));\n'
+            'static void print_rust_code(hirsel_bytes name, int64_t value) {\n'
+            '    printf("Rust %.*s %" PRId64 "\\n", (int)name.len, (const char *)name.ptr, value);\n'
+            '}\n'
+            'int main(void) {\n'
+            + print_c_codes
+            + '    embed_abi_fixture_discriminants(print_rust_code);\n'
+            '    return ferror(stdout) != 0;\n'
+            '}\n'
+        )
+        binary = self._compile_strict_c11(probe)
+        output = subprocess.check_output([str(binary)], text=True)
+        rows = {"C": [], "Rust": []}
+        for line in output.splitlines():
+            side, name, value = line.split()
+            rows[side].append((name, int(value)))
+        self.assertCountEqual([name for name, _ in rows["Rust"]], rust_names, "Rust fixture inventory")
+        self.assertCountEqual(c_names, rust_names, "C and Rust code inventories")
+        self.assertDictEqual(dict(rows["C"]), dict(rows["Rust"]), "C and Rust discriminants")
 
     def test_header_v1_strict_c11_and_exact_14_exports(self):
         header_text = self.header_path.read_text()
@@ -314,24 +385,7 @@ class EmbedAbiLaws(unittest.TestCase):
             "  return 0;\n"
             "}\n"
         )
-        out_bin = self.dir / "strict_c11"
-        subprocess.run(
-            [
-                str(self.cc),
-                "-std=c11",
-                "-Wall",
-                "-Wextra",
-                "-Werror",
-                "-pedantic",
-                f"-I{self.dir}",
-                str(check_c),
-                str(self.archive),
-                *self._link_flags(),
-                "-o",
-                str(out_bin),
-            ],
-            check=True,
-        )
+        self._compile_strict_c11(check_c)
 
     def test_refusing_allocator_m3_host_memory(self):
         source = ROOT / "crates/hirsel-core-rt/testdata/embed_abi_oom.c"

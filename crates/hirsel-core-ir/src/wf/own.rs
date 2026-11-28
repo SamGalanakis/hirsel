@@ -43,7 +43,8 @@
 //! place that may be dropped is an error naming both.
 
 use super::own_names::{
-    Names, Pl, check_call, check_moves, covers, local_owned_slots, names, overlap, ptr_args,
+    Layouts, Names, Pl, check_call, check_moves, covers, local_owned_slots, names, overlap,
+    ptr_args,
 };
 pub(super) use super::own_names::{anchors, is_flag_slot};
 use super::*;
@@ -504,10 +505,21 @@ impl Own<'_> {
     }
 }
 
+/// No use of a slot, or of a pointer to it, follows its last storage end.
+pub(super) fn ended(b: &Body, budget: &Debit<'_>) -> Result<(), Error> {
+    match crate::extent::use_after_end_with_budget(b, budget)? {
+        Some(((bi, _), s)) => Err(Error::Invalid(format!(
+            "b{bi}: s{s} is used after its storage ends"
+        ))),
+        None => Ok(()),
+    }
+}
+
 pub(super) fn check(
     m: &Module,
     sig: &Signature,
     b: &Body,
+    layouts: &mut Layouts<'_, '_>,
     budget: &Debit<'_>,
 ) -> Result<(), Error> {
     let scratch = budget.scratch();
@@ -533,8 +545,8 @@ pub(super) fn check(
             *v = true;
         }
     }
-    check_moves(m, b, &scratch.scratch())?;
-    let (n, j, joins) = names(m, b, entry, &scratch)?;
+    check_moves(b, layouts)?;
+    let (n, j, joins) = names(m, b, entry, layouts, &scratch)?;
     let mut routed = Vec::new();
     scratch.reserve(&mut routed, b.addresses.len())?;
     for a in 0..b.addresses.len() {

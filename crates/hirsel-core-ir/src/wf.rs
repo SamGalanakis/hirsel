@@ -170,16 +170,9 @@ fn structural(m: &Module, budget: &Debit<'_>) -> Result<(), Error> {
             .map_err(Error::Invalid)?;
         }
     }
-    {
-        let layout_scratch = scratch.scratch();
-        hirsel_core_layout::compute_budgeted(&m.types, |bytes| layout_scratch.charge_bytes(bytes))
-            .map_err(|err| match err {
-                hirsel_core_layout::ComputeError::Budget(e) => Error::from(e),
-                hirsel_core_layout::ComputeError::Layout(e) => {
-                    Error::Invalid(format!("layout: {e:?}"))
-                }
-            })?;
-    }
+    let layout_scratch = scratch.scratch();
+    let mut layouts = own_names::Layouts::new(m, &layout_scratch);
+    layouts.rows()?;
     for (i, s) in m.signatures.iter().enumerate() {
         scratch.check()?;
         let types_ok = s.params.iter().all(|p| match p {
@@ -225,11 +218,16 @@ fn structural(m: &Module, budget: &Debit<'_>) -> Result<(), Error> {
         })
         .map_err(Error::Invalid)?;
         if let Some(b) = &f.body {
-            body_with_budget(m, &m.signatures[f.signature.index()], b, &scratch).map_err(|e| {
-                match e {
-                    Error::Invalid(msg) => Error::Invalid(format!("f{i}: {msg}")),
-                    Error::Limit(limit) => Error::Limit(limit),
-                }
+            body_with_layouts(
+                m,
+                &m.signatures[f.signature.index()],
+                b,
+                &mut layouts,
+                &scratch,
+            )
+            .map_err(|e| match e {
+                Error::Invalid(msg) => Error::Invalid(format!("f{i}: {msg}")),
+                Error::Limit(limit) => Error::Limit(limit),
             })?;
             need(
                 core_fn(m, i as u32)
@@ -460,6 +458,18 @@ pub fn body_with_budget(
     b: &Body,
     budget: &Debit<'_>,
 ) -> Result<(), Error> {
+    let layout_scratch = budget.scratch();
+    let mut layouts = own_names::Layouts::new(m, &layout_scratch);
+    body_with_layouts(m, sig, b, &mut layouts, budget)
+}
+
+fn body_with_layouts(
+    m: &Module,
+    sig: &Signature,
+    b: &Body,
+    layouts: &mut own_names::Layouts<'_, '_>,
+    budget: &Debit<'_>,
+) -> Result<(), Error> {
     let scratch = budget.scratch();
     scratch.check()?;
     let entry_values = b
@@ -685,21 +695,8 @@ pub fn body_with_budget(
     available::check(b, budget)?;
     frame::obligations(m, b, budget)?;
     written::check(m, b, budget)?;
-    own::check(m, sig, b, budget)?;
-    ended(b, budget)
-}
-
-/// No slot is used where it may have ended: on every path to a use of a slot (an
-/// address based on it, or a pointer this body made from one), its last
-/// `StorageLive` or `StorageDead` is not a `StorageDead` (crate docs, "Values,
-/// slots and addresses").
-fn ended(b: &Body, budget: &Debit<'_>) -> Result<(), Error> {
-    match crate::extent::use_after_end_with_budget(b, budget)? {
-        Some(((bi, _), s)) => Err(Error::Invalid(format!(
-            "b{bi}: s{s} is used after its storage ends"
-        ))),
-        None => Ok(()),
-    }
+    own::check(m, sig, b, layouts, budget)?;
+    own::ended(b, budget)
 }
 
 /// Whether block `bi` opens with `rt.isolate_catch`: a handler (crate docs,

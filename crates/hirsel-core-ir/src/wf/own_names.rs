@@ -303,9 +303,10 @@ pub(super) fn names(
     m: &Module,
     b: &Body,
     entry: &[ValueId],
+    layouts: &mut Layouts<'_, '_>,
     scratch: &Debit<'_>,
 ) -> Result<(Names, Names, Vec<usize>), Error> {
-    let spans = spans(m, b, scratch)?;
+    let spans = spans(m, b, layouts, scratch)?;
     let slots = b.slots.len();
     let mut vals: Vec<Vec<Pl>> = Vec::new();
     scratch.reserve(&mut vals, b.values.len())?;
@@ -404,7 +405,12 @@ pub(super) fn names(
 }
 
 /// Each address's [`Span`]; none when no address has a constant `byte` step.
-fn spans(m: &Module, b: &Body, scratch: &Debit<'_>) -> Result<Vec<Span>, Error> {
+fn spans(
+    m: &Module,
+    b: &Body,
+    layouts: &mut Layouts<'_, '_>,
+    scratch: &Debit<'_>,
+) -> Result<Vec<Span>, Error> {
     let mut consts = std::collections::HashMap::new();
     for i in &b.insts {
         if let Inst::Const { result, bits } = *i
@@ -432,7 +438,7 @@ fn spans(m: &Module, b: &Body, scratch: &Debit<'_>) -> Result<Vec<Span>, Error> 
     if !windowed {
         return Ok(spans);
     }
-    let recipes = layouts(m, scratch)?;
+    let recipes = layouts.rows()?;
     scratch.reserve(&mut spans, b.addresses.len())?;
     for a in &b.addresses {
         let size = match a.ty {
@@ -448,10 +454,7 @@ fn spans(m: &Module, b: &Body, scratch: &Debit<'_>) -> Result<Vec<Span>, Error> 
             {
                 Some(8)
             }
-            PlaceTy::Declared(t) => match recipes.get(t.index()).map(|r| &r.layout) {
-                Some(hirsel_core_layout::Layout::Fixed(f)) => Some(f.size),
-                _ => None,
-            },
+            PlaceTy::Declared(t) => recipes.get(t.index()).and_then(|r| r.fixed_size),
         };
         spans.push(Span {
             bytes: bytes(a),
@@ -463,6 +466,46 @@ fn spans(m: &Module, b: &Body, scratch: &Debit<'_>) -> Result<Vec<Span>, Error> 
         });
     }
     Ok(spans)
+}
+
+pub(super) struct LayoutFact {
+    fixed_size: Option<u64>,
+    plain: bool,
+}
+
+/// Keep only the facts ownership needs from the module's checked layouts.
+pub(super) struct Layouts<'s, 'b> {
+    module: &'s Module,
+    scratch: &'s Debit<'b>,
+    rows: Option<Vec<LayoutFact>>,
+}
+
+impl<'s, 'b> Layouts<'s, 'b> {
+    pub(super) fn new(module: &'s Module, scratch: &'s Debit<'b>) -> Self {
+        Self {
+            module,
+            scratch,
+            rows: None,
+        }
+    }
+
+    pub(super) fn rows(&mut self) -> Result<&[LayoutFact], Error> {
+        if self.rows.is_none() {
+            let work = self.scratch.scratch();
+            let recipes = layouts(self.module, &work)?;
+            let mut facts = Vec::new();
+            self.scratch.reserve(&mut facts, recipes.len())?;
+            facts.extend(recipes.iter().map(|recipe| LayoutFact {
+                fixed_size: match &recipe.layout {
+                    hirsel_core_layout::Layout::Fixed(fixed) => Some(fixed.size),
+                    hirsel_core_layout::Layout::Compact(_) => None,
+                },
+                plain: recipe.plain,
+            }));
+            self.rows = Some(facts);
+        }
+        Ok(self.rows.as_deref().expect("layout facts initialized"))
+    }
 }
 
 /// The module's type layouts, charged to `scratch`.
@@ -567,8 +610,7 @@ pub(super) fn check_call(
 }
 
 /// FORM #112 is memmove of plain bytes, including overlapping ranges.
-pub(super) fn check_moves(m: &Module, b: &Body, scratch: &Debit<'_>) -> Result<(), Error> {
-    let mut recipes = None;
+pub(super) fn check_moves(b: &Body, layouts: &mut Layouts<'_, '_>) -> Result<(), Error> {
     for inst in &b.insts {
         let Inst::Move { from, to, .. } = *inst else {
             continue;
@@ -585,11 +627,11 @@ pub(super) fn check_moves(m: &Module, b: &Body, scratch: &Debit<'_>) -> Result<(
                 }
                 PlaceTy::Value(_) => continue,
             };
-            let layouts = match &recipes {
-                Some(layouts) => layouts,
-                None => recipes.insert(layouts(m, scratch)?),
-            };
-            if !layouts.get(t.index()).is_some_and(|recipe| recipe.plain) {
+            if !layouts
+                .rows()?
+                .get(t.index())
+                .is_some_and(|recipe| recipe.plain)
+            {
                 return Err(Error::Invalid(format!(
                     "a{}: move requires plain operands",
                     a.0

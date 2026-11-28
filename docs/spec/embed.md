@@ -1,18 +1,10 @@
 # Embedding and Apple mobile targets
 
-This specification adds three general things and one Apple-specific thing:
-
-- a **static-library output kind**, which any native target can build (EMB-1);
-- an **embedded launch** and a versioned **C embed ABI**, through which a host process starts
-  a Hirsel program, calls its exported entries, cancels, and stops it (EMB-3, EMB-4);
-- **generated Swift bindings** and a static **XCFramework**, built by the toolchain from the
-  same manifest the TypeScript SDK uses (EMB-5);
-- the **Apple target records**, one per platform variant, from which every Apple floor,
-  triple and linker flag is derived (EMB-2), and the two iOS targets
-  `aarch64-apple-ios` and `aarch64-apple-ios-sim` built on them (EMB-6, EMB-7).
-
-Nothing here is iOS-only machinery. The static library, the embed ABI and the Swift bindings
-work for every native target. iOS is the first target that can only be built this way.
+Hirsel builds static libraries for embedding and generates Swift bindings packaged in a
+static XCFramework. An application uses the versioned C embed ABI to start a Hirsel
+program, call its exports, cancel observation and stop the runtime. Apple target records
+define the macOS and iOS static-library targets. The iOS simulator is qualified under
+[EMB-9](#emb-9-qualification).
 
 **The host survives Hirsel.** An embedded runtime runs inside an application that Hirsel
 does not own. A Hirsel fault, run stop or refusal ends the runtime, reports to the host
@@ -21,23 +13,12 @@ process, with the reason each cannot be contained.
 
 ## EMB-1: Output kinds
 
-A native build has an **output kind**: `Executable` (today's only kind) or `StaticLibrary`.
-The CLI spells it `--emit exe` <!-- doc-ref: planned --> or
-`--emit staticlib` <!-- doc-ref: planned -->; the default is `exe`.
-
-```text
-OutputKind = Executable | StaticLibrary
-```
-
-**Which commands take which kind.** Request validation checks the command against the
-kind first, and then the target against the kind, before installation lookup, front work
-or any output is created. It refuses with the diagnostic in EMB-8.
-
-| Command | Kinds it admits |
-|---|---|
-| `hirsel build` | both, as the target's row below allows |
-| `hirsel run`, `hirsel test`, `hirsel sdk ts`, `hirsel sdk json`, and every other command that runs the image it builds (Describe included) | `Executable` only: these commands execute their output, so `--emit staticlib` <!-- doc-ref: planned --> is refused before any lookup |
-| `hirsel sdk swift` <!-- doc-ref: planned --> | builds static libraries itself (EMB-5) and refuses an explicit `--emit` <!-- doc-ref: planned --> |
+[CLI output kinds](cli.md#output-kinds) defines what `hirsel build` can emit and how
+it selects its output. `--emit staticlib` requests a static archive on a target that
+admits it. Commands that execute the built program require executable output.
+`hirsel sdk swift` builds its own static archives and refuses an explicit `--emit`.
+Request validation checks the command and target before installation lookup, front work
+or output creation (EMB-8).
 
 **What a static library holds.** A static library contains:
 
@@ -542,7 +523,7 @@ lock, does one of two things *before* taking the lock or entering libc or the al
 **What runs.** The embedded program is a runner program: it declares
 `runner = { major = 1 }`. It is launched as one place with
 `PlaceConfig.listen = InProcess(dials)` (RUNNER-SPEC §14.11), so it binds no socket. The
-runtime keeps the place's `Dialer` and dials one connection per EMB-4 session. The place's
+runtime keeps the Place's `Dialer` and dials one connection per EMB-4 session. The place's
 reservation counts each session's dial room, as `local`'s does (§14.11 "Transport").
 
 **Launch inputs.** The host supplies the inputs below in `hirsel_embed_config` (EMB-4). The
@@ -555,7 +536,7 @@ target is not among them.
 | `grants` | The grant text, in the grammar `hirsel run` takes, subject to the embedded grant-source restrictions below (no environment, working directory or inherited descriptor for any grant). A grant the target cannot honour was refused at build (EMB-7, EMB-8). A grant outside the program's declared wants is refused at `start`. |
 | `dir_bases` | The bases of the launcher-resolved directory forms (below). |
 | `exec_helper` | The absolute path of `hirsel-exec-helper`, or empty. Read only when the grant text holds an `Exec` grant ("Exec in an embedded launch" below). |
-| `store_dir` | An absolute path to the place's store directory. The host creates it, and it must persist across launches (on iOS, under Application Support, never under Caches). The runtime opens it once, as the launcher does. |
+| `store_dir` | An absolute path to the Place's store directory. The host creates it, and it must persist across launches (on iOS, under Application Support, never under Caches). The runtime opens it once, as the launcher does. |
 | `client_bytes` | The bound on the runtime's host-client storage (EMB-4 "Host-client storage"). Must be at least the read/control progress floor, or `start` refuses with `ClientBytesTooSmall`. |
 | `start_timeout_ms` | Positive millisecond bound on `start` reaching Ready (`0` is `HIRSEL_ABI_MISMATCH`). If registration does not reach Ready before expiry, `start` signals generation end (interrupting provider waits and pure Hirsel loops via the embed step check), joins workers, releases resources and refuses with `PlaceTimedOut` (subject only to the native foreign-code liveness boundary above). |
 
@@ -625,7 +606,7 @@ arguments, results and errors are `codec` values. The Describe launch and the SD
 [schema manifest](sdk.md#schema-manifest) list them with their codec ASTs.
 
 The embed ABI adds no export declaration, no new type rule and no second way to cross a
-boundary. It is a host binding for the entries that a place already exports, as the
+boundary. It is a host binding for the entries that a Place already exports, as the
 TypeScript SDK is a WebSocket binding for them.
 
 **Shape.** The runtime contains the client side of the runner protocol: the work that
@@ -637,17 +618,11 @@ callbacks.
 A generated binding (Swift in EMB-5, any later language the same way) is a codec and a set
 of typed stubs over these calls, with no protocol logic of its own.
 
-The runtime's client side reuses the TypeScript client kernel delivered by lane 3145
-(`sdk/client/state.ts`, `sdk/client/lanes.ts`); this ABI specifies no second multiplexer.
-Because a store stream passes a position only after its reply is stored (STORE-SPEC §1.8
-S7), the kernel multiplexes concurrent calls through one host session as **lanes**, each
-in-flight call holding its own leased store stream, within the connection's call credit
-(RUNNER-SPEC §3 "Call credit"). Calls beyond the credit wait in memory in submission order. Each call keeps
-its own deadline (`deadline_ms`) and cancellation (`abandon`); in the shared kernel, a
-reconnect replays every lane's pending call once under its unchanged idempotency key and
-drops old-connection answers. Both `client.ts` and the runtime's client run one set of
-executable transition vectors (input frame or host action in; effects and state out), and
-the runtime's in-process effect adapter replaces the WebSocket one.
+Embedded sessions use the [Runner frame types](../../core/programs/runner/runner-wire-protocol.hirsel)
+for `hirsel.4`. The embedded client admits up to `1 + q` calls at once on separate
+leased stream lanes and queues later calls in submission order. A position remains
+occupied until its reply settles. Each call keeps its own `deadline_ms` and host
+observer, which `abandon` can withdraw.
 
 The toolchain writes the header, `hirsel_embed.h`. It is the same for every program and
 target at one ABI version:
@@ -885,12 +860,10 @@ An id becomes free at one of three points:
 - when `abandon`, `unsubscribe` or `room_leave` has returned `HIRSEL_OK`;
 - when its session's `session_ended` has returned.
 
-**Host ids and wire identities are separate.** Each in-flight call the client sends runs
-on a leased stream lane at its wire identity `(stream, p)` (STORE-SPEC §1.8, RUNNER §2.1,
-lane 3145). The client keeps a link from that lane's in-flight call to the host id's
-observer. `abandon` cuts the link, but the lane stays occupied until its protocol result
-arrives. The client consumes that result to settle the lane and release its credit, and
-discards it.
+**Host ids and wire identities are separate.** The host id names the observer.
+The client sends a call on a leased lane at its wire identity `(stream, position)`.
+`abandon` removes the observer. The lane stays occupied until the client consumes
+the terminal result, which it discards.
 
 A host id reused after `abandon` gets a new observer and a new call on an available lane.
 So a late result for the abandoned call is never delivered to the reused id, and never
@@ -1076,16 +1049,16 @@ after `stop` returns `HIRSEL_OK`).
 `abandon(call)` withdraws the host's interest. Once it returns `HIRSEL_OK`, that call's
 `outcome` callback never runs, and the bindings resolve the caller's task as cancelled.
 
-The place still runs the call to its outcome or its `deadline_ms`. A transact entry that
+The caller's local deadline or abandonment does not settle an issued call at the Place. A transact entry that
 commits stays committed, exactly as for a TypeScript caller that stops awaiting.
 `unsubscribe` and `room_leave` send the protocol's own Unsubscribe and leave.
 
 **Host-client storage.** The embed creates two kinds of storage, and charges them
 separately:
 
-- **Program storage** is the place's, under MEM-19, MEM-21, MEM-24 and MEM-28 and the
+- **Program storage** is the Place's, under MEM-19, MEM-21, MEM-24 and MEM-28 and the
   runner's session ledger, exactly as for a session over `local`'s dial. The embed creates
-  nothing on the place's side that a dialled session does not.
+  nothing on the Place's side that a dialled session does not.
 
   So for matched inputs, limits and schedule, a call through the embed never raises a
   program charge above what the same call over the in-process dial charges. It never
@@ -1131,7 +1104,7 @@ The account is charged in four ways:
   read, applied and refunded even when the admissible pool is full. If applying a frame
   would queue callback bytes that the admissible pool cannot hold (such as a stalled
   delivery callback), the client pauses further reads after that frame until callbacks
-  drain; the dial's 16 frame slots per direction then fill (RUNNER §14.11), and the place's
+  drain; the dial's 16 frame slots per direction then fill (RUNNER §14.11), and the Place's
   existing backpressure and slow-reader rules apply, exactly as for a TCP client that stops
   reading. The client never drops a frame.
 - **Images.** Applying a Batch charges its growth to the admissible pool. A Batch that the
@@ -1151,19 +1124,14 @@ The account is charged in four ways:
 No step of this waits while holding a lock that delivery needs. A producer inside a callback
 gets `HIRSEL_FULL` rather than blocking, so a reentrant producer cannot deadlock delivery.
 
-**Sessions.** A session is one dialled connection whose client kernel (lane 3145)
-multiplexes concurrent calls across leased stream lanes (as many in flight as its call
-credit allows, RUNNER-SPEC §3 "Call credit"). `open` registers the session once its admission succeeds and returns
-`HIRSEL_OK`. The dial, Hello and credential then proceed on the runtime's threads. Calls
-made before the session is ready wait in the client, as in `client.ts`.
+**Sessions.** `open` registers the session once its admission succeeds and returns
+`HIRSEL_OK`. The runtime threads then dial and send Hello with the credential. Calls
+submitted before the session is ready wait in the client.
 
 A refused dial or failed Hello ends the session with `session_ended`, carrying
 `DialRefused(503)` or `ClosedByPlace(code)`, and so ends every call queued on it.
 
-The client state is in memory. An embedded place and its client share one process, so an
-in-process session does not reconnect across `stop`/`start`: a session ends with its
-runtime, and the shared 3145 kernel's reconnect replay is exercised by the kernel's
-transition vectors and transport-loss laws.
+The session keeps its client state in memory. Stopping the runtime ends its sessions.
 
 **Durability.** The store's rules decide what a host may rely on:
 
@@ -1171,16 +1139,17 @@ transition vectors and transport-loss laws.
   `Returned`, including `Returned(Error(e))`, or a `Failed` backed by a reply) is delivered
   only after that commit is durable at the store's strongest level. This follows the
   runner's output gate and RUNNER §2.1 V4, and it holds because the embed delivers the
-  outcome frame the place released. The host can rely on such a commit surviving any later
+  outcome frame the Place released. The host can rely on such a commit surviving any later
   crash, kill or reopen of the same `store_dir`. Every commit before it survives too: the
   durable state is a prefix of the commit order (STORE-SPEC §1.6).
 - **An unobserved commit is all or nothing.** A transact whose outcome the host did not
   observe may be wholly present or wholly absent after reopen, never in part. This covers a
   call with no outcome yet, one abandoned, one ended by `close`, `stop` or a session end, and
-  one in flight when the process was killed. A query after reopen tells which.
-- **No automatic replay.** The runtime never replays a call. A new session starts with no
-  client state, so a fresh stream never resends an old request. Whether a retry is safe is
-  the program's design (an idempotent entry), decided by the host after a query.
+  one in flight when the process was killed. The host can query the durable state after
+  reopen if the application provides a query that observes the update.
+- **Reply recovery is session-scoped.** A new embedded session starts with empty
+  client state and fresh streams. The host decides whether the application permits
+  a fresh request after observing the reopened state.
 - **Suspension.** When the process is suspended and resumed (iOS background), the runtime
   continues with its sessions, calls and subscriptions intact. Deadlines and timers follow
   the existing clock rules. Whether a suspension counts toward a deadline is the clock's
@@ -1219,7 +1188,7 @@ diagnostic. The archive digest stays diagnostic only.
 
 ## EMB-5: Swift bindings and the XCFramework
 
-`hirsel sdk swift <program> --output DIR` <!-- doc-ref: planned --> builds the program as a
+`hirsel sdk swift <program> --output DIR` builds the program as a
 static library for every Apple target in the records (EMB-2). It generates Swift bindings
 and assembles a Swift package. It takes the build options `hirsel sdk ts` takes.
 
@@ -1396,7 +1365,7 @@ listed name. Instead the simulator gate (EMB-9) builds a **symbol reference fixt
 object generated from the iOS lists that references every listed name. It links that object
 with Apple's linker against the iOS SDK, once for the device and once for the simulator. A
 name the SDK does not export fails that link. The same gate links the fixture's archive
-into a host and runs it. Signed device execution is separate (EMB-9 item 2).
+into a host and runs it.
 
 ## EMB-7: Capabilities on iOS
 
@@ -1512,7 +1481,7 @@ the system already holds, and its certificate-transparency requirements. A chain
 policy rejects gets the mapped code above, usually `Invalid`. [tls](tls.md) is amended to
 say so.
 
-macOS keeps its current `System` provider in this track: the Keychain root read through
+On macOS, `Trust.System` uses the Keychain roots read through
 `rustls-native-certs`, at `crates/hirsel-core-rt/src/os_tls.rs` (`system_roots`; the
 variant mapping is `protocol_error`).
 
@@ -1524,14 +1493,14 @@ waste:
 
 | Refusal | Where | Kind |
 |---|---|---|
-| a command that runs its image given `--emit staticlib` <!-- doc-ref: planned -->, or `sdk swift` given `--emit` <!-- doc-ref: planned --> | request validation, first | `Unsupported(command, kind, "this command runs what it builds")` |
+| a command that runs its image given `--emit staticlib`, or `sdk swift` given `--emit` | request validation, first | `Unsupported(command, kind, "this command runs what it builds")` |
 | target named in the wrong spelling (`arm64-apple-ios`, `aarch64-apple-ios18.0`) | request validation, where `--target` is resolved | unknown target, listing the accepted triples |
-| (target, output kind) not in the EMB-1 table, such as `--emit exe` <!-- doc-ref: planned --> for an iOS target | request validation, before installation lookup | `Unsupported(target, kind, why)` |
+| (target, output kind) not in the EMB-1 table, such as `--emit exe` for an iOS target | request validation, before installation lookup | `Unsupported(target, kind, why)` |
 | no embed slot for the target in the installation | installation lookup | `MissingRuntime(target, "embed")`, as a missing runtime slot is today |
 | reached `Exec` or Unix operation on iOS (EMB-7) | front, by reach | PROG-6 `target.unsupported(why)` with the reaching path |
 | foreign archive member for the wrong platform or a later floor | FFI-3 admission, before the link or archive | the FFI-3 member diagnostic (EMB-2's `macho_platform` and `floor`) |
 | import that no link-kit stub exports | the import audit (EMB-1), before the archive is written | `UnlistedImport(name, member)` |
-| bindings whose manifests differ between Apple targets | `hirsel sdk swift` <!-- doc-ref: planned -->, before output | `TargetDependentEntries(a, b)` |
+| bindings whose manifests differ between Apple targets | `hirsel sdk swift`, before output | `TargetDependentEntries(a, b)` |
 | arguments that break ABI v1 (EMB-4 "Validating arguments", including `start_timeout_ms == 0`) | the embed ABI, before any read past `size` or registry reservation | `HIRSEL_ABI_MISMATCH` |
 | `UnsupportedCpu`, grant outside the program's wants, a grant for a capability EMB-7 refuses on the target, `DirBase`, `DirSource`, `DirUnavailable`, `SecretSource`, `StoreOverlapsDir`, an unopenable or unrecoverable store, `ClientBytesTooSmall`, `PlaceCapacity(Room)`, `PlaceTimedOut`, `FaultHandlerReplaced`, `ExecHelper(..)` | the embedded launch's `start` | `HIRSEL_REFUSED`, with the reason in `ended` |
 | refused stack-growth `mprotect` (in `fiber::room` pre-commit or the fault handler) or refused stack/payload mapping (EMB-3) | the embedded runtime | `HIRSEL_END_RUN_STOP` (`"HostMemory"`); the unit and generation abort fail-closed, the host survives, and any failed-growth stack is retired and unmapped whole (`munmap`) |

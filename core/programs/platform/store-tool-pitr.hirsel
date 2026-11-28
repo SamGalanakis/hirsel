@@ -1,0 +1,170 @@
+fn usage() -> Exit {
+    Exit(status: 2u8)
+}
+
+fn operand(argv: Args, i: u64) -> Result[String, Exit] {
+    let Some(s) = args.get(argv, i) else {
+        return Error(usage())
+    }
+    Ok(string.from(s))
+}
+
+fn count_arg(argv: Args, i: u64) -> Result[u64, Exit] {
+    let n = int.parse_uint(operand(argv, i)?, 10u32) ?=> |_| usage()
+    Ok(n)
+}
+
+fn selector(argv: Args) -> Result[store.RestoreTarget, Exit] {
+    let mode = operand(argv, 1)?
+    if mode == "latest" {
+        return Ok(Latest)
+    }
+    if mode == "boundary" {
+        let Some(token) = store.decode_restore_token(operand(argv, 2)?) else {
+            return Error(usage())
+        }
+        return Ok(Boundary(token))
+    }
+    let branch_num = count_arg(argv, 2)?
+    if branch_num > 4294967295 {
+        return Error(usage())
+    }
+    let branch_id: u32 = int.truncate(branch_num)
+    if mode == "selected" {
+        let Some(token) = store.decode_restore_token(operand(argv, 3)?) else {
+            return Error(usage())
+        }
+        return Ok(BranchBoundary(branch_id, token))
+    }
+    let n = count_arg(argv, 3)?
+    if mode == "version" {
+        Ok(Version(branch_id, n))
+    } else if mode == "at" {
+        Ok(At(branch_id, n))
+    } else {
+        Error(usage())
+    }
+}
+
+fn attempt_arg(argv: Args, i: u64) -> Result[Inline[u8, 16], Exit] {
+    let Some(raw) = std.hex.decode(string.as_bytes(operand(argv, i)?)) else {
+        return Error(usage())
+    }
+    if list.len(raw) != 16 {
+        return Error(usage())
+    }
+    let mut nonce: Inline[u8, 16] =[0; 16]
+    for j in 0u64 .. 16 {
+        nonce[j] = raw[j]
+    }
+    Ok(nonce)
+}
+
+fn text_field(w: std.json.Writer, mut members: std.json.Items, key: String, value: String) {
+    std.json.write_member(w, mut members, key)
+    std.json.write_string_value(w, value)
+}
+
+fn counter_field(w: std.json.Writer, mut members: std.json.Items, key: String, value: u64) {
+    let mut s = string.new()
+    string.push_u64(mut s, value)
+    text_field(w, mut members, key, s)
+}
+
+fn point_text(point: store.RestorePoint, child: Option[store.StoreId]) -> Result[String, Exit] {
+    let token = store.encode_restore_token(point.token) ?=> |_| Exit(status: 1u8)
+    let mut hash: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32 {
+        list.push(mut hash, point.binding[i])
+    }
+    let mut line = string.new()
+    std.json.write(mut line, false, scoped fn(w: std.json.Writer) {
+        std.json.object(w, 0, scoped fn(obj: std.json.Writer, mut fields: std.json.Items) {
+            text_field(obj, mut fields, "parent", id_hex(point.token.parent.hi, point.token.parent.lo))
+            if let Some(id) = child {
+                text_field(obj, mut fields, "child", id_hex(id.hi, id.lo))
+            }
+            text_field(obj, mut fields, "boundary", token)
+            counter_field(obj, mut fields, "branch", int.widen(point.branch))
+            counter_field(obj, mut fields, "version", point.version)
+            counter_field(obj, mut fields, "at_ms", point.at)
+            counter_field(obj, mut fields, "main_version", point.main_version)
+            counter_field(obj, mut fields, "main_at_ms", point.main_at)
+            counter_field(obj, mut fields, "base", point.token.boundary.base_ordinal)
+            counter_field(obj, mut fields, "unit", point.token.boundary.unit)
+            counter_field(obj, mut fields, "frame_end", point.token.boundary.frame_end)
+            counter_field(obj, mut fields, "activation", point.activation)
+            text_field(obj, mut fields, "release_binding", std.hex.encode(hash))
+        })
+    })
+    string.push(mut line, "\n")
+    Ok(take line)
+}
+
+fn selected_point(resolution: store.RestoreResolution, err: Stderr, out: Stdout) -> Result[(), Exit] waits {
+    match resolution {
+        RestorePresent(p) => say(out, point_text(p, None)?),
+        Past(_) => refused(err, "Past"),
+        Future(_) => refused(err, "Future"),
+        InGap(_, _) => refused(err, "InGap"),
+        BelowFloor(_) => refused(err, "BelowFloor"),
+        NoData => refused(err, "NoData"),
+        VersionAbsent => refused(err, "VersionAbsent"),
+    }
+}
+
+fn backup_pitr(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, err: Stderr, argv: Args, verb: String) -> Result[(), Exit] waits {
+    let target = selector(argv)?
+    let options = store.sized(Directory, 2147483648u64) ?=> |_| Exit(status: 1u8)
+    if verb == "plan-backup" {
+        let resolution = match store.plan_backup_restore(from, target) {
+            Ok(found) => found,
+            Error(e) => return refused(err, deploy_refusal(e)),
+        }
+        let RestorePresent(point) = resolution else {
+            return selected_point(resolution, err, out)
+        }
+        let mut input: store.RestoreSource = StampedBackup(from)
+        return match store.verify_restore_point(mut input, to, c, options, point, runner.restored_release) {
+            Ok(verified) => say(out, point_text(verified, None)?),
+            Error(e) => refused(err, deploy_refusal(e)),
+        }
+    }
+    let BranchBoundary(_, _) = target else {
+        return Error(usage())
+    }
+    let attempt = attempt_arg(argv, 4)?
+    match store.restore(tasks, from, to, c, r, options, target, attempt) {
+        Ok(take receipt) => {
+            let mut inspect_opts = options
+            inspect_opts.create = false
+            inspect_opts.expect = Some(receipt.child)
+            let checked = match store.open(tasks, to, c, r, inspect_opts) {
+                Ok(take db) => take db,
+                Error(Held) => return held_writer(err),
+                Error(e) => return refused(err, store_refusal(e)),
+            }
+            let verified = match runner.verified_restored_child(checked, take receipt) {
+                Ok(v) => v,
+                Error(e) => return refused(err, store_refusal(e)),
+            }
+            if let Error(e) = store.close(take checked) {
+                return refused(err, store_refusal(e))
+            }
+            say(out, point_text(verified.point, Some(verified.child))?)
+        },
+        Error(Store(Held)) => held_writer(err),
+        Error(e) => refused(err, deploy_refusal(e)),
+    }
+}
+
+fn observe_restore(dir: Dir, out: Stdout, err: Stderr, argv: Args) -> Result[(), Exit] waits {
+    let BranchBoundary(branch_id, token) = selector(argv)? else {
+        return Error(usage())
+    }
+    match store.published_restore(dir, token, branch_id, count_arg(argv, 5)?, count_arg(argv, 6)?, attempt_arg(argv, 4)?) {
+        Ok(Some(id)) => say(out, id_hex(id.hi, id.lo)),
+        Ok(None) => say(out, "pending"),
+        Error(e) => refused(err, store_refusal(e)),
+    }
+}

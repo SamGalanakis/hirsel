@@ -1,0 +1,44 @@
+type TokenFields: codec {
+    parent: StoreId,
+    binding_id: u64,
+    capture: Bytes,
+    kind: u8,
+    base: u64,
+    base_digest: u64,
+    unit: u64,
+    epoch: u64,
+    unit_digest: u64,
+    frame_end: u64
+}
+
+pub fn encode_restore_token(t: RestoreToken) -> Result[String, Error] {
+    let b = t.boundary
+    let mut capture: Bytes = list.with_capacity(16)
+    for i in 0u64 .. 16 {
+        list.push(mut capture, t.capture_attempt[i])
+    }
+    let fields = TokenFields(parent: t.parent, binding_id: t.binding_id, capture: take capture, kind: b.source_kind, base: b.base_ordinal, base_digest: b.base_digest, unit: b.unit, epoch: b.epoch, unit_digest: b.unit_digest, frame_end: b.frame_end)
+    let codec: std.codec.Codec[TokenFields] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    std.codec.encode(codec, fields, mut raw) ?=> |_| Limit(Value)
+    Ok(std.hex.encode(raw))
+}
+
+pub fn decode_restore_token(text: String) -> Option[RestoreToken] {
+    let Some(raw) = std.hex.decode(string.as_bytes(text)) else {
+        return None
+    }
+    let codec: std.codec.Codec[TokenFields] = std.codec.of()
+    let Ok(f) = std.codec.decode(codec, raw) else {
+        return None
+    }
+    if list.len(f.capture) != 16 || f.base == 0 || f.unit == 0 || f.kind > format.ARCHIVE_SOURCE_OBJECTS {
+        return None
+    }
+    let mut capture: Inline[u8, 16] =[0; 16]
+    for i in 0u64 .. 16 {
+        capture[i] = f.capture[i]
+    }
+    let b = manifest.RestoreBoundary(source_kind: f.kind, base_ordinal: f.base, base_digest: f.base_digest, unit: f.unit, epoch: f.epoch, unit_digest: f.unit_digest, frame_end: f.frame_end)
+    Some(RestoreToken(parent: f.parent, binding_id: f.binding_id, capture_attempt: capture, boundary: b))
+}

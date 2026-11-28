@@ -3,10 +3,8 @@
 // the target if it is absent, and passes them as fds 3 and 4; the grants name them as
 // /proc/self/fd/3 and /proc/self/fd/4.
 //
-// argv: `backup` (fd 3 the store, fd 4 the empty target) or `restore` (fd 3 the backup,
-// fd 4 the empty new store directory). It prints `backup <store id> head <H>` or
-// `restored <store id> head <H>`. Exit 0 done, 1 refused (details on stderr), 2 usage,
-// 75 the store is held by a writer.
+// The backup entry captures fd 3 to fd 4. PITR planning reads fd 3.
+// Publication takes a pinned boundary and attempt and writes fd 4.
 //
 // `inspect` and `stats` (§15.6) capture fd 3, beside a live
 // writer. `verify` locks the image on fd 3 and checks its packs and journal.
@@ -448,24 +446,11 @@ pub fn main(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, 
     if verb == "backup" {
         return backup(from, to, c, r, tasks, out, err)
     }
-    if verb != "restore" {
-        return Error(Exit(status: 2u8))
+    if verb == "observe-restore" {
+        return observe_restore(to, out, err, argv)
     }
-    let options = match store.sized(Directory, 2147483648u64) {
-        Ok(take sized) => take sized,
-        Error(_) => return refused(err, "Full"),
+    if verb == "plan-backup" || verb == "publish-backup" {
+        return backup_pitr(from, to, c, r, tasks, out, err, argv, verb)
     }
-    match store.restore(tasks, from, to, c, r, options, Latest, store.restore_attempt(r)) {
-        Ok(receipt) => {
-            let mut line = string.from("restored ")
-            string.push(mut line, id_hex(receipt.child.hi, receipt.child.lo))
-            string.push(mut line, " head ")
-            string.push_u64(mut line, receipt.point.main_version)
-            string.push(mut line, " from ")
-            string.push(mut line, id_hex(receipt.point.token.parent.hi, receipt.point.token.parent.lo))
-            string.push(mut line, "\n")
-            say(out, line)
-        },
-        Error(e) => refused(err, deploy_refusal(e)),
-    }
+    Error(Exit(status: 2u8))
 }

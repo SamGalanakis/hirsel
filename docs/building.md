@@ -302,7 +302,8 @@ their tables. `hirsel store repair DIR --release EXE` repairs those indexes in p
 the store stopped. See [Store checks and repair](../core/programs/store/STORE-SPEC.md#156-hirsel-store-inspect-stats-verify-and-repair-store-14-v2127).
 
 `hirsel store backup` captures an offline or live-host backup. `hirsel store restore`
-restores into an empty or new destination. See [Store backup and restore](../core/programs/store/STORE-SPEC.md#154-hirsel-store-backup-and-hirsel-store-restore).
+plans a fresh child from a stamped backup. Use `--from BACKUP --target latest --to DIR --plan`
+and approve the returned operation with `hirsel op decide`. See [Store backup and restore](../core/programs/store/STORE-SPEC.md#154-hirsel-store-backup-and-hirsel-store-restore).
 
 The WebRTC SFU's `signal.serve_pool` serves rooms over a shared pool of media units
 and sockets. `Pool` names the room order and report channels, the unit byte and

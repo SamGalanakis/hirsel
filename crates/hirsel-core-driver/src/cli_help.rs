@@ -55,11 +55,17 @@ pub(crate) fn describe(command: &CommandSpec) -> serde_json::Value {
                 "input owned, decision required, or terminal outcome",
                 true,
             ),
+            ReadContract::Restore => (
+                "store",
+                "directory grants",
+                "exact restore boundary selected",
+                true,
+            ),
             ReadContract::Help => ("none", "local", "command schema read", false),
             ReadContract::Operation => ("host", "operator_uid", "catalog row read", true),
         };
         let mode = match contract {
-            ReadContract::Deploy | ReadContract::Decision => "submit",
+            ReadContract::Deploy | ReadContract::Decision | ReadContract::Restore => "submit",
             _ => "read",
         };
         let excludes: &[&[&str]] = if matches!(contract, ReadContract::Deploy) {
@@ -70,10 +76,10 @@ pub(crate) fn describe(command: &CommandSpec) -> serde_json::Value {
         spec["result"] = json!({"type":"finite", "v":1, "contract":mode,
             "target_kind":target, "authority":authority, "completion":predicate,
             "receipt":receipt, "credential_bearing":false, "mutually_exclusive":excludes});
-        if !matches!(contract, ReadContract::Help) {
+        if !matches!(contract, ReadContract::Help | ReadContract::Restore) {
             spec["result"]["--wait"] = json!({"contract":"wait","completion":"installed, failed, undecided, decision required, deadline or interrupt"});
         }
-        if matches!(contract, ReadContract::Deploy) {
+        if matches!(contract, ReadContract::Deploy | ReadContract::Restore) {
             spec["result"]["--plan"] =
                 json!({"contract":"plan","completion":"held plan","effect":"none"});
         }

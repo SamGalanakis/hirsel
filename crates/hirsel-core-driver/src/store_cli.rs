@@ -1,5 +1,5 @@
 //! `hirsel store backup DIR TARGET`, `hirsel store backup --state DIR --group NAME TARGET`,
-//! and `hirsel store restore BACKUP DIR` (STORE-SPEC §15.4), and `hirsel store inspect DIR`,
+//! and `hirsel store inspect DIR`,
 //! `hirsel store stats DIR` and `hirsel store verify DIR` (§15.6): open the directories and
 //! run the installed `libexec/hirsel/store_tool` with them as fds 3 and 4. Online backup
 //! routes through the running host's `STATE/operator.sock` so the serving place runs
@@ -14,12 +14,8 @@ use hirsel_core_ids::hex;
 use std::{
     fs::{self, File, OpenOptions},
     io,
-    os::{
-        fd::AsRawFd,
-        unix::{fs::OpenOptionsExt, process::CommandExt},
-    },
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
 };
 
 type Error = Box<dyn std::error::Error>;
@@ -164,12 +160,14 @@ fn online_backup(state: &Path, group_name: &str, to: &Path) -> Result<i32, Error
 }
 
 pub(in crate::request) fn run(invocation: Request<Opt>) -> Result<i32, Error> {
+    if invocation.command.name == "store restore" {
+        return Ok(crate::operator_cli::pitr::restore(invocation));
+    }
     let (verb, usage) = match invocation.command.name {
         "store backup" => (
             "backup",
             "store backup DIR TARGET | store backup --state DIR --group NAME TARGET",
         ),
-        "store restore" => ("restore", "store restore BACKUP DIR"),
         "store inspect" => ("inspect", "store inspect DIR"),
         "store stats" => ("stats", "store stats DIR"),
         "store verify" => ("verify", "store verify DIR [--release EXE]"),
@@ -230,27 +228,9 @@ pub(in crate::request) fn run(invocation: Request<Opt>) -> Result<i32, Error> {
 }
 
 fn store_tool(verb: &str, source: File, target: File) -> Result<i32, Error> {
-    let (source_fd, target_fd) = (source.as_raw_fd(), target.as_raw_fd());
-    let mut command = Command::new(crate::operator_cli::installed("store_tool")?);
-    command.arg(verb).stdin(Stdio::null());
-    // SAFETY: only async-signal-safe fcntl and dup2 calls on descriptors this
-    // process owns, between fork and exec. Both are first moved above 4 so that
-    // placing one on 3 or 4 cannot overwrite the other; dup2 clears FD_CLOEXEC.
-    unsafe {
-        command.pre_exec(move || {
-            let high_source = libc::fcntl(source_fd, libc::F_DUPFD, 10);
-            let high_target = libc::fcntl(target_fd, libc::F_DUPFD, 10);
-            if high_source < 0
-                || high_target < 0
-                || libc::dup2(high_source, 3) < 0
-                || libc::dup2(high_target, 4) < 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let status = command.status()?;
+    let status = crate::operator_cli::store_process::command("store_tool", &source, &target)?
+        .arg(verb)
+        .status()?;
     drop((source, target));
     Ok(status.code().unwrap_or(1))
 }

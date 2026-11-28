@@ -48,6 +48,23 @@ fn line(
     reader.read_line(&mut s).map_err(Failure::io)?;
     Ok(s.trim().to_owned())
 }
+pub(super) fn read_verdict(
+    reader: &mut impl BufRead,
+    writer: &mut impl Write,
+) -> Result<h::Verdict, Failure> {
+    Ok(
+        match line(reader, writer, "Verdict (approve/refuse)?")?.as_str() {
+            "approve" => h::Verdict::Approve,
+            "refuse" => h::Verdict::Refuse,
+            _ => {
+                return Err(Failure::input(
+                    "verdict",
+                    "an explicit approve or refuse is required",
+                ));
+            }
+        },
+    )
+}
 pub(super) fn interactive(
     p: &DeployPlan,
     h: &[u8],
@@ -60,16 +77,7 @@ pub(super) fn interactive(
         serde_json::to_string_pretty(&plan_json(p, h)).unwrap()
     )
     .map_err(Failure::io)?;
-    let verdict = match line(reader, writer, "Verdict (approve/refuse)?")?.as_str() {
-        "approve" => h::Verdict::Approve,
-        "refuse" => h::Verdict::Refuse,
-        _ => {
-            return Err(Failure::input(
-                "verdict",
-                "an explicit approve or refuse is required",
-            ));
-        }
-    };
+    let verdict = read_verdict(reader, writer)?;
     let paths = paths(p);
     let mut all = None;
     let mut entries = Vec::new();
@@ -159,6 +167,13 @@ pub(crate) fn decide(req: Request<O>) -> i32 {
     env.render(json)
 }
 fn apply(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
+    if req
+        .positional
+        .as_deref()
+        .is_some_and(|s| s.starts_with("store/"))
+    {
+        return super::pitr_decision::decide(req, env);
+    }
     let (authority, id) = super::operation_id(req.positional.as_deref())
         .map_err(|e| Failure::input("operation", e))?;
     let (mut context, mut file, mut wait) = (None, None, None);

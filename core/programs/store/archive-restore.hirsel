@@ -68,36 +68,34 @@ fn restore_object_prefix(mut sink: std.object.Client, parent: StoreId, row: form
 fn restore_gap(mut walk: RestoreScan, high: Option[RestoreToken], next_branch: Option[u32]) {
     let low = walk.physical
     let wanted = restore_wanted(walk.target)
-    let eligible = match walk.target {
-        Latest => false,
-        Boundary(exact) => {
-            exact.boundary.base_ordinal >= low.boundary.base_ordinal && (if let Some(upper) = high {
-                exact.boundary.base_ordinal < upper.boundary.base_ordinal
-            } else {
-                true
-            }) && (if let None = walk.selected {
-                true
-            } else {
-                false
-            })
-        },
-        _ => {
-            let could_live = map.contains(walk.tips, wanted) || wanted >= walk.next_branch
-            let could_be_born = if let Some(n) = next_branch {
-                wanted < n
-            } else {
-                true
-            }
-            let reached = match walk.latest_point {
-                Some(pt) => match walk.target {
-                    At(_, t) => pt.at <= t,
-                    Version(_, v) => pt.version <= v,
-                    _ => false,
-                },
-                None => true,
-            }
-            could_live && could_be_born && reached
-        },
+    let eligible = if let Some(exact) = exact_restore_token(walk.target) {
+        exact.boundary.base_ordinal >= low.boundary.base_ordinal && (if let Some(upper) = high {
+            exact.boundary.base_ordinal < upper.boundary.base_ordinal
+        } else {
+            true
+        }) && (if let None = walk.selected {
+            true
+        } else {
+            false
+        })
+    } else if let Latest = walk.target {
+        false
+    } else {
+        let could_live = map.contains(walk.tips, wanted) || wanted >= walk.next_branch
+        let could_be_born = if let Some(n) = next_branch {
+            wanted < n
+        } else {
+            true
+        }
+        let reached = match walk.latest_point {
+            Some(pt) => match walk.target {
+                At(_, t) => pt.at <= t,
+                Version(_, v) => pt.version <= v,
+                _ => false,
+            },
+            None => true,
+        }
+        could_live && could_be_born && reached
     }
     if eligible {
         walk.gap = Some((low, high))

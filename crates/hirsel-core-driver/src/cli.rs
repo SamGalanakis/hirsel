@@ -88,7 +88,7 @@ commands! {
         [Help] Help(HelpOption), Many: HELP, Json;
     "op", "op <get|decide>", "Inspect an operator request.";
         Simple(NoOption), None: HELP;
-    "op get", "op get host/CATALOG/REQUEST [--wait[=DURATION]] [--context NAME|/ABSOLUTE/FILE] [--json]", "Read a request from its pinned host catalog.";
+    "op get", "op get OP [--wait[=DURATION]] [--context NAME|/ABSOLUTE/FILE] [--json]", "Read a request from its pinned host catalog.";
         [Operation] OpGet(OpGetOption), Operation: HELP, Context, Wait, Json;
     "check", "check [package-dir] [options]", "Check a package or an explicit input manifest.";
         Compiler(CompilerOption), One:
@@ -167,8 +167,8 @@ commands! {
         Store(StoreOption), One: HELP, StoreRelease;
     "store backup", "store backup DIR TARGET | store backup --state DIR --group NAME TARGET", "Copy a stopped store at DIR, or a served group's store through its running host, into the empty or new directory TARGET.";
         Store(StoreOption), Pair: HostState, GroupName, HELP;
-    "store restore", "store restore BACKUP DIR", "Restore a backup into the empty or new directory DIR, keeping the store's identity.";
-        Store(StoreOption), Pair: HELP;
+    "store restore", "store restore --from SOURCE --target SELECTOR --to DEST [--plan] [--json]", "Select an exact boundary for a fresh child. Approve publication with op decide.";
+        [Restore] Store(StoreOption), None: RestoreFrom, RestoreTarget, RestoreTo, Plan, Json, HELP;
     "fleet", "fleet <sim>", "Run deterministic Fleet and Directory[K] simulations.";
         Simple(NoOption), One: HELP;
     "fleet sim", "fleet sim [package-dir] [--hosts N] [--seed S] [--rounds R] [--places P] [--partitions K] [--json] [options]", "Drive the hirsel.ai/fleet@1 move kernel and Directory[K] in std.sim with seeded faults and check invariants and SM1 traces.";

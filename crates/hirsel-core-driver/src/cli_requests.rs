@@ -171,6 +171,11 @@ pub enum DevOption {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreOption {
+    RestoreFrom(String),
+    RestoreTarget(String),
+    RestoreTo(String),
+    Plan,
+    Json,
     DryRunExe(String),
     GroupName(String),
     HostState(String),

@@ -222,6 +222,13 @@ pub(crate) fn get(request: Request<OpGetOption>) -> i32 {
 }
 
 fn observe(request: Request<OpGetOption>, envelope: &mut Envelope<'_>) -> Result<(), Failure> {
+    if request
+        .positional
+        .as_deref()
+        .is_some_and(|s| s.starts_with("store/"))
+    {
+        return super::pitr_decision::get(request, envelope);
+    }
     let (authority, id) =
         operation_id(request.positional.as_deref()).map_err(|e| Failure::input("operation", e))?;
     let mut context = None;

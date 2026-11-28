@@ -5,7 +5,7 @@ pub type RestoreToken: key + send {
     boundary: manifest.RestoreBoundary
 }
 
-pub type RestoreTarget: send = Latest | Version(u32, u64) | At(u32, u64) | Boundary(RestoreToken)
+pub type RestoreTarget: send = Latest | Version(u32, u64) | At(u32, u64) | Boundary(RestoreToken) | BranchBoundary(u32, RestoreToken)
 
 pub type RestorePoint: send {
     token: RestoreToken,
@@ -43,10 +43,19 @@ fn restore_tip(tips: Map[u32, (u64, u64)], branch_id: u32) -> Option[(u64, u64)]
     }
 }
 
+fn exact_restore_token(target: RestoreTarget) -> Option[RestoreToken] {
+    match target {
+        Boundary(t) => Some(t),
+        BranchBoundary(_, t) => Some(t),
+        _ => None,
+    }
+}
+
 fn restore_wanted(target: RestoreTarget) -> u32 {
     match target {
         Version(id, _) => id,
         At(id, _) => id,
+        BranchBoundary(id, _) => id,
         _ => 0,
     }
 }
@@ -59,11 +68,14 @@ fn restore_note(mut walk: RestoreScan, token: RestoreToken, branch_id: u32, tran
     }
     let main = option.unwrap(restore_tip(walk.tips, 0u32))
     let point = RestorePoint(token, branch: b, version: tip.0, at: tip.1, main_version: main.0, main_at: main.1, activation: walk.activation.number, binding: walk.activation.binding)
+    if let Some(exact) = exact_restore_token(walk.target) {
+        if exact == token {
+            walk.selected = Some(point)
+        }
+        return
+    }
     match walk.target {
         Latest => {
-            walk.selected = Some(point)
-        },
-        Boundary(exact) => if exact == token {
             walk.selected = Some(point)
         },
         _ => {
@@ -149,7 +161,7 @@ fn restore_finish(take walk: RestoreScan) -> RestoreResolution {
     if let Some(point) = walk.selected {
         return RestorePresent(point)
     }
-    if let Boundary(exact) = walk.target {
+    if let Some(exact) = exact_restore_token(walk.target) {
         if exact.boundary.base_ordinal < walk.floor.boundary.base_ordinal {
             return BelowFloor(walk.floor)
         }
@@ -170,7 +182,7 @@ fn restore_finish(take walk: RestoreScan) -> RestoreResolution {
 }
 
 fn restore_scan_start(target: RestoreTarget, token: RestoreToken, m: manifest.PageManifest, activation: history.HistoryActivation) -> Result[RestoreScan, Error] {
-    if let Boundary(exact) = target {
+    if let Some(exact) = exact_restore_token(target) {
         if exact.parent != token.parent || exact.binding_id != token.binding_id || exact.capture_attempt != token.capture_attempt {
             return Error(Foreign)
         }

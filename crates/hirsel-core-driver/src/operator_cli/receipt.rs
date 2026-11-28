@@ -37,18 +37,19 @@ pub(super) struct Location {
     pub path: PathBuf,
 }
 
+pub(super) fn operations_dir() -> Result<PathBuf, Failure> {
+    let state = std::env::var_os("XDG_STATE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|v| PathBuf::from(v).join(".local/state")))
+        .filter(|v| v.is_absolute())
+        .ok_or_else(|| Failure::input("receipt", "an absolute state directory is required"))?;
+    Ok(state.join("hirsel/operations"))
+}
 impl Location {
     pub fn new(authority: u128, d: &[u8]) -> Result<Self, Failure> {
         let request = hex::encode(d);
-        let state = std::env::var_os("XDG_STATE_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|v| PathBuf::from(v).join(".local/state")))
-            .filter(|v| v.is_absolute())
-            .ok_or_else(|| Failure::input("receipt", "an absolute state directory is required"))?;
-        let path = state
-            .join("hirsel/operations")
-            .join(format!("host-{authority:032x}-{request}.json"));
+        let path = operations_dir()?.join(format!("host-{authority:032x}-{request}.json"));
         Ok(Self {
             id: format!("host/{authority:032x}/{request}"),
             path,
@@ -169,7 +170,7 @@ fn make_dirs(path: &Path) -> io::Result<()> {
     }
     fs::File::open(parent)?.sync_all()
 }
-fn persist(path: &Path, value: &impl Serialize) -> io::Result<()> {
+pub(super) fn persist(path: &Path, value: &impl Serialize) -> io::Result<()> {
     let dir = path.parent().unwrap();
     make_dirs(dir)?;
     let m = fs::symlink_metadata(dir)?;

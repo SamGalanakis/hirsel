@@ -135,6 +135,9 @@ flags! {
     Fresh ["--fresh"] => "Start a new dev-owned store generation.";
     Store ["--store"] "DIRECTORY" => "Select the database for dry-run, or the request or product store.";
     DryRunExe ["--exe"] "NEW" => "The built candidate executable.";
+    RestoreFrom ["--from"] "SOURCE" => "Restore from this stamped backup or archive.";
+    RestoreTarget ["--target"] "SELECTOR" => "Select latest, version:BRANCH,V, at:BRANCH,MS, or boundary:TOKEN.";
+    RestoreTo ["--to"] "DEST" => "Publish under a fresh identity at this destination.";
     StoreRelease ["--release"] "EXE" => "The release executable that checks or repairs the store.";
     RecordedExecutable ["--recorded"] "EXE" => "The release executable that wrote the journal's call records.";
     Inputs ["--inputs"] "MANIFEST" => "Read an explicit CorpusManifest JSON file.";

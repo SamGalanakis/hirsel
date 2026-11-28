@@ -39,3 +39,42 @@ pub fn verify_restore_origin(db: Db, receipt: Restored) -> Result[(), Error] {
     }
     Ok(())
 }
+
+// Read the graph and release at the approved physical boundary in caller-owned
+// scratch. In particular, a Directory archive has no native activation in its head.
+pub fn verify_restore_point(mut src: RestoreSource, work: Dir, c: Clock, options: Options, selected: RestorePoint, verify: fn(Db) -> Result[RestoreRelease, Error] waits) -> Result[RestorePoint, DeployError] waits {
+    let mut point = selected
+    let stamp = restore_stage(mut src, work, point)?
+    let recovered = open_copied(work, c, stamp.attempt, options, false)?
+    let release = verified_point_release(recovered.db, point, verify)?
+    point.activation = release.activation
+    point.binding = release.binding
+    Ok(point)
+}
+
+fn verified_point_release(db: Db, point: RestorePoint, verify: fn(Db) -> Result[RestoreRelease, Error] waits) -> Result[RestoreRelease, DeployError] waits {
+    let native = point.token.boundary.source_kind == format.ARCHIVE_SOURCE_OBJECTS || point.activation != 0
+    if native && !deploy_result(has_runner_catalog(db))? {
+        return Ok(RestoreRelease(activation: point.activation, binding: point.binding))
+    }
+    let release = deploy_result(verify(db))?
+    if native && (release.activation != point.activation || release.binding != point.binding) {
+        return Error(ExportMismatch)
+    }
+    Ok(release)
+}
+
+// A restored child may have committed new versions since publication. Its
+// immutable restore origin still identifies the original decision.
+pub fn published_restore(dir: Dir, token: RestoreToken, branch_id: u32, selected_version: u64, at: u64, attempt: Inline[u8, 16]) -> Result[Option[StoreId], Error] waits {
+    if failure_result_from_rep(journal.disk_exists(dir, "EXPORT"))? || !failure_result_from_rep(journal.disk_exists(dir, "MANIFEST"))? {
+        return Ok(None)
+    }
+    let (id, take m) = read_page_manifest_file(dir)?
+    let expected = manifest.RestoreOrigin(parent: store_key_to_rep(token.parent), binding_id: token.binding_id, branch: branch_id, version: selected_version, at, boundary: token.boundary, attempt, capture_attempt: token.capture_attempt)
+    if id == token.parent || !restore_same_origin(m, expected) {
+        return Error(Foreign)
+    }
+    failure_result_from_rep(manifest.disk_io(host.sync_dir(dir)))?
+    Ok(Some(id))
+}

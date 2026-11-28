@@ -69,6 +69,9 @@ def distribution_gates(out, call, Raw, reads, slots):
                             toolchain_packages="//:toolchain-packages",
                             platform_sources=Raw('glob(["core/programs/platform/*.hirsel"]) + ["core/programs/platform/hirsel.toml"]'),
                             visibility=["PUBLIC"]))
+    out.append("\n" + call("hirsel_script_test", name="store-restore-directory", script="tools/tests/store_restore.py",
+                            data=Raw('glob(["core/programs/store/corpus/format-14/directory/*"])'),
+                            files_env={"HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain"}))
     out.append("\n" + call("hirsel_script_test", name="check-installer", script="//tools/toolchain-dist:check-installer",
                             data=["//tools/toolchain-dist:install.sh.in", "//tools/toolchain-dist:product.py",
                                   "//tools/toolchain-dist:product.toml", "tools/native-toolchain/apple-targets.json"]))

@@ -108,7 +108,15 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
             }
         }
         if matches!(self.positionals, Positionals::Operation) {
-            crate::operator_cli::operation_id(request.positional.as_deref())?;
+            if let Some(op) = request
+                .positional
+                .as_deref()
+                .filter(|s| s.starts_with("store/"))
+            {
+                crate::operator_cli::pitr_decision::request_id(op)?;
+            } else {
+                crate::operator_cli::operation_id(request.positional.as_deref())?;
+            }
         }
         Ok(Action::Invoke((self.wrap)(request)))
     }
@@ -129,7 +137,7 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
             })
             .collect();
         let operands = match self.positionals {
-            Positionals::Operation => "host/CATALOG/REQUEST",
+            Positionals::Operation => "host/CATALOG/REQUEST or store/ATTEMPT",
             Positionals::None => "none",
             Positionals::One => "one",
             Positionals::Pair => "pair",

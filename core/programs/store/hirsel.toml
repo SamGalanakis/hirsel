@@ -123,6 +123,7 @@ std = { major = 1 }
 "archive-restore-copy-entries.hirsel" = "store"
 "archive-restore-index.hirsel" = "history"
 "archive-restore-log.hirsel" = "history"
+"archive-restore-token.hirsel" = "store"
 "archive-restore-plan.hirsel" = "store"
 "archive-restore.hirsel" = "store"
 "archive-restore-backup.hirsel" = "store"

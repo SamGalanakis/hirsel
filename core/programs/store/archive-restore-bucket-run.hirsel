@@ -13,15 +13,7 @@ fn restore_bucket_staged(tasks: Tasks, mut source: RestoreSource, mut dst: std.o
             return Error(UnsupportedResidency)
         }
     }
-    let native = point.token.boundary.source_kind == format.ARCHIVE_SOURCE_OBJECTS || point.activation != 0
-    let release = if native && !deploy_result(has_runner_catalog(recovered.db))? {
-        RestoreRelease(activation: point.activation, binding: point.binding)
-    } else {
-        deploy_result(verify(recovered.db))?
-    }
-    if native && (release.activation != point.activation || release.binding != point.binding) {
-        return Error(ExportMismatch)
-    }
+    let release = verified_point_release(recovered.db, point, verify)?
     point.activation = release.activation
     point.binding = release.binding
     let _ = take recovered

@@ -2,7 +2,7 @@ use super::*;
 use hirsel_core_ir::StaticId;
 
 impl Substitution<'_> {
-    pub(super) fn descriptor_adapter_key(&mut self, raw: FuncId) -> InstanceKey {
+    pub(super) fn descriptor_adapter_key(&mut self, raw: FuncId, packed: bool) -> InstanceKey {
         // Only the adapter's name needs the raw key here. Specialize the raw
         // signature from the adapter body, which has its call's ABI recipe.
         let instance = self.module.functions[raw.index()].instance;
@@ -11,10 +11,11 @@ impl Substitution<'_> {
         let owner = self
             .module
             .identity(self.module.functions[self.owner.index()].instance);
+        let adapter = if packed { "$pack_export" } else { "$callable" };
         key.definition
             .0
             .name
-            .push_str(&format!("$callable[instance:{}]", owner.symbol()));
+            .push_str(&format!("{adapter}[instance:{}]", owner.symbol()));
         key
     }
 

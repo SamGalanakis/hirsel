@@ -14,6 +14,28 @@ pub struct PackExportMeta {
 }
 
 impl Emitter {
+    pub(super) fn pack_sig_row(&mut self, adapter_sig: Signature) -> SigId {
+        // A rigid argument can become a scalar or disappear when the template is
+        // instantiated. The PACK-15 result always uses the caller's result place.
+        let abi = scalar_abi::SignatureAbi {
+            params: adapter_sig
+                .params
+                .iter()
+                .map(|param| {
+                    matches!(
+                        param,
+                        Param::Address {
+                            loan: Loan::Take | Loan::View,
+                            ..
+                        }
+                    )
+                })
+                .collect(),
+            result: false,
+        };
+        self.sig_abi(adapter_sig, abi)
+    }
+
     /// Lowered PACK-15 adapter CoreIR signature, PACK-14 export digest, and `waits` flag.
     pub fn pack_export_signature(
         &mut self,
@@ -156,7 +178,7 @@ impl Emitter {
         let TyKind::Fn(source_params, result, _, Callable::Plain) = t.kind(ty).clone() else {
             return None;
         };
-        let sig_id = self.sig(adapter_sig.clone());
+        let sig_id = self.pack_sig_row(adapter_sig.clone());
         let row = self.add_function(key, adapter_sig.clone());
         self.module.functions[row.index()].pack_export = true;
         self.install_source_signature(row, sig_id);
@@ -389,9 +411,19 @@ impl Cx<'_, '_, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let Some((adapter_sig, _hash, _waits)) =
-            self.e.pack_export_signature(self.p, &mut self.t, ty)
-        else {
+        let dependent = args.iter().any(|&a| has_param(&self.t, a));
+        let adapter_sig = if dependent {
+            let TyKind::Fn(params, output, _, Callable::Plain) = self.t.kind(ty).clone() else {
+                return None;
+            };
+            self.e
+                .pack_call_signature(self.p, &mut self.t, &params, output)
+        } else {
+            self.e
+                .pack_export_signature(self.p, &mut self.t, ty)
+                .map(|(sig, _, _)| sig)
+        };
+        let Some(adapter_sig) = adapter_sig else {
             self.refuse(
                 "PACK-14",
                 n,
@@ -426,8 +458,18 @@ impl Cx<'_, '_, '_> {
             self.gap(n, "PACK-15 typed export adapter is not built");
             return None;
         };
-        let bytes = recipe.render(&[]).expect("closed descriptor recipe");
-        let identity = self.e.static_bytes(&bytes);
+        let identity = if dependent {
+            let mut child = Cx::new(self.p, self.definition, self.e);
+            child.fd = std::borrow::Cow::Owned(self.fd.as_ref().clone());
+            let mut template = child.take_template(adapter);
+            template.descriptor_adapter = Some(raw);
+            self.nested.insert(adapter, template);
+            self.descriptor_recipes.insert(adapter, recipe);
+            self.e.static_bytes(&[1])
+        } else {
+            let bytes = recipe.render(&[]).expect("closed descriptor recipe");
+            self.e.static_bytes(&bytes)
+        };
         let descriptor = self.value(Ty::Ptr);
         self.inst(
             Inst::DescriptorRef {

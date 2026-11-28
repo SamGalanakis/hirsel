@@ -2452,41 +2452,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             self.out.function = Some(f);
             if !self.fd.generics.is_empty() {
                 self.e.generic_rows.insert(f);
-                let mut parameters = vec![];
-                for i in 0..self.fd.generics.len() {
-                    let ty = self.t.mk(TyKind::Param(i as u32));
-                    parameters.push(self.e.type_row(self.p, &mut self.t, ty));
-                }
-                let body = self.e.module.functions[f.index()].body.as_ref().unwrap();
-                let mut signatures = std::collections::BTreeMap::new();
-                let ids = std::iter::once(self.e.source_signature(f))
-                    .chain(body.calls.iter().map(|c| c.signature))
-                    .chain(body.insts.iter().filter_map(|i| match i {
-                        Inst::FunctionRef { function, .. }
-                        | Inst::DescriptorRef { function, .. } => {
-                            Some(self.e.source_signature(*function))
-                        }
-                        _ => None,
-                    }));
-                for id in ids {
-                    if let Some(abi) = self.e.source_signatures.abis.get(&id) {
-                        signatures.entry(id).or_insert_with(|| abi.clone());
-                    }
-                }
-                let template = GenericTemplate {
-                    signatures,
-                    parameters,
-                    copies: std::mem::take(&mut self.copies),
-                    allocations: std::mem::take(&mut self.allocations),
-                    numeric_sites: std::mem::take(&mut self.numeric_sites),
-                    nested: std::mem::take(&mut self.nested),
-                    descriptor_adapter: None,
-                    descriptors: std::mem::take(&mut self.descriptor_recipes),
-                    types: self.e.generic_names.clone(),
-                    calls: self.e.generic_calls.clone(),
-                    codecs: self.e.generic_codecs.clone(),
-                    key_codecs: self.e.generic_key_codecs.clone(),
-                };
+                let template = self.take_template(f);
                 self.out.template = Some(template);
             }
         }

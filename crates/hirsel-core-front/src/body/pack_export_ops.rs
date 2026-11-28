@@ -426,25 +426,7 @@ impl Cx<'_, '_, '_> {
         let Some(callee_val) = callee_val else {
             return (out_ty, None);
         };
-        // A rigid argument can become a scalar or disappear when the template is
-        // instantiated. The PACK-15 result always uses the caller's result place.
-        let abi = scalar_abi::SignatureAbi {
-            params: adapter_sig
-                .params
-                .iter()
-                .map(|param| {
-                    matches!(
-                        param,
-                        Param::Address {
-                            loan: Loan::Take | Loan::View,
-                            ..
-                        }
-                    )
-                })
-                .collect(),
-            result: false,
-        };
-        let sig_id = self.e.sig_abi(adapter_sig.clone(), abi);
+        let sig_id = self.e.pack_sig_row(adapter_sig.clone());
         let ret_rep = match self.rep(result) {
             Ok(rep) => rep,
             Err(what) => {

@@ -709,7 +709,10 @@ a free-standing `F` that outlives the handle.
 
 `code.bind(f)` names a closed top-level function in the calling image under the
 inference rules of [PROG-9](programs.md#prog-9-code-descriptors) and produces its
-`Code[F]` under that image's existing authority. Statically linked entries have
+`Code[F]` under that image's existing authority. A binding inside a generic body
+specializes the adapter and its descriptor when the enclosing type arguments close.
+The adapter can take the selected plain function and its typed environment as
+ordinary arguments. Statically linked entries have
 process-lifetime backing. `code.identity(c)` and `code.revision(c)` expose the same
 PROG-9 bytes and optional revision as the named instance, with views anchored in `c`.
 A PROG-9 `StaticFn` remains the plain descriptor for statically bound code. Its

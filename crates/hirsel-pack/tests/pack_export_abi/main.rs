@@ -97,11 +97,34 @@ fn word(take n: u64) -> u64 { n + 1u64 }
 fn empty(take _unit: ()) -> u64 { 22u64 }
 fn keep(take value: Big) -> Big { take value }
 
+type Capture { pick: fn(u64) -> u64, offset: u64 }
+
+fn apply[Env, A, R](run: fn(Env, take A) -> R, captured: Env, take arg: A) -> R {
+    run(captured, take arg)
+}
+
+fn bound_call[Env, A, R](run: fn(Env, take A) -> R, captured: Env, take arg: A) -> R {
+    let entry: Code[fn(fn(Env, take A) -> R, Env, take A) -> R] = code.bind(apply)
+    entry(run, captured, take arg)
+}
+
+fn selected(add: bool) -> fn(Capture, take u64) -> u64 {
+    if add {
+        fn(c: Capture, take n: u64) -> u64 { (c.pick)(n) + c.offset }
+    } else {
+        fn(c: Capture, take n: u64) -> u64 { (c.pick)(n) - c.offset }
+    }
+}
+
 pub fn call_via_bind() -> Big {
+    let captured = Capture(pick: fn(n: u64) -> u64 { n + n }, offset: 3u64)
+    let hi: u64 = bound_call(selected(true), captured, 15u64)
+    let lo: u64 = bound_call(selected(false), captured, 18u64)
+    if hi != 33u64 || lo != 33u64 { fail("wrong bound callback") }
     let c = code.bind(overlap_sum)
     let a = invoke(code.bind(word), 10u64)
     let b_word = invoke(code.bind(empty), ())
-    let b = arc.new(invoke(code.bind(keep), Big(a: a, b: b_word, c: 33, d: runtime.root_limit())))
+    let b = arc.new(invoke(code.bind(keep), Big(a: a, b: b_word, c: lo, d: runtime.root_limit())))
     c(b, b)
 }
 "#;

@@ -7,6 +7,8 @@ use hirsel_core_ir::{Closure, ClosureHook, Identity};
 use hirsel_core_layout::{Body as ShapeBody, FieldTy, FuncRef};
 use std::collections::BTreeMap;
 
+mod collect;
+pub use collect::GenericTemplate;
 mod runtime;
 
 /// Potential codec hooks are recorded without creating a constrained function
@@ -36,22 +38,6 @@ pub struct CopySize {
 pub struct AllocationLayout {
     pub result: ValueId,
     pub ty: TypeId,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct GenericTemplate {
-    pub signatures: BTreeMap<SigId, scalar_abi::SignatureAbi>,
-    pub parameters: Vec<Option<TypeId>>,
-    pub copies: Vec<CopySize>,
-    pub allocations: Vec<AllocationLayout>,
-    pub numeric_sites: Vec<scalar_abi::NumericSite>,
-    pub nested: BTreeMap<FuncId, GenericTemplate>,
-    pub descriptor_adapter: Option<FuncId>,
-    pub descriptors: BTreeMap<FuncId, crate::identity::DescriptorRecipe>,
-    pub types: BTreeMap<TypeId, NameRecipe>,
-    pub calls: BTreeMap<FuncId, GenericCall>,
-    pub codecs: BTreeMap<TypeId, CodecRecipe>,
-    pub key_codecs: BTreeMap<TypeId, (DefPath, codec_glue::Rows)>,
 }
 
 mod descriptors;
@@ -688,7 +674,7 @@ impl Substitution<'_> {
         let key = self.module.instances[function.instance.index()].clone();
         if let Some(template) = self.nested.get(&old) {
             let key = if let Some(raw) = template.descriptor_adapter {
-                self.descriptor_adapter_key(raw)
+                self.descriptor_adapter_key(raw, function.pack_export)
             } else {
                 InstanceKey {
                     definition: key.definition.clone(),

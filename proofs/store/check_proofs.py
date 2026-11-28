@@ -2,7 +2,7 @@
 """Runner for the Store retention models (opt-in, not pre-push).
 
 Checks, in order:
-  1. TLC baselines: each module under the current STORE-SPEC (retention v2.164,
+  1. TLC baselines: each module under the current STORE-SPEC (retention v2.164 and the Format 15 direct/foreign pack projections,
      catch-up v2.161 as amended by v2.167; and the retention model
      under 3157's rejected count+restart rule), every invariant, no error
      (`--deep` adds the fork and export-lease baselines, 5-25 minutes each).
@@ -92,11 +92,17 @@ BOUNDS["preview"] = {
     "WithExport": "FALSE", "WithFork": "FALSE", "WithBuild": "FALSE", "WithTail": "FALSE",
     "LastTime": "2", "MaxPut": "5", "MaxWipe": "1", "Skew": "1", "Grace": "1", "Watch": '"none"',
 }
+BOUNDS["direct"] = {**BOUNDS["archive"], "MaxPack": "4"}
+BOUNDS["foreign"] = BOUNDS["preview"]
+BOUNDS["direct_replay"] = {"MaxOps": "4"}
 ARCHIVE_INVARIANTS = ["ArchiveComplete", "ArchiveIntervals", "ArchiveBounded", "ArchiveSourceReadable", "ArchiveStagedSafe"]
 
 INVARIANTS = {
     "StoreRetention": ["RetainReachable", "SnapReadable", "ImageComplete", "AckedDurable",
                        "IdleReachesNoFrame", "ProbeClaim", "Progress", "CellsListed", "IdleProgress"],
+    "StoreDirectReplay": ["StampDisjoint", "CounterCovers"],
+    "StoreDirectPack": [*ARCHIVE_INVARIANTS, "DirectReadable", "FollowerReadable"],
+    "StorePreviewPack": ["ForeignBound", "ChildDeleteAuthority", "LocalReadable"],
     "StoreCatchUp": ["NoFalseCorrupt", "InstallExact", "BackfillNoneEmpty", "HolderNoCorrupt",
                      "RecoveredPrefix", "SupersedePremise"],
     "StoreJanitor": ["HeadBatchesKept"],
@@ -118,6 +124,9 @@ PREVIEW_WATCH = ["retireOverExtend", "extendOverRetire", "lapsedExtend", "bumpOv
 # (name, module, rules, bounds, deep). Every invariant must hold. Deep baselines
 # (about 5 minutes each on 8 workers) run only with --deep.
 BASELINES = [
+    ("direct-replay", "StoreDirectReplay", None, "direct_replay", False),
+    ("direct-pack", "StoreDirectPack", "v2164", "direct", False),
+    ("foreign-pack", "StorePreviewPack", "v2164", "foreign", False),
     ("archive", "StoreRetention", "v2164", "archive", False),
     ("retention-v2164", "StoreRetention", "v2164", "retention", False),
     ("retention-v2164-fork", "StoreRetention", "v2164", "retention_fork", True),
@@ -141,7 +150,12 @@ HOLES = [
 
 # (witness invariant, bounds): each must be violated under the current rules, with
 # Track on, so every behaviour the v2.164 fold adds is reachable (not vacuous).
+COVER_MODULE = {"direct_replay": "StoreDirectReplay", "direct": "StoreDirectPack", "foreign": "StorePreviewPack"}
 COVERS = [
+    ("NoReplayRebase", "direct_replay"),
+    ("NoDirectReopen", "direct"), ("NoDirectRestore", "direct"),
+    ("NoDirectAbandon", "direct"), ("NoDirectAdopt", "direct"),
+    ("NoForeignCopy", "foreign"), ("NoForeignLost", "foreign"), ("NoForeignExpired", "foreign"),
     ("NoIdleRetire", "retention_fork"), ("NoIdleUnselected", "retention_fork"),
     ("NoIdleCursor", "retention_fork"), ("NoIdleCells", "retention_fork"),
     ("NoIdleHolderCells", "retention_fork"), ("NoIdleDropped", "retention_fork"),
@@ -168,10 +182,11 @@ def classpath():
 
 
 def write_cfg(path, module, rules, mutant, bounds, invariants, track, properties=(), extra=None):
-    spec = "ArchiveSpec" if bounds == "archive" else "PreviewSpec" if bounds == "preview" else "Spec"
+    spec = {"archive": "ArchiveSpec", "preview": "PreviewSpec", "direct": "DirectSpec",
+            "foreign": "ForeignSpec"}.get(bounds, "Spec")
     lines = [f"SPECIFICATION {spec}", "CONSTANTS"]
     lines += [f"    {k} = {v}" for k, v in {**BOUNDS[bounds], **(extra or {})}.items()]
-    if module in ("StoreRetention", "StorePreviewHold"):
+    if module in ("StoreRetention", "StorePreviewHold", "StoreDirectPack", "StorePreviewPack"):
         lines.append(f"    Track = {'TRUE' if track else 'FALSE'}")
     if rules is not None:
         lines.append(f'    Rules = "{rules}"')
@@ -531,9 +546,11 @@ def main():
                 failures.append(f"{module}/{mutant}")
         print(f"  {caught}/{seeded} mutants caught", flush=True)
 
-        print("== reachability witnesses (each behaviour of the v2.164 fold occurs)", flush=True)
+        print("== reachability witnesses (retention, replay and Preview pack reads)", flush=True)
         for inv, bounds in COVERS:
-            ok, violated, stats, out = tlc("StoreRetention", "v2164", "none", bounds, [inv], tmp, track=True)
+            ok, violated, stats, out = tlc(COVER_MODULE.get(bounds, "StoreRetention"),
+                                           None if bounds == "direct_replay" else "v2164", "none",
+                                           bounds, [inv], tmp, track=True)
             hit = inv in violated
             print(f"  {'REACHED' if hit else 'UNREACHED'}  {inv}; {stats}", flush=True)
             if not hit:

@@ -33,3 +33,12 @@ StorePreviewHold v2164 preview_no_clamp      preview HeldReadable          a flo
 StorePreviewHold v2164 preview_unstamped     preview NoResurrection        a child accepts any hold under its identity, so a re-admission revives a child that reported expiry (§15.7 "Preview holds")
 StorePreviewHold v2164 preview_no_incarnation preview NoResurrection       lane 3450's law: a head carries no incarnation, so an archive erased and recreated repeats rev and the stamp, and the same child ID admitted again revives a child that reported expiry (§15.7 "Preview holds")
 StorePreviewHold v2164 preview_flat_keys     preview HeldReadable          lane 3450b's law: every incarnation stores its keys in one namespace, so an eraser whose floor write applied to an erased head deletes, by ordinal, a key of a hold the head created after it lists (§15.7 "Preview holds")
+StoreDirectPack v2164 direct_commit_unsealed direct DirectReadable
+StoreDirectPack v2164 direct_sweep_first direct DirectReadable
+StoreDirectPack v2164 direct_stale_abort direct DirectReadable
+StoreDirectPack v2164 direct_publish_early direct ArchiveComplete
+StorePreviewPack v2164 preview_unbound_locator foreign ForeignBound
+StorePreviewPack v2164 preview_foreign_delete foreign ChildDeleteAuthority
+StoreDirectPack v2164 direct_follow_early direct FollowerReadable
+StoreDirectReplay - direct_replay_no_reserve direct_replay StampDisjoint
+StoreDirectReplay - direct_follower_stamp_alias direct_replay StampDisjoint

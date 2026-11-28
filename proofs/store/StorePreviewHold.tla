@@ -94,7 +94,7 @@ Serves(c) == /\ holds[c] # NoHold
              /\ Mutant = "preview_naive_renewal" => now < holds[c].until
 
 First ==
-    LET hist == <<{1}, {1,2}>>
+    LET hist == <<HistoryUnit({1}, 2), HistoryUnit({2}, 3), HistoryUnit({1,3}, 4)>>
         objects == Objects(hist, 1..3)
     IN [ArchiveInitial EXCEPT !.history = hist, !.source = objects,
            !.sink = objects, !.uploaded = objects, !.through = 2,
@@ -207,7 +207,7 @@ Dir(e) == IF Mutant = "preview_flat_keys" THEN inc ELSE e.inc
 OldErase ==
     \E e \in stale, k \in archive.sink :
         /\ k \notin Closure(archive.history, e.floor)
-        /\ IF k[1] = "pack" THEN k[2] < (e.floor+1) \div 2 + 1 ELSE k[2] < e.floor
+        /\ IF k[1] = "pack" THEN k[2] < archive.history[e.floor].frontier ELSE k[2] < e.floor
         /\ archive' = IF Dir(e) = inc THEN [archive EXCEPT !.sink = @ \ {k}] ELSE archive
         /\ hit' = Seeing("oldEraser", \E c \in Children :
                              holds[c] # NoHold /\ k \in PreviewClosure(holds[c].q))

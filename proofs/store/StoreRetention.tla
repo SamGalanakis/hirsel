@@ -138,8 +138,12 @@ VARIABLE archive
 Base(q) == q % 2 = 1
 Unit(q) == <<"unit", q>>
 Pack(g) == <<"pack", g>>
-Closure(hist, q) == {Unit(q)} \cup
-    (IF Base(q) THEN {Pack(g) : g \in hist[(q+1) \div 2]} ELSE {})
+HistoryUnit(packs, frontier) == [packs |-> packs, frontier |-> frontier]
+Closure(hist, q) == {Unit(q)} \cup {Pack(p) : p \in hist[q].packs}
+LastBase(hist) == IF Base(Len(hist)) THEN Len(hist) ELSE Len(hist)-1
+\* Recovery runs under exclusion after it selects the legal journal prefix.
+RecoverFiles(present, inventory, journal) ==
+    present \cap (inventory \cup (IF Mutant = "direct_sweep_first" THEN {} ELSE journal))
 Objects(hist, qs) == UNION {Closure(hist, q) : q \in qs}
 \* Packs cost two byte quanta, manifests and journal chunks one. Shared files
 \* are charged once and only for bytes additional to the current generation.
@@ -147,28 +151,34 @@ HoldBytes(extra) == Cardinality(extra) + Cardinality({k \in extra : k[1] = "pack
 HoldBudget == 4
 
 ArchiveInitial ==
-    [history |-> <<{1}>>, source |-> {Unit(1), Pack(1)}, hold |-> {},
+    [history |-> <<HistoryUnit({1}, 2)>>, source |-> {Unit(1), Pack(1)}, hold |-> {},
      sink |-> {}, uploaded |-> {}, through |-> 0, intervals |-> {},
      gap |-> FALSE, breaks |-> {}, floor |-> 0, expiredFloors |-> {}]
-Current(a) == 2 * Len(a.history) - 1
-Live(hist) == Closure(hist, 2 * Len(hist) - 1)
+Current(a) == Len(a.history)
+Live(hist) == Objects(hist, LastBase(hist)..Len(hist))
 SourceNeeded(a) == Live(a.history) \cup Objects(a.history, a.hold)
 Named(a) == UNION {i[1]..i[2] : i \in a.intervals}
 
+\* Publish a cut covering the preceding journal unit. The caller supplies
+\* the files produced by the cut; adopting an existing pack makes no file.
+CoveredCut(a, hist, packs, frontier, produced) ==
+    LET h == Append(hist, HistoryUnit(packs, frontier))
+        q == Len(h)
+        candidates == a.hold \cup (((q-2)..(q-1)) \ (1..a.through))
+        Fits(n) == HoldBytes(Objects(h, {x \in candidates : x >= n}) \ Live(h)) <= HoldBudget
+        first == MinOf({n \in 1..q : Fits(n)})
+        kept == IF Mutant = "archive_unbounded" THEN candidates
+                ELSE {x \in candidates : x >= first}
+    IN [a EXCEPT !.history = h, !.hold = kept, !.source = @ \cup {Unit(q)} \cup produced]
+
+\* Trace projection: a pack-free GROUP followed immediately by an ordinary cut.
 ArchiveCut(shared) ==
     LET a == archive
-        g == Len(a.history) + 1
-        h == Append(a.history, shared \cup {g})
-        old == Current(a)
-        candidates == a.hold \cup ((old..(old+1)) \ (1..a.through))
-        Fits(q) == HoldBytes(Objects(h, {x \in candidates : x >= q}) \ Live(h)) <= HoldBudget
-        first == MinOf({q \in 1..(old+2) : Fits(q)})
-        kept == IF Mutant = "archive_unbounded" THEN candidates
-                ELSE {q \in candidates : q >= first}
-    IN /\ g <= MaxPack
-       /\ shared \subseteq a.history[g-1]
-       /\ archive' = [a EXCEPT !.history = h, !.hold = kept,
-                        !.source = @ \cup {Unit(old+1), Unit(old+2), Pack(g)}]
+        q == Current(a)
+        g == a.history[q].frontier
+        h == Append(a.history, HistoryUnit({}, g))
+    IN /\ Base(q) /\ g <= MaxPack /\ shared \subseteq a.history[q].packs
+       /\ archive' = CoveredCut(a, h, shared \cup {g}, g+1, {Unit(q+1), Pack(g)})
 
 ArchiveReclaim(k) ==
     /\ k \in archive.source \ (IF Mutant = "archive_ignore_hold" /\ k[1] = "pack"
@@ -192,7 +202,8 @@ ArchivePublish(q) ==
         fresh == a.gap \/ a.through = 0
         start == IF fresh THEN q ELSE Max({i[1] : i \in a.intervals})
     IN /\ TargetUnit(a, q)
-       /\ Mutant = "archive_publish_early" \/ Closure(a.history, q) \subseteq a.sink
+       /\ Mutant = "archive_publish_early" \/ (IF Mutant = "direct_publish_early" /\ ~Base(q) THEN {Unit(q)}
+                                              ELSE Closure(a.history, q)) \subseteq a.sink
        /\ archive' = [a EXCEPT !.through = q, !.gap = FALSE,
                         !.intervals = (@ \ {<<start, a.through>>}) \cup {<<start,q>>},
                         !.floor = IF @ = 0 THEN q ELSE @, !.hold = @ \ (1..q)]
@@ -217,11 +228,11 @@ ArchiveErase(f, k) ==
     /\ f \in archive.expiredFloors
     /\ k \in archive.sink \ Closure(archive.history, f)
     /\ Mutant = "archive_unfenced_expire" \/
-         (IF k[1] = "pack" THEN k[2] < (f+1) \div 2 + 1 ELSE k[2] < f)
+         (IF k[1] = "pack" THEN k[2] < archive.history[f].frontier ELSE k[2] < f)
     /\ archive' = [archive EXCEPT !.sink = @ \ {k}]
 
 ArchiveNext ==
-    \/ \E shared \in SUBSET archive.history[Len(archive.history)] : ArchiveCut(shared)
+    \/ \E shared \in SUBSET archive.history[Len(archive.history)].packs : ArchiveCut(shared)
     \/ \E k \in archive.source : ArchiveReclaim(k)
     \/ ArchiveReopen
     \/ \E q \in 1..Current(archive) :
@@ -704,7 +715,8 @@ ReleaseExport ==
 
 \* Crash and reopen: writer memory is lost (cursors, Snapshots and their leases,
 \* the export attempt, a hot build; a listed build pin is an orphan). Open removes
-\* every delisted pack (§3.5 step 5). The head's commits are in the journal and come
+\* unrooted packs after replay (§3.5, AP21). This Tiered projection writes Hot
+\* journal values only; DirectSpec exercises nonempty journal roots. The head's commits are in the journal and come
 \* back through replay (§13.7).
 Crash ==
     /\ crashes < MaxCrash
@@ -714,7 +726,7 @@ Crash ==
     /\ export' = [on |-> FALSE, lease |-> {}, listed |-> {}, copied |-> FALSE, image |-> {}]
     /\ bld' = NoBuild
     /\ pending' = FALSE
-    /\ files' = files \cap gen.listed
+    /\ files' = RecoverFiles(files, gen.listed, {})
     /\ rewind' = "none" /\ ev' = {}
     /\ UNCHANGED <<head, gen, packRows, nextPack, nextStamp, acked, fault>>
 

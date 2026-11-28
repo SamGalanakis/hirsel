@@ -1,34 +1,11 @@
-// T8 step 3: the rows this cut adds to the queue, each at `deferred_next`.
-fn transfer_deferred_rows(mut root: Arc[std.page.Page], mut deferred_next: u64, queued: List[manifest.DeferredFree], private_from: u64, mut next_stamp: u64, issued: core.Cell[u64]) -> Result[(), Error] {
-    for row in queued {
-        let mut draw = failure_result_from_rep(manifest.reserve_list_edit(root, mut next_stamp, issued))?
-        failure_result_from_rep(pages.page_result(std.page.insert(mut root, types.key_word(deferred_next), manifest.deferred_free_value(row), None, 1024, private_from, mut draw)))?
-        deferred_next = failure_result_from_rep(catalog.stamp_after(deferred_next))?
-    }
-    Ok(())
-}
-
-fn plan_paged_lists(mut known: manifest.PageLocations, installed: manifest.PagedLists, queue: manifest.CutQueue, rows: manifest.Lineage, carried: Option[View[List[u64]]], first_pack: u64, cap: u64, mut next_stamp: u64, issued: core.Cell[u64], relocated: Option[View[core.Log[bool]]]) -> Result[manifest.ListLayout, Error] {
+fn plan_paged_lists(mut known: manifest.PageLocations, installed: manifest.PagedLists, queue: manifest.CutQueue, rows: manifest.Lineage, carried: Option[View[List[u64]]], first_pack: u64, cap: u64, issued: core.Cell[u64], relocated: Option[View[core.Log[bool]]]) -> Result[manifest.ListLayout, Error] {
     let mut pack_root = arc.share(installed.packs)
-    let private_from = next_stamp
-    let data_retired = failure_result_from_rep(manifest.edit_pack_list(mut pack_root, known, queue.retiring, private_from, mut next_stamp, issued))?
+    let data_retired = failure_result_from_rep(manifest.edit_pack_list(mut pack_root, known, queue.retiring, issued))?
     failure_result_from_rep(manifest.change_list_root(mut known, installed.packs, pack_root, 0))?
     let mut deferred_root = arc.share(installed.deferred)
-    let mut deferred_next = installed.deferred_next
-    transfer_deferred_rows(mut deferred_root, mut deferred_next, queue.added, private_from, mut next_stamp, issued)?
-    // The installed rows this cut's compaction moved take their new values.
-    for (seq, row) in queue.rewritten {
-        let mut draw = failure_result_from_rep(manifest.reserve_list_edit(deferred_root, mut next_stamp, issued))?
-        failure_result_from_rep(pages.page_result(std.page.insert(mut deferred_root, types.key_word(seq), manifest.deferred_free_value(row), None, 1024, private_from, mut draw)))?
-    }
-    for seq in queue.drained {
-        let mut draw = failure_result_from_rep(manifest.reserve_list_edit(deferred_root, mut next_stamp, issued))?
-        if !failure_result_from_rep(pages.page_result(std.page.remove(mut deferred_root, types.key_word(seq), private_from, mut draw)))? {
-            fail("store: the drain consumed a row the queue lacks")
-        }
-    }
+    let deferred_next = failure_result_from_rep(manifest.edit_deferred_list(mut deferred_root, installed.deferred_next, queue, issued))?
     failure_result_from_rep(manifest.change_list_root(mut known, installed.deferred, deferred_root, 2))?
-    let lineage_root = failure_result_from_rep(manifest.plan_lineage_root(installed, rows, mut next_stamp, issued))?
+    let lineage_root = failure_result_from_rep(manifest.plan_lineage_root(installed, rows, issued))?
     failure_result_from_rep(manifest.change_list_root(mut known, installed.lineage, lineage_root, 3))?
     let moves = if let Some(observed) = relocated {
         let chosen = disk_allocation(scoped fn() -> Result[Map[u64, ()], Error] {
@@ -92,8 +69,7 @@ fn plan_page_cut(base: manifest.PageRetryBase, holders: List[manifest.HeldPage],
         let mut candidate = manifest.share_page_locations(base.locations)
         failure_result_from_rep(manifest.apply_pack_layout(mut candidate, blobs))?
         failure_result_from_rep(manifest.apply_pack_layout(mut candidate, data_pages))?
-        let mut draw = first_stamp
-        let lists = plan_paged_lists(mut candidate, installed, queue, rows, carried, data_pages.next_pack, cap, mut draw, issued, relocated)?
+        let lists = plan_paged_lists(mut candidate, installed, queue, rows, carried, data_pages.next_pack, cap, issued, relocated)?
         Ok(manifest.PagedCutLayout(locations: take candidate, blobs: take blobs, data_pages: take data_pages, lists: take lists))
     })
     next_stamp = cell.into_inner(take issued)

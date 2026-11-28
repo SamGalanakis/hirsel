@@ -478,6 +478,7 @@ pkg_v1.Package(
             ("store_prior_laws.hirsel", "store"),
             ("store_locations_disk_laws.hirsel", "manifest"),
             ("store_packs_disk_laws.hirsel", "store"),
+            ("store_manifest_batch_laws.hirsel", "store"),
             ("store_scrub_laws.hirsel", "store"),
             ("store_scrub_origin_law.hirsel", "store"),
             ("store_sim_disk_laws.hirsel", "store"),

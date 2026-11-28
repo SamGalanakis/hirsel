@@ -3018,7 +3018,7 @@ fn settle_copy(mut page: Page) -> Result[(), Error] {
 
 // The leaf merge on one private copy: the same priors, draws and canonical
 // page as merge_batch_leaf and batch_pieces when the edits keep one page.
-// None leaves `next` alone and asks the caller to rebuild (DESIGN 3156).
+// None leaves `next` alone for rebuild. A fit commits its draw before settling can refuse.
 fn edit_batch_leaf[T](root: Arc[Page], source: T, edit_at: EditSource[T], start: u64, end: u64, inline: u64, mut next: u64) -> Result[Option[List[PagePiece]], Error] {
     let mut cursor = next
     let mut changed = false
@@ -3073,6 +3073,7 @@ fn edit_batch_leaf[T](root: Arc[Page], source: T, edit_at: EditSource[T], start:
             return Ok(false)
         }
         let id = take_stamp(mut cursor)?
+        next = cursor
         list.set_word_le(mut page.image.raw, 8, id)
         page.loose_below = false
         settle_copy(mut page)?
@@ -3081,7 +3082,6 @@ fn edit_batch_leaf[T](root: Arc[Page], source: T, edit_at: EditSource[T], start:
     if !kept {
         return Ok(None)
     }
-    next = cursor
     if !changed {
         return Ok(Some(one_trim_piece(root)))
     }

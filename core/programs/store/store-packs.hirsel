@@ -277,52 +277,100 @@ pub fn encode_pack_row(pack: pages.PagePack) -> Bytes {
     take out
 }
 
-// Apply final data-pack counts to the installed pack-list tree.
-// The list is edited in place only on paths private to this candidate.
-pub fn reserve_list_edit(root: Arc[std.page.Page], mut next_stamp: u64, issued: core.Cell[u64]) -> Result[u64, types.Failure] {
-    let height: u64 = int.widen(std.page.level(std.page.image_of(root)))
-    // Per level an edit can copy the path page, replace two siblings during
-    // a rotation, and split into three pieces. The final root needs one stamp.
-    let Some(end) = int.checked_add(next_stamp, 6 * (height + 1) + 1) else {
-        return Error(Limit(Ids))
-    }
-    let _ = cell.replace(issued, end)
-    let first = next_stamp
-    next_stamp = end
-    Ok(first)
+// The batch visitor borrows contiguous keys and values. A key alone is a
+// deletion: every Format 15 pack or deferred-free value has a nonempty tag.
+type ManifestEdits {
+    data: Bytes,
+    offsets: List[(u64, Option[u32])]
 }
 
-pub fn edit_pack_list(mut root: Arc[std.page.Page], known: PageLocations, retiring: List[u64], private_from: u64, mut next_stamp: u64, issued: core.Cell[u64]) -> Result[List[u64], types.Failure] {
+fn add_manifest_edit(mut edits: ManifestEdits, seq: u64, value: Option[Bytes], prior: Option[u32]) {
+    list.push(mut edits.offsets, (list.len(edits.data), prior))
+    list.put_word_be(mut edits.data, seq)
+    if let Some(raw) = value {
+        list.append(mut edits.data, raw)
+    }
+}
+
+fn visit_manifest_edit(edits: ManifestEdits, at: u64, visit: scoped fn(std.page.SourceEdit) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
+    let (start, prior) = edits.offsets[at]
+    let end = if at + 1 < list.len(edits.offsets) {
+        edits.offsets[at + 1].0
+    } else {
+        list.len(edits.data)
+    }
+    let value: Option[(View[Bytes], Option[View[Arc[Bytes]]])] = if start + 8 == end {
+        None
+    } else {
+        Some((list.slice(edits.data, start + 8, end), None))
+    }
+    visit(std.page.SourceEdit(key: list.slice(edits.data, start, start + 8), value: value, prior: prior))
+}
+
+fn draw_manifest_edits(mut stamp: u64, take batch: (Arc[std.page.Page], ManifestEdits)) -> Result[Arc[std.page.Page], types.Failure] {
+    let (take base, take edits) = take batch
+    let mut root = take base
+    pages.page_result(std.page.apply_sorted_source(mut root, edits, visit_manifest_edit, 0, list.len(edits.offsets), 1024, mut stamp))?
+    Ok(take root)
+}
+
+fn apply_manifest_edits(mut root: Arc[std.page.Page], take edits: ManifestEdits, issued: core.Cell[u64]) -> Result[(), types.Failure] {
+    if list.len(edits.offsets) != 0 {
+        root = cell.with(issued, (arc.share(root), take edits), draw_manifest_edits)?
+    }
+    Ok(())
+}
+
+fn next_installed_pack(mut cursor: std.page.Cursor) -> Option[(u64, u64)] {
+    let Some((key, slot)) = std.page.cursor_next_key(mut cursor, list.new()) else {
+        return None
+    }
+    Some((list.word_be(key, 0), slot))
+}
+
+// Both probe producers return retiring sequences in ascending order. Walk
+// them alongside the inventory and the installed rows, staging only changes.
+pub fn edit_pack_list(mut root: Arc[std.page.Page], known: PageLocations, retiring: List[u64], issued: core.Cell[u64]) -> Result[List[u64], types.Failure] {
     let mut retired: List[u64] = list.new()
+    let mut edits = ManifestEdits(data: list.new(), offsets: list.new())
+    let mut cursor = std.page.cursor_open(arc.share(root), None, true, false)
+    let mut old = next_installed_pack(mut cursor)
+    let mut retire = 0u64
     let mut inventory = std.omap.range(known.packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut inventory) {
         if pack.class == 2 {
             continue
         }
-        let key = types.key_word(seq)
-        // A Tiered pack stays in the inventory until a probe retires it.
-        if (pack.class < 3 && pack.live == 0) || (pack.class >= 3 && list.contains(retiring, seq)) {
-            let listed = match std.page.lookup(root, key) {
-                Some(_) => true,
-                None => false
+        while retire < list.len(retiring) && retiring[retire] < seq {
+            retire += 1
+        }
+        while let Some((old_seq, _)) = old {
+            if old_seq >= seq {
+                break
             }
-            if listed {
-                let mut draw = reserve_list_edit(root, mut next_stamp, issued)?
-                let _ = pages.page_result(std.page.remove(mut root, key, private_from, mut draw))?
+            old = next_installed_pack(mut cursor)
+        }
+        let listed = match old {
+            Some((id, slot)) if id == seq => std.page.cursor_value(cursor, slot),
+            _ => None,
+        }
+        if (pack.class < 3 && pack.live == 0) || (pack.class >= 3 && retire < list.len(retiring) && retiring[retire] == seq) {
+            if let Some(_) = listed {
+                add_manifest_edit(mut edits, seq, None, None)
             }
             list.push(mut retired, seq)
-            continue
-        }
-        let raw = encode_pack_row(pack)
-        let unchanged = match std.page.lookup(root, key) {
-            Some(old) => raw == old,
-            None => false
-        }
-        if !unchanged {
-            let mut draw = reserve_list_edit(root, mut next_stamp, issued)?
-            pages.page_result(std.page.insert(mut root, key, raw, None, 1024, private_from, mut draw))?
+        } else {
+            let raw = encode_pack_row(pack)
+            let unchanged = match listed {
+                Some(value) => value == raw,
+                None => false,
+            }
+            if !unchanged {
+                add_manifest_edit(mut edits, seq, Some(take raw), None)
+            }
         }
     }
+    apply_manifest_edits(mut root, take edits, issued)?
     Ok(take retired)
 }
 
@@ -345,17 +393,17 @@ pub fn empty_paged_lists() -> PagedLists {
 
 // The rows are rebuilt into a fresh tree only when they change. A bulk
 // build of n rows issues fewer than 2n + 2 page stamps.
-pub fn plan_lineage_root(installed: PagedLists, rows: Lineage, mut next_stamp: u64, issued: core.Cell[u64]) -> Result[Arc[std.page.Page], types.Failure] {
+pub fn plan_lineage_root(installed: PagedLists, rows: Lineage, issued: core.Cell[u64]) -> Result[Arc[std.page.Page], types.Failure] {
     if same_lineage(rows, installed.rows) {
         return Ok(arc.share(installed.lineage))
     }
+    let first = cell.get(issued)
     let row_count = map.len(rows.forks) + map.len(rows.cells)
-    let Some(end) = int.checked_add(next_stamp, 2 * row_count + 2) else {
+    let Some(end) = int.checked_add(first, 2 * row_count + 2) else {
         return Error(Limit(Ids))
     }
     let _ = cell.replace(issued, end)
-    let mut draw = next_stamp
-    next_stamp = end
+    let mut draw = first
     build_lineage_tree(rows, mut draw)
 }
 

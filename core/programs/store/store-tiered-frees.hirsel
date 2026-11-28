@@ -72,7 +72,8 @@ pub type TieredDrainKill: send {
 }
 
 // T8 steps 3 and 4: the rows a cut adds at `deferred_next` onward, in order,
-// and the sequences its drain consumed, installed or added. `folded` holds
+// and the (sequence, prior) pairs its drain consumed. Installed rows carry
+// their encoded length + 1. New rows carry zero. `folded` holds
 // the Cold frames the fold replaced, which step 2 files with the replaced
 // list; `kills` holds the drain's. `moved` holds the (pack, len) of each
 // Cold ancestor that compaction re-emitted, and `retiring` the packs whose
@@ -83,7 +84,7 @@ pub type TieredDrainKill: send {
 pub type CutQueue: send {
     added: List[DeferredFree],
     rewritten: List[(u64, DeferredFree)],
-    drained: List[u64],
+    drained: List[(u64, u32)],
     kills: List[TieredDrainKill],
     folded: List[TieredDrainKill],
     moved: List[(u64, u64)],
@@ -101,4 +102,36 @@ pub fn queued_free(value: Bytes) -> DeferredFree {
         _ => TieredBlob(result.unwrap(std.page.decode_ref(list.slice(value, 5, 47)))),
     }
     DeferredFree(branch_id: branch_id, target: take target)
+}
+
+// Installed rewrites and drains are each in sequence order. Drains of new
+// rows cancel their insert, including children appended during this drain.
+pub fn edit_deferred_list(mut root: Arc[std.page.Page], first: u64, queue: CutQueue, issued: core.Cell[u64]) -> Result[u64, types.Failure] {
+    let Some(end) = int.checked_add(first, list.len(queue.added)) else {
+        return Error(Limit(Ids))
+    }
+    let mut edits = ManifestEdits(data: list.new(), offsets: list.new())
+    let mut drained = 0u64
+    for (seq, row) in queue.rewritten {
+        while drained < list.len(queue.drained) && queue.drained[drained].0 < seq {
+            let (at, prior) = queue.drained[drained]
+            add_manifest_edit(mut edits, at, None, Some(prior))
+            drained += 1
+        }
+        add_manifest_edit(mut edits, seq, Some(deferred_free_value(row)), None)
+    }
+    while drained < list.len(queue.drained) && queue.drained[drained].0 < first {
+        let (at, prior) = queue.drained[drained]
+        add_manifest_edit(mut edits, at, None, Some(prior))
+        drained += 1
+    }
+    for seq in first .. end {
+        if drained < list.len(queue.drained) && queue.drained[drained].0 == seq {
+            drained += 1
+        } else {
+            add_manifest_edit(mut edits, seq, Some(deferred_free_value(queue.added[seq - first])), Some(0))
+        }
+    }
+    apply_manifest_edits(mut root, take edits, issued)?
+    Ok(end)
 }

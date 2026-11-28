@@ -1,0 +1,192 @@
+fn manifest_law_free(seq: u64) -> manifest.DeferredFree {
+    let ptr = std.page.PagePtr(pack: 7, offset: 72 + 128 * seq, len: 64, checksum: seq, stamp: seq + 1)
+    let target: format.TieredTarget = if seq % 2 == 0 {
+        TieredPage(ptr)
+    } else {
+        TieredBlob(std.page.BlobRef(stamp: ptr.stamp, len: 56, checksum: seq, pack: 8, offset: ptr.offset, body: 0))
+    }
+    manifest.DeferredFree(branch_id: int.truncate(seq % 3), target: take target)
+}
+
+fn manifest_law_pack(seq: u64) -> pages.PagePack {
+    let source: Option[pages.ForeignPack] = if seq % 4 == 0 {
+        Some(pages.ForeignPack(parent: types.StoreKey(hi: 1, lo: 2), incarnation: [3; 16], epoch: 4, len: 8192, digest: seq))
+    } else {
+        None
+    }
+    pages.PagePack(foreign: source, class: int.truncate(seq % 5), frames: 8, live: 4096, payload_bytes: 4096, index: 0)
+}
+
+fn manifest_law_drain(mut queue: manifest.CutQueue, seq: u64, row: manifest.DeferredFree) {
+    list.push(mut queue.drained, (seq, int.truncate(list.len(manifest.deferred_free_value(row)) + 1)))
+}
+
+// The model applies the old operations to a flat map, including inserts which
+// a later drain removes. Check every surviving key and the gaps in both scans.
+fn manifest_law_scan(root: Arc[std.page.Page], expected: Map[u64, Bytes], limit: u64) {
+    for reverse in[false, true] {
+        let mut cursor = std.page.cursor_open(arc.share(root), None, true, reverse)
+        for slot in 0u64 .. limit {
+            let seq = if reverse {
+                limit - 1 - slot
+            } else {
+                slot
+            }
+            if let Some(value) = map.get(expected, seq) {
+                let Some(row) = std.page.cursor_next(mut cursor) else {
+                    fail("manifest scan ended early")
+                }
+                if row.key != types.key_word(seq) || list.compare_bytes(row.value, value) != Equal {
+                    fail("manifest row differs from flat model")
+                }
+                let mut seek = std.page.cursor_open(arc.share(root), Some(types.key_word(seq)), true, reverse)
+                let Some(hit) = std.page.cursor_next(mut seek) else {
+                    fail("manifest seek missed a row")
+                }
+                if hit.key != row.key {
+                    fail("manifest seek found the wrong row")
+                }
+            }
+        }
+        if let Some(_) = std.page.cursor_next(mut cursor) {
+            fail("manifest scan has extra rows")
+        }
+    }
+}
+
+@test
+fn test_manifest_settled_rows() -> Result[(), Error] {
+    let mut known = manifest.new_page_locations()
+    let mut installed = manifest.empty_paged_lists()
+    let mut frees: Map[u64, Bytes] = map.new()
+    let mut packs: Map[u64, Bytes] = map.new()
+    let mut next_free = 0u64
+    let issued = cell.new(10000u64)
+    for cut in 0u64 .. 4 {
+        let first = next_free
+        let mut queue = manifest.no_cut_queue()
+        for seq in first .. first + 128 {
+            let row = manifest_law_free(seq)
+            map.insert(mut frees, seq, manifest.deferred_free_value(row))
+            list.push(mut queue.added, take row)
+            next_free += 1
+        }
+        for seq in 0u64 .. first {
+            if map.contains(frees, seq) && cut != 3 && seq % 7 == 0 {
+                let row = manifest_law_free(seq + 1)
+                map.insert(mut frees, seq, manifest.deferred_free_value(row))
+                list.push(mut queue.rewritten, (seq, take row))
+            } else if let Some(take prior) = map.remove(mut frees, seq) {
+                manifest_law_drain(mut queue, seq, manifest.queued_free(prior))
+            }
+        }
+        for seq in first .. next_free {
+            if cut == 3 || (cut != 0 && seq % 3 != 0) {
+                manifest_law_drain(mut queue, seq, manifest_law_free(seq))
+                let _ = map.remove(mut frees, seq)
+            }
+        }
+        let mut retired: List[u64] = list.new()
+        for seq in 1u64 .. 193 {
+            let mut pack = manifest_law_pack(seq)
+            if cut != 0 && seq % 3 != 0 {
+                pack.live = 0
+            }
+            if pack.class == 2 {
+                continue
+            }
+            if pack.class >= 3 && cut >= 2 && seq % 4 == 0 {
+                list.push(mut queue.retiring, seq)
+            }
+            if (pack.class < 2 && pack.live == 0) || list.contains(queue.retiring, seq) {
+                let _ = map.remove(mut packs, seq)
+                list.push(mut retired, seq)
+            } else {
+                map.insert(mut packs, seq, manifest.encode_pack_row(pack))
+            }
+            failure_result_from_rep(types.capacity(manifest.disk_index_put(mut known.packs, seq, take pack, manifest.pack_edge_charge)))?
+        }
+        let lists = plan_paged_lists(mut known, installed, queue, manifest.empty_lineage(), None, 1000 + cut * 100, 65536, issued, None)?
+        if lists.roots.deferred_next != next_free || lists.removals != retired {
+            fail("manifest sequence or retirements differ")
+        }
+        manifest_law_scan(lists.roots.deferred, frees, next_free)
+        manifest_law_scan(lists.roots.packs, packs, 193)
+        let manifest.ListLayout(roots: take next_lists, ..) = take lists
+        installed = take next_lists
+    }
+    // All newly issued rows drain, with no other changes to either tree.
+    let mut cancelled = manifest.no_cut_queue()
+    for seq in next_free .. next_free + 128 {
+        let row = manifest_law_free(seq)
+        manifest_law_drain(mut cancelled, seq, row)
+        list.push(mut cancelled.added, take row)
+    }
+    let before = cell.get(issued)
+    // Reuse exactly the same retirement selection as the fourth cut.
+    for seq in 1u64 .. 193 {
+        if seq % 5 >= 3 && seq % 4 == 0 {
+            list.push(mut cancelled.retiring, seq)
+        }
+    }
+    let final_lists = plan_paged_lists(mut known, installed, cancelled, manifest.empty_lineage(), None, 2000, 65536, issued, None)?
+    if final_lists.roots.deferred_next != next_free + 128 || cell.get(issued) != before || list.len(final_lists.run_packs.frames) != 0 {
+        fail("born-and-drained queue rows consumed stamps or emitted class-2 pages")
+    }
+    Ok(())
+}
+
+@test
+fn test_manifest_batch_refusal() -> Result[(), Error] {
+    let base = manifest.empty_paged_lists()
+    let mut queue = manifest.no_cut_queue()
+    for seq in 0u64 .. 256 {
+        list.push(mut queue.added, manifest_law_free(seq))
+    }
+    let issued = cell.new(10000u64)
+    // Find an allocation refusal after at least one bulk leaf drew its ID.
+    // Each attempt starts from the installed root, with the preceding watermark.
+    let mut room = 256u64
+    loop {
+        let first = cell.get(issued)
+        let trial = disk_allocation(scoped fn() -> Result[(), Error] {
+            let mut root = arc.share(base.deferred)
+            let admitted = bound bytes room {
+                manifest.edit_deferred_list(mut root, 0, queue, issued)
+            }
+            let _ = failure_result_from_rep(failure_result_from_rep(types.capacity(take admitted))?)?
+            Ok(())
+        })
+        match take trial {
+            Error(Full(Allocation(_))) => {
+                if cell.get(issued) > first {
+                    break
+                }
+            },
+            _ => fail("fixture missed a partially drawn, refused batch"),
+        }
+        room += 1024
+    }
+    let retry_at = cell.get(issued)
+    let mut root = arc.share(base.deferred)
+    let end = failure_result_from_rep(manifest.edit_deferred_list(mut root, 0, queue, issued))?
+    if end != 256 || std.page.stamp(std.page.image_of(root)) < retry_at || std.page.count(std.page.image_of(base.deferred)) != 0 {
+        fail("refused manifest batch changed the installed root or reused its stamp")
+    }
+    let mut missing = manifest.no_cut_queue()
+    list.push(mut missing.drained, (300u64, 42u32))
+    let held_stamp = std.page.stamp(std.page.image_of(root))
+    if let Ok(_) = manifest.edit_deferred_list(mut root, 301, missing, issued) {
+        fail("manifest batch accepted a missing installed delete")
+    }
+    if std.page.stamp(std.page.image_of(root)) != held_stamp {
+        fail("failed prior check replaced the installed root")
+    }
+    let mut overflow = manifest.no_cut_queue()
+    list.push(mut overflow.added, manifest_law_free(1))
+    list.push(mut overflow.drained, (18446744073709551615u64, 0u32))
+    if let Error(Limit(Ids)) = manifest.edit_deferred_list(mut root, 18446744073709551615u64, overflow, issued) {
+        return Ok(())
+    }
+    fail("cancellation bypassed the deferred sequence limit")
+}

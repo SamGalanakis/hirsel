@@ -47,9 +47,8 @@ fn preview_foundation_lists(source: pager.PreviewRead, foundation: Dir, scratch:
         failure_result_from_rep(manifest.reseal_restore_pack(scratch, foundation, parent, child, seq))?
     }
     let (first_pack, first_stamp) = pager.preview_frontier(source)
-    let mut stamp = first_stamp
-    let issued = cell.new(stamp)
-    let lists = plan_paged_lists(mut locations, manifest.empty_paged_lists(), manifest.no_cut_queue(), manifest.empty_lineage(), None, first_pack, pack_bytes, mut stamp, issued, None)?
+    let issued = cell.new(first_stamp)
+    let lists = plan_paged_lists(mut locations, manifest.empty_paged_lists(), manifest.no_cut_queue(), manifest.empty_lineage(), None, first_pack, pack_bytes, issued, None)?
     for plan in lists.run_packs.packs {
         let path = failure_result_from_rep(manifest.paged_pack_path(plan.seq))?
         let mut raw: Bytes = failure_result_from_rep(manifest.disk_read_buffer(plan.size))?

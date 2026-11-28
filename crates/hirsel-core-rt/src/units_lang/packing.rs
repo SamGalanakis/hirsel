@@ -380,9 +380,10 @@ pub(super) unsafe fn unpack_owners(
                 set_word(slot.add(16), 0);
                 continue;
             }
-            let p = block::allocate_admitted(
+            let p = block::allocate_guest(
                 &*context,
                 payer,
+                seq_charge(len, o[3]),
                 n,
                 o[2].clamp(1, 16) as usize,
                 crate::abi_layout::NATIVE_PLAIN,

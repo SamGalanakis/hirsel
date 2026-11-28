@@ -116,7 +116,7 @@ pub(crate) fn pin_pc(pc: usize) -> Option<CodePin> {
 /// execution stops abnormally (skipping Hirsel cleanup per FAIL-15),
 /// the execution owns the remaining slots until generation teardown.
 pub(crate) struct ExecutionPin {
-    execution: *const crate::run_stop::Execution,
+    table: *const std::sync::Mutex<crate::run_stop::PinTable>,
     slot: u32,
     fallback: Option<CodePin>,
 }
@@ -143,15 +143,15 @@ impl ExecutionPin {
             .or_else(|| crate::run_stop::current_execution().map(ptr::from_ref));
         if let Some(execution) = execution {
             // SAFETY: `Execution` outlives every task running under it.
-            let slot = unsafe { (*execution).register_pin(pin) };
+            let (table, slot) = unsafe { (*execution).register_pin(pin) };
             Some(Self {
-                execution,
+                table,
                 slot,
                 fallback: None,
             })
         } else {
             Some(Self {
-                execution: ptr::null(),
+                table: ptr::null(),
                 slot: 0,
                 fallback: Some(pin),
             })
@@ -161,9 +161,9 @@ impl ExecutionPin {
 
 impl Drop for ExecutionPin {
     fn drop(&mut self) {
-        if !self.execution.is_null() {
-            // SAFETY: `Execution` outlives every value dropped during the run.
-            unsafe { (*self.execution).unregister_pin(self.slot) };
+        if !self.table.is_null() {
+            // SAFETY: the boxed table remains at a fixed address through teardown.
+            unsafe { crate::run_stop::Execution::unregister_pin(&*self.table, self.slot) };
         } else {
             drop(self.fallback.take());
         }

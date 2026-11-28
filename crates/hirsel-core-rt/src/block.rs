@@ -110,7 +110,14 @@ pub(crate) fn allocate(
     kind: u8,
 ) -> Result<NonNull<u8>, Capacity> {
     admit_storage(payer, charge)?;
-    Ok(allocate_admitted(context, payer, bytes, align, kind))
+    Ok(allocate_guest(
+        context,
+        payer,
+        charge.unwrap(),
+        bytes,
+        align,
+        kind,
+    ))
 }
 
 #[inline]
@@ -132,6 +139,19 @@ pub(crate) fn allocate_admitted(
 ) -> NonNull<u8> {
     task_heap::Heap::allocate(context, payer, bytes, align, kind, false)
 }
+pub(crate) fn allocate_guest(
+    context: &Context,
+    payer: Payer,
+    charge: u64,
+    bytes: usize,
+    align: usize,
+    kind: u8,
+) -> NonNull<u8> {
+    let payload = allocate_admitted(context, payer, bytes, align, kind);
+    unsafe { task_heap::Page::own_raw(payload, charge, free) };
+    payload
+}
+
 /// # Safety
 /// A live block pins its original payer until its logical refund.
 #[inline]
@@ -250,7 +270,8 @@ impl Block {
         align: usize,
         kind: u8,
     ) -> Result<Self, Capacity> {
-        let pointer = allocate(context, payer, charge, bytes, align, kind)?;
+        admit_storage(payer, charge)?;
+        let pointer = allocate_admitted(context, payer, bytes, align, kind);
         Ok(Self {
             pointer,
             charge: charge.unwrap(),
@@ -281,7 +302,7 @@ impl Block {
         bytes: usize,
         align: usize,
     ) -> Result<Self, Capacity> {
-        let pointer = allocate(
+        Self::paid(
             context,
             context.payer(),
             charge,
@@ -289,15 +310,12 @@ impl Block {
             align,
             // SAFETY: self retains the original allocation.
             unsafe { task_heap::kind(self.pointer) },
-        )?;
-        Ok(Self {
-            pointer,
-            charge: charge.unwrap(),
-        })
+        )
     }
     pub(crate) fn refund_at_unit(self) {
         let charge = self.charge;
-        let pointer = self.into_raw();
+        let pointer = self.pointer;
+        std::mem::forget(self);
         // SAFETY: the live block pins its payer and its page through the refund.
         unsafe {
             let page = task_heap::page_of(pointer);
@@ -308,13 +326,26 @@ impl Block {
     }
 
     pub fn into_raw(self) -> NonNull<u8> {
+        let charge = self.charge;
+        self.into_raw_with(charge, free)
+    }
+
+    pub(crate) fn into_raw_with(
+        self,
+        charge: u64,
+        release: unsafe fn(NonNull<u8>, u64),
+    ) -> NonNull<u8> {
         let pointer = self.pointer;
+        // SAFETY: the caller transfers this live slot to its raw owner.
+        unsafe { task_heap::Page::own_raw(pointer, charge, release) };
         std::mem::forget(self);
         pointer
     }
     /// # Safety
     /// Exclusive live block from into_raw; every layout and charge operand is exact.
     pub unsafe fn from_raw(pointer: NonNull<u8>, charge: u64) -> Self {
+        // SAFETY: caller transfers the live guest slot into native RAII custody.
+        unsafe { task_heap::page_of(pointer).as_ref().forget_raw(pointer) };
         Self { pointer, charge }
     }
 }

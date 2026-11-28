@@ -85,7 +85,7 @@ pub unsafe extern "C" fn hirsel_core_channel_new(
         });
         tasks::before_commit();
         let id = tasks::identity();
-        let channel = Box::into_raw(Box::new(Channel {
+        let channel = crate::task_heap::custody::RawStorage::into_guest(Box::new(Channel {
             holder: std::mem::MaybeUninit::uninit(),
             cursor: 0,
             id,
@@ -611,7 +611,7 @@ pub unsafe extern "C" fn hirsel_core_sender_drop(channel: *mut Channel) {
             );
             (*channel).closing_sender = false;
             if (*channel).receiver == Receiver::Gone {
-                drop(Box::from_raw(channel));
+                drop(crate::task_heap::custody::RawStorage::from_guest(channel));
             }
         }
     }
@@ -664,7 +664,7 @@ unsafe fn receiver_step(context: *mut Context, holder: *mut Holder, list: *mut W
         (*channel).head = 0;
         (*channel).receiver = Receiver::Gone;
         if (*channel).senders == 0 && !(*channel).closing_sender {
-            drop(Box::from_raw(channel));
+            drop(crate::task_heap::custody::RawStorage::from_guest(channel));
         }
         (*context).cancel_shield -= 1;
         true

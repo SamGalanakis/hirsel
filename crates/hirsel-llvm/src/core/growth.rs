@@ -85,6 +85,7 @@ impl FunctionEmitter<'_> {
             let probe_refused = Label::new("grow_probe_refused", n);
             let copied = Label::new("grow_copied", n);
             let refused_done = Label::new("grow_refused_done", n);
+            let eligible = self.inline_storage(eligible);
             self.likely(&eligible, admit, cold);
             self.block(admit);
             let available = self.load_native(&payer, LIMIT_AVAILABLE, Type::I64);

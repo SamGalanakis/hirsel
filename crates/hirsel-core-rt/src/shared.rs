@@ -113,7 +113,10 @@ pub unsafe extern "C" fn hirsel_core_shared_new(
             }
         };
         let unit = &mut *tasks::lang_unit();
-        let header = block.into_raw().as_ptr().cast::<Header>();
+        let header = block
+            .into_raw_with(charge, abandon)
+            .as_ptr()
+            .cast::<Header>();
         header.write(Header {
             home: Arc::into_raw(unit.ctx.port.clone()),
             owners: intern(rows),
@@ -136,6 +139,14 @@ pub unsafe extern "C" fn hirsel_core_shared_new(
         #[cfg(feature = "record")]
         crate::tape::units::shared_new(tasks::current_group(), node.addr(), &*cross);
         New { node, available: 0 }
+    }
+}
+
+/// After all Units leave, return the native port reference without entering guest code.
+unsafe fn abandon(base: NonNull<u8>, charge: u64) {
+    unsafe {
+        drop(Arc::from_raw((*base.cast::<Header>().as_ptr()).home));
+        block::free(base, charge);
     }
 }
 

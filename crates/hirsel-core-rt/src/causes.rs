@@ -105,6 +105,16 @@ unsafe fn drop_string(message: &StringMessage) {
     }
 }
 
+/// A heap-backed message moves out of the guest heap ledger with its cell.
+/// The cell keeps the original payer until the host releases the chain.
+unsafe fn take_message_storage(cause: &Cause) {
+    if let Some(message) = cause.message()
+        && message.capacity != 0
+    {
+        unsafe { crate::task_heap::Page::take_raw(std::ptr::NonNull::new_unchecked(message.data)) };
+    }
+}
+
 /// Prepaid cell (PACK-9.7):
 /// - offset `0..32`: public 32-byte [`Cause`]
 /// - offset `32..40`: next-cell pointer
@@ -585,6 +595,7 @@ pub unsafe fn record(context: &mut Context, mut cause: Cause) {
     // SAFETY: `raw` is exclusively owned, unused, and `site_owner`/`literal_owner`
     // are pinned by the active execution or already retained by `locate_literal`.
     unsafe {
+        take_message_storage(&cause);
         (*raw).cause = cause;
         Cell::install_owners(raw, site_owner, literal_owner, false, literal_retained);
     }
@@ -620,6 +631,7 @@ pub unsafe fn record_with_owners(
     let raw = cell.as_ptr();
     // SAFETY: `raw` is exclusively owned and unused; non-null owners are live.
     unsafe {
+        take_message_storage(&cause);
         (*raw).cause = cause;
         Cell::install_owners(raw, site_owner, literal_owner, false, false);
     }
@@ -739,7 +751,7 @@ pub unsafe fn resource_new(
     unsafe {
         block::set_resource(block.pointer(), Box::into_raw(state));
     }
-    Ok(block.into_raw())
+    Ok(block.into_raw_with(storage, resource_free))
 }
 
 /// # Safety

@@ -48,11 +48,13 @@ fn allocate_file_bytes(
         return Err(e).into();
     }
     if let Some(slot) = crate::host::file::allocate_buffer(context, head, bytes) {
+        unsafe { crate::task_heap::Page::own_raw(slot, charge, crate::block::free) };
         return Ok(slot).into();
     }
-    Ok(crate::block::allocate_admitted(
+    Ok(crate::block::allocate_guest(
         context,
         payer,
+        charge,
         bytes,
         4096,
         crate::block::PLAIN,

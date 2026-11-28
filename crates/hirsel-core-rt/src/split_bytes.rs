@@ -86,12 +86,15 @@ pub(crate) unsafe fn tail(
             unsafe { (*head.tail_payer.get()).write(payer) };
             head.owners.store(KEY | TAIL | CLAIMED, Ordering::Release);
             // SAFETY: the tail begins after the padded key and displacement word.
-            return Ok(unsafe { key.add(TAIL_OFFSET) });
+            let tail = unsafe { key.add(TAIL_OFFSET) };
+            unsafe { task_heap::Page::own_raw(tail, charge.unwrap(), block::free) };
+            return Ok(tail);
         }
     }
-    Ok(block::allocate_admitted(
+    Ok(block::allocate_guest(
         context,
         payer,
+        charge.unwrap(),
         bytes,
         8,
         block::PLAIN,
@@ -118,6 +121,7 @@ pub(crate) unsafe fn free(
     context: Option<&Context>,
 ) {
     // SAFETY: the range pins its displacement and the complete slot.
+    unsafe { page.as_ref().forget_raw(range) };
     let offset = unsafe { back(range) };
     // SAFETY: both ranges are inside the same slot, with the header before base.
     let base = unsafe { range.sub(offset) };

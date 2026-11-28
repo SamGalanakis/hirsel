@@ -131,9 +131,10 @@ pub unsafe extern "C" fn hirsel_core_data_decode(
         // Scratch keeps the admission refundable if the heap parks this task
         // for an extent and its generation ends before it receives the block.
         context.decode.as_mut().unwrap().scratch += charge;
-        let p = block::allocate_admitted(
+        let p = block::allocate_guest(
             context,
             payer,
+            charge,
             size,
             align,
             if graph { block::GRAPH } else { block::PLAIN },

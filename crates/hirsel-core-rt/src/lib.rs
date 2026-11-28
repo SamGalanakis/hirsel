@@ -163,6 +163,8 @@ pub struct Context {
     /// PACK-9.7: data owner for the current release's sites (`*const CauseData`,
     /// null for host/immortal sites), at the frozen offset CONTEXT_SITE_OWNER.
     pub site_owner: *const causes::CauseData,
+    // Contained allocations use the entry that carries their exact logical charge.
+    allocation_custody: u8,
     pub(crate) run: *const crate::process::Config,
     /// The limit `stack_limit` returns to when the cleanup margin is restored.
     pub(crate) stack_floor: usize,
@@ -225,6 +227,9 @@ const _: () = {
     assert!(std::mem::align_of::<Context>() == abi_layout::CONTEXT_LINE);
     assert!(std::mem::offset_of!(Context, map_strong_key) == abi_layout::CONTEXT_MAP_STRONG_KEY);
     assert!(std::mem::offset_of!(Context, site_owner) == abi_layout::CONTEXT_SITE_OWNER);
+    assert!(
+        std::mem::offset_of!(Context, allocation_custody) == abi_layout::CONTEXT_ALLOCATION_CUSTODY
+    );
 };
 
 impl Context {
@@ -290,6 +295,7 @@ impl Context {
             map_fast_salt,
             map_strong_key,
             site_owner: std::ptr::null(),
+            allocation_custody: u8::from(run_stop::is_contained()),
             cancel_requested: AtomicBool::new(false),
             owns_heap: true,
             cancel_shield: 0,

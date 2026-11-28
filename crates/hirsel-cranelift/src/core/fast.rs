@@ -108,7 +108,14 @@ impl Function<'_, '_, '_> {
         self.b.append_block_param(done, types::I64);
         let payer = self.current_limit();
         let overflow = overflow.unwrap_or_else(|| self.b.ins().iconst(types::I8, 0));
-        self.b.ins().brif(overflow, slow, &[], fast, &[]);
+        let custody = self.b.ins().load(
+            types::I8,
+            Flags::trusted(),
+            self.context,
+            memory_layout::CONTEXT_ALLOCATION_CUSTODY as i32,
+        );
+        let full_entry = self.b.ins().bor(overflow, custody);
+        self.b.ins().brif(full_entry, slow, &[], fast, &[]);
         self.b.switch_to_block(fast);
         let available = self.load_word(payer, memory_layout::LIMIT_AVAILABLE);
         // Wrapping charge-1 < available combines positive charge and room.

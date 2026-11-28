@@ -13,7 +13,20 @@ pub(crate) const GRANULE: usize = 4096;
 
 type PoolKey = (usize, usize);
 #[allow(clippy::vec_box)] // Keeping the box reuses the pinned ABI allocation.
-type Recycled = RefCell<Vec<Box<Region>>>;
+#[derive(Default)]
+struct Recycled {
+    free: RefCell<Vec<Box<Region>>>,
+    guest: RefCell<std::collections::HashSet<NonNull<Region>>>,
+}
+
+impl Drop for Recycled {
+    fn drop(&mut self) {
+        for region in self.guest.get_mut().drain() {
+            // SAFETY: these regions were opened by this task and never returned.
+            unsafe { drop(Box::from_raw(region.as_ptr())) };
+        }
+    }
+}
 
 /// Only the owning task opens or closes these non-send regions. A weak
 /// backreference lets the Rust API's region outlive its original context.
@@ -80,11 +93,35 @@ impl Region {
     pub fn open(context: &Context) -> Box<Self> {
         let cache = context.regions.0.get_or_init(Rc::default);
         let mut region = cache
+            .free
             .borrow_mut()
             .pop()
             .unwrap_or_else(|| Box::new(Self::new(Rc::downgrade(cache))));
         region.pools.clear();
         region
+    }
+
+    pub(crate) fn open_guest(context: &Context) -> *mut Self {
+        let region = Box::into_raw(Self::open(context));
+        if context.allocation_custody != 0 {
+            context
+                .regions
+                .0
+                .get()
+                .unwrap()
+                .guest
+                .borrow_mut()
+                .insert(NonNull::new(region).unwrap());
+        }
+        region
+    }
+
+    pub(crate) unsafe fn close_guest(region: *mut Self) {
+        let owned = unsafe { Box::from_raw(region) };
+        if let Some(cache) = owned.cache.upgrade() {
+            cache.guest.borrow_mut().remove(&NonNull::from(&*owned));
+        }
+        owned.close();
     }
 
     fn new(cache: Weak<Recycled>) -> Self {
@@ -340,14 +377,14 @@ impl Region {
             self.capacity = 0;
             self.reserved = 0;
             self.used_chunks = 0;
-            cache.borrow_mut().push(self);
+            cache.free.borrow_mut().push(self);
         }
     }
 }
 
 #[cfg(test)]
 pub(crate) fn cached_backing(context: &Context) -> (usize, usize) {
-    let cache = context.regions.0.get().unwrap().borrow();
+    let cache = context.regions.0.get().unwrap().free.borrow();
     let chunks = &cache.last().unwrap().chunks;
     (
         chunks.len(),

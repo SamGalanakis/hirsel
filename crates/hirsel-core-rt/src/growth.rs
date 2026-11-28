@@ -66,7 +66,10 @@ pub(crate) unsafe fn replace(
         && let Some(original) =
             unsafe { task_heap::try_reassign_plain_slab(old, payer, bytes, align) }
     {
-        unsafe { carrier.add(16).cast::<u64>().write(capacity) };
+        unsafe {
+            task_heap::Page::own_raw(old, charge, block::free);
+            carrier.add(16).cast::<u64>().write(capacity);
+        }
         original.settle_in(context, refund);
         return Ok(old);
     }
@@ -78,6 +81,7 @@ pub(crate) unsafe fn replace(
             old,
             payer,
             frame_payer,
+            charge,
             bytes,
             align,
             capacity,
@@ -99,6 +103,7 @@ unsafe fn replace_backing(
     old: NonNull<u8>,
     payer: Payer,
     frame_payer: Option<Payer>,
+    charge: u64,
     bytes: usize,
     align: usize,
     capacity: u64,
@@ -114,7 +119,10 @@ unsafe fn replace_backing(
             task_heap::try_grow_in_place(heap, old, payer, bytes, align, kind)
         }
     {
-        unsafe { carrier.add(16).cast::<u64>().write(capacity) };
+        unsafe {
+            task_heap::Page::own_raw(old, charge, block::free);
+            carrier.add(16).cast::<u64>().write(capacity);
+        }
         payer.settle_in(context, refund);
         return old;
     }
@@ -122,6 +130,7 @@ unsafe fn replace_backing(
     // SAFETY: the new slot is disjoint and large enough for the retained
     // elements. Install the carrier before publishing the old payer's refund.
     unsafe {
+        task_heap::Page::own_raw(replacement, charge, block::free);
         std::ptr::copy_nonoverlapping(old.as_ptr(), replacement.as_ptr(), moved);
         carrier.cast::<*mut u8>().write(replacement.as_ptr());
         carrier.add(16).cast::<u64>().write(capacity);

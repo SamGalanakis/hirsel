@@ -173,6 +173,11 @@ impl FunctionEmitter<'_> {
         let room = self.select(&Type::I64, &fits, &int(0), &available);
         (admitted, room)
     }
+    pub(super) fn inline_storage(&mut self, eligible: Value) -> Value {
+        let custody = self.load_native(&CONTEXT, CONTEXT_ALLOCATION_CUSTODY, Type::I8);
+        let local = self.cmp(Predicate::Eq, &Type::I8, &custody, &int(0));
+        self.bin(Binary::And, &Type::I1, &local, &eligible)
+    }
     pub(super) fn allocate_admitted(
         &mut self,
         payer: Value,
@@ -234,6 +239,7 @@ impl FunctionEmitter<'_> {
         };
         let admit = Label::new("admit", n);
         let slow_label = Label::new("allocation_slow", n);
+        let eligible = self.inline_storage(eligible);
         self.likely(&eligible, admit, slow_label);
         self.block(admit);
         let available = self.load_native(&payer, LIMIT_AVAILABLE, Type::I64);

@@ -83,7 +83,7 @@ unsafe impl Send for Launch {}
 // SAFETY: as above; both are read-only once set.
 unsafe impl Sync for Launch {}
 
-struct PinTable {
+pub(crate) struct PinTable {
     slots: Vec<Option<crate::code::CodePin>>,
     free: Vec<u32>,
 }
@@ -120,8 +120,10 @@ pub struct Execution {
     pub(crate) code_fault: crate::code::Record,
     /// Normal drops return their own slots. Abandoned pins stay here until
     /// the host drops the generation after joining its workers and closing admission.
-    pins: std::sync::Mutex<PinTable>,
+    pins: std::sync::OnceLock<Box<std::sync::Mutex<PinTable>>>,
     pool: std::sync::OnceLock<u64>,
+    pub(crate) raw_storage:
+        std::sync::OnceLock<std::sync::Arc<crate::task_heap::custody::RawStorage>>,
     pub(crate) guest_owners: crate::code::custody::GuestOwners,
 }
 
@@ -136,27 +138,35 @@ impl Execution {
             len: AtomicU8::new(0),
             bytes: [const { AtomicU8::new(0) }; MAX_STOP_BYTES],
             code_fault: crate::code::Record::new(),
-            pins: std::sync::Mutex::new(PinTable::new()),
+            pins: std::sync::OnceLock::new(),
             pool: std::sync::OnceLock::new(),
+            raw_storage: std::sync::OnceLock::new(),
             guest_owners: crate::code::custody::GuestOwners::new(),
         }
     }
 
-    pub(crate) fn register_pin(&self, pin: crate::code::CodePin) -> u32 {
-        let mut table = self.pins.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(slot) = table.free.pop() {
+    pub(crate) fn register_pin(
+        &self,
+        pin: crate::code::CodePin,
+    ) -> (*const std::sync::Mutex<PinTable>, u32) {
+        let pins = self
+            .pins
+            .get_or_init(|| Box::new(std::sync::Mutex::new(PinTable::new())));
+        let mut table = pins.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = if let Some(slot) = table.free.pop() {
             table.slots[slot as usize] = Some(pin);
             slot
         } else {
             let slot = u32::try_from(table.slots.len()).expect("pin table overflow");
             table.slots.push(Some(pin));
             slot
-        }
+        };
+        (&**pins, slot)
     }
 
-    pub(crate) fn unregister_pin(&self, slot: u32) {
+    pub(crate) fn unregister_pin(pins: &std::sync::Mutex<PinTable>, slot: u32) {
         let pin = {
-            let mut table = self.pins.lock().unwrap_or_else(|e| e.into_inner());
+            let mut table = pins.lock().unwrap_or_else(|e| e.into_inner());
             let idx = slot as usize;
             if idx >= table.slots.len() {
                 None
@@ -280,6 +290,9 @@ impl Execution {
 impl Drop for Execution {
     fn drop(&mut self) {
         if self.is_ended() {
+            if let Some(storage) = self.raw_storage.get() {
+                storage.reclaim();
+            }
             self.guest_owners.release_stopped();
         }
     }

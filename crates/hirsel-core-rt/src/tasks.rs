@@ -3419,7 +3419,7 @@ pub(crate) fn zero_block(context: &Context, bytes: usize) -> NonNull<u8> {
     // its free, of a block the observer never took, is no event.
     #[cfg(any(test, feature = "charge-observation"))]
     let stack_like = crate::peak::StackLike::hold();
-    let base = crate::block::allocate_admitted(context, payer, bytes, 8, crate::block::PLAIN);
+    let base = crate::block::allocate_guest(context, payer, 0, bytes, 8, crate::block::PLAIN);
     #[cfg(any(test, feature = "charge-observation"))]
     drop(stack_like);
     base

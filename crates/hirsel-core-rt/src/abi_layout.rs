@@ -105,6 +105,8 @@ pub const CONTEXT_MAP_STRONG_KEY: usize = 96;
 // PACK-9.7: current site owner (`*const CauseData`, null for host/immortal).
 // Outside the 64-byte hot cache line; changed layout bumps PACK-2 ABI revision.
 pub const CONTEXT_SITE_OWNER: usize = 128;
+/// Nonzero selects the charge-carrying allocator for contained execution.
+pub const CONTEXT_ALLOCATION_CUSTODY: usize = 136;
 // MEM-30: while a step bound is current the window at CONTEXT_STEPS holds at
 // most one slice; with none current it starts at 2^62. A larger word means no
 // bound is current.

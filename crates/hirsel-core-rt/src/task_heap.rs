@@ -8,6 +8,7 @@ mod dedicated;
 mod idle;
 mod page;
 pub(crate) use idle::{has_retaining, idle_wait, purge};
+pub(crate) mod custody;
 mod returns;
 pub(crate) mod slabs;
 
@@ -402,61 +403,12 @@ impl Page {
             slots.write(Self::slots(start, class));
         }
     }
-
-    unsafe fn destroy(page: PagePointer) {
-        // SAFETY: the caller owns the unreachable page.
-        unsafe { Self::destroy_with(page, false) };
-    }
-
-    unsafe fn dispose(page: PagePointer) {
-        // SAFETY: the caller owns the unreachable page.
-        unsafe { Self::destroy_with(page, true) };
-    }
-
-    unsafe fn destroy_with(page: PagePointer, dispose: bool) {
-        // SAFETY: no live slots or queues reference this page. Move its fields
-        // out before dropping the owner and unmapping the payload.
-        let page = unsafe {
-            let first = (*page.as_ref().slots.get()).first;
-            if first.addr().get() & (SLAB - 1) == 0 {
-                dedicated_index(first)
-                    .lock()
-                    .unwrap()
-                    .as_mut()
-                    .and_then(|index| index.remove(&first.addr().get()));
-                *Box::from_raw(page.as_ptr())
-            } else {
-                page.as_ptr().read()
-            }
-        };
-        if dispose {
-            match page.backing {
-                Backing::Slab(slab) => {
-                    if let Some(memory) = crate::units::memory() {
-                        memory.dispose_slab(slab);
-                    } else {
-                        slab.dispose();
-                    }
-                }
-                _ => unreachable!("only slabs are disposed here"),
-            }
-        } else if let Some(memory) = crate::units::memory() {
-            match page.backing {
-                Backing::Slab(slab) => memory.put_slab(slab),
-                Backing::Dedicated(mapping) => memory.put_page(mapping),
-                #[cfg(target_os = "linux")]
-                Backing::File(_) => (),
-            }
-        } else {
-            drop(page.backing);
-        }
-        drop(page.heap);
-    }
 }
 
 /// A serial dispatcher owns the local lists. Foreign workers may publish a
 /// page notification while its custodian runs, waits, or changes workers.
 pub(crate) struct Heap {
+    raw_storage: Option<std::sync::Weak<custody::RawStorage>>,
     shard: usize,
     returned: returns::Queue,
     // An idle worker can purge detached stock while the task runs.
@@ -469,6 +421,7 @@ pub(crate) struct Heap {
 impl Default for Heap {
     fn default() -> Self {
         Self {
+            raw_storage: custody::RawStorage::current(),
             shard: slabs::next_shard(),
             returned: returns::Queue::new(),
             cache: OnceLock::new(),
@@ -1224,7 +1177,9 @@ pub(crate) unsafe fn release_page(
     context: Option<&crate::Context>,
 ) {
     // SAFETY: the outstanding slot pins the page through publication.
-    let heap = unsafe { &page.as_ref().heap };
+    let header = unsafe { page.as_ref() };
+    header.forget_raw(payload);
+    let heap = &header.heap;
     crate::backing_observation::observe!(
         free,
         payload.as_ptr(),

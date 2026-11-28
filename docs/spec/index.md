@@ -194,6 +194,7 @@ archives, the `Foreign[I]` capability, the call ABI and its handles, and the `sq
 | packed, streamable | [MEM-12](memory.md#mem-12-region-sequences) |
 | pending result | [FAIL-9](failure.md#fail-9-pending-results) |
 | place, slot | [checker state](ownership.md#checker-state) |
+| Place, hosted program instance | [Place activation](launch.md#place-activation) |
 | provider | [CAP-5](capabilities.md#cap-5-provider-operations) |
 | punned field | [LANG-9](language.md#lang-9-nominal-types) |
 | recording, recording build | [CAP-9](capabilities.md#cap-9-recording-is-outside-the-program) |

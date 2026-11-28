@@ -11,7 +11,7 @@ mod read;
 mod rows;
 mod write;
 
-pub use read::{Malformed, Module};
+pub use read::{Descriptor, Malformed, Module};
 pub use rows::ROWS;
 
 #[cfg(test)]

@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
+mod descriptors;
 mod fixup;
 mod host;
 mod install;
@@ -232,14 +233,17 @@ impl Want<'_> {
 /// Native rows keep their PACK-2 offsets and validated identity order. Prelinked
 /// addresses already belong to the host image and use its static directory.
 enum ImageEntries {
-    Native(Box<[hirsel_mod::Entry]>),
+    Native {
+        entries: Box<[hirsel_mod::Entry]>,
+        descriptions: Box<[descriptors::Description]>,
+    },
     Prelinked(&'static [(ContentHash, ContentHash, usize)]),
 }
 
 impl Image {
     fn entry_index(&self, want: &Want<'_>) -> Option<usize> {
         match &self.entries {
-            ImageEntries::Native(entries) => {
+            ImageEntries::Native { entries, .. } => {
                 let index = entries
                     .binary_search_by_key(want.identity, |row| row.identity)
                     .ok()?;
@@ -253,7 +257,7 @@ impl Image {
 
     fn addresses(&self, index: usize) -> (usize, usize) {
         match &self.entries {
-            ImageEntries::Native(entries) => {
+            ImageEntries::Native { entries, .. } => {
                 let row = &entries[index];
                 let descriptor = if row.descriptor == hirsel_mod::NO_DESCRIPTOR {
                     0

@@ -152,6 +152,7 @@ impl Loader {
                 }
             });
         }
+        let descriptions = super::descriptors::directory(module)?;
         let aligns = (
             module.header.text_align as usize,
             module.header.data_align as usize,
@@ -239,7 +240,10 @@ impl Loader {
             data: d,
             bytes,
             cause_data,
-            entries: ImageEntries::Native(module.entries().collect()),
+            entries: ImageEntries::Native {
+                entries: module.entries().collect(),
+                descriptions,
+            },
             slots: AtomicU32::new(0),
             retired: AtomicBool::new(false),
             retire: Some(Box::new(Retire {

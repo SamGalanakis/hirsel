@@ -37,7 +37,10 @@ fn capped_worker_emits_the_selected_typed_exports() {
             .iter()
             .find(|row| row.identity == id)
             .expect("selected entry");
-        assert_ne!(row.descriptor, hirsel_mod::NO_DESCRIPTOR);
+        let descriptor = module.descriptor(row).unwrap().unwrap();
+        let source_identity = format!("\x01{}(take u64)->u64", name.replace("local/", "local%2F"));
+        assert_eq!(descriptor.identity, source_identity.as_bytes());
+        assert!(descriptor.revision.is_some());
     }
     let reversed = service
         .compile_exports(&request, &[names[1], names[0]])

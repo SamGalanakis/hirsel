@@ -7,6 +7,9 @@ use crate::{
 use hirsel_core_ids::ContentHash;
 use hirsel_core_layout::Target;
 
+mod descriptor;
+pub use descriptor::Descriptor;
+
 /// Why bytes are not a well-formed version 1 module.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Malformed {

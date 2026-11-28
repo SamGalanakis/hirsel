@@ -1,5 +1,5 @@
 import type {HttpReply} from './delivery.js';
-import {maxU64, type HttpRequest, type Lease, type Pending, type StreamRecord} from './persistence.js';
+import {maxU64, type HttpRequest, type Installation, type Lease, type Pending, type StreamRecord} from './persistence.js';
 import type {Done, Fault, Outcome, Refusal, Want} from './wire.js';
 
 // A caller waiting on one call. `deadlineAt` (client clock) bounds this call alone.
@@ -49,7 +49,7 @@ function copyRefusal(refusal: Refusal): Refusal {
 // The terminal stays owned by recovery state while the original outcome goes to the caller.
 function copyOutcome(outcome: Outcome<Uint8Array>): Outcome<Uint8Array> {
   switch (outcome.tag) {
-    case 'Returned': return {tag: 'Returned', value: outcome.value.slice()};
+    case 'Returned': return {tag: 'Returned', value: new Uint8Array(outcome.value)};
     case 'Failed': return {tag: 'Failed', value: copyFault(outcome.value)};
     case 'Refused': return {tag: 'Refused', value: copyRefusal(outcome.value)};
     case 'Abandoned': case 'InDoubt': case 'LocallyUnknown': case 'RequestMismatch':
@@ -57,10 +57,11 @@ function copyOutcome(outcome: Outcome<Uint8Array>): Outcome<Uint8Array> {
   }
 }
 // Stores one lane's answer: its terminal, the position it moves to, and whether the stream ends.
-export function settle(record: StreamRecord, {outcome, advance, retire}: Completion): void {
-  const pending = record.pending!;
-  record.terminal = {p: pending.p, outcome: copyOutcome(outcome)};
-  delete record.pending;
-  if (advance && pending.p !== maxU64) record.next = pending.p + 1n;
-  if (retire || (advance && pending.p === maxU64)) record.retired = true;
+export function settle(state: Installation, {lane, outcome, advance, retire}: Completion): void {
+  const {pending, ...record} = state.streams[lane.stream];
+  const {p} = pending!;
+  record.terminal = {p, outcome: copyOutcome(outcome)};
+  if (advance && p !== maxU64) record.next = p + 1n;
+  if (retire || (advance && p === maxU64)) record.retired = true;
+  state.streams[lane.stream] = record;
 }

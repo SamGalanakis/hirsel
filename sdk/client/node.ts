@@ -5,7 +5,7 @@ import {basename, join, resolve} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {
   applyPatch, copyInstallation, CorruptState, decodeState, encodePatch, encodeState,
-  type Installation, type Lease, type Storage,
+  replaceRecords, type Installation, type Lease, type Storage,
 } from './persistence.js';
 
 const magic = 0x48535731; // HSW1
@@ -68,9 +68,9 @@ export class NodeStorage implements Storage {
     }
   }
 
-  async read(): Promise<Installation | null> {
+  async read(records?: typeof replaceRecords): Promise<Installation | null> {
     const journal = await this.load();
-    return journal && copyInstallation(journal.state);
+    return journal && copyInstallation(journal.state, records);
   }
 
   private async load(): Promise<Journal | null> {
@@ -89,19 +89,19 @@ export class NodeStorage implements Storage {
   }
 
   // Writers hold the installation lease across a read/modify/write sequence.
-  async write(state: Installation): Promise<void> {
+  async write(state: Installation, records?: typeof replaceRecords): Promise<void> {
     const previous = await this.load().catch(error => {
       if (error instanceof CorruptState) return null;
       throw error;
     });
     if (!previous || previous.state.generation !== state.generation ||
         previous.state.installation !== state.installation || previous.state.version !== state.version) {
-      await this.checkpoint(state);
+      await this.checkpoint(state, records);
       return;
     }
     const frame = encodeFrame(encodePatch(previous.state, state));
     const journal = previous.records >= compactAfterRecords || previous.deltaBytes >= compactAfterBytes
-      ? await this.checkpoint(previous.state) : previous;
+      ? await this.checkpoint(previous.state, replaceRecords) : previous;
     // A process can die after renaming a checkpoint and before syncing its directory.
     // Publish that name before appending the first new mutation to a checkpoint we recovered.
     if (!journal.published) await this.syncDirectory();
@@ -111,14 +111,14 @@ export class NodeStorage implements Storage {
       await file.writeFile(frame);
       await file.sync();
       this.cached = {
-        state: copyInstallation(state), stamp: await file.stat({bigint: true}),
+        state: copyInstallation(state, records), stamp: await file.stat({bigint: true}),
         end: journal.end + frame.length, records: journal.records + 1,
         deltaBytes: journal.deltaBytes + frame.length, published: true,
       };
     } finally { await file.close(); }
   }
 
-  private async checkpoint(state: Installation): Promise<Journal> {
+  private async checkpoint(state: Installation, records?: typeof replaceRecords): Promise<Journal> {
     const frame = encodeFrame(encodeState(state));
     const temporary = join(this.directory, `.state-${process.pid}-${crypto.randomUUID()}`);
     const file = await open(temporary, 'wx', 0o600).catch(async error => {
@@ -134,7 +134,7 @@ export class NodeStorage implements Storage {
       await rename(temporary, this.walPath);
       await this.syncDirectory();
       return this.cached = {
-        state: copyInstallation(state), stamp: await file.stat({bigint: true}),
+        state: copyInstallation(state, records), stamp: await file.stat({bigint: true}),
         end: frame.length, records: 0, deltaBytes: 0, published: true,
       };
     } catch (error) {
@@ -165,13 +165,14 @@ function checksum(payload: Buffer): number {
 }
 
 function encodeFrame(text: string): Buffer {
-  const payload = Buffer.from(text);
-  const header = Buffer.allocUnsafe(headerBytes);
-  header.writeUInt32BE(magic, 0);
-  header.writeUInt32BE(payload.length, 4);
-  header.writeUInt32BE(~payload.length >>> 0, 8);
-  header.writeUInt32BE(checksum(payload), 12);
-  return Buffer.concat([header, payload]);
+  const length = Buffer.byteLength(text);
+  const frame = Buffer.allocUnsafe(headerBytes + length);
+  frame.write(text, headerBytes, length);
+  frame.writeUInt32BE(magic, 0);
+  frame.writeUInt32BE(length, 4);
+  frame.writeUInt32BE(~length >>> 0, 8);
+  frame.writeUInt32BE(checksum(frame.subarray(headerBytes)), 12);
+  return frame;
 }
 
 function replay(bytes: Buffer, stamp: BigIntStats): Journal {

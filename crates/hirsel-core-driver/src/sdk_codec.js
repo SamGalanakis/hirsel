@@ -25,20 +25,33 @@ class Reader {
   done() { if (this.at !== this.bytes.length) throw new Malformed('trailing bytes'); }
 }
 class Writer {
-  constructor() { this.parts = []; this.size = 0; this.inverted = false; }
+  constructor() {
+    this.bytes = new Uint8Array(64); this.view = new DataView(this.bytes.buffer);
+    this.size = 0; this.inverted = false;
+  }
+  reserve(n) {
+    const at = this.size, end = at + n;
+    if (end > this.bytes.length) {
+      const bytes = new Uint8Array(Math.max(end, this.bytes.length * 2));
+      bytes.set(this.bytes.subarray(0, at));
+      this.bytes = bytes; this.view = new DataView(bytes.buffer);
+    }
+    this.size = end;
+    return at;
+  }
   put(bytes) {
-    this.parts.push(this.inverted ? Uint8Array.from(bytes, byte => byte ^ 255) : bytes);
-    this.size += bytes.length;
+    const at = this.reserve(bytes.length);
+    if (!this.inverted) this.bytes.set(bytes, at);
+    else for (let i = 0; i < bytes.length; i++) this.bytes[at + i] = bytes[i] ^ 255;
   }
   count(n) {
     if (!Number.isInteger(n) || n < 0 || n > 0xffffffff) throw new RangeError('u32 count');
-    const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n, true); this.put(b);
+    const at = this.reserve(4);
+    this.view.setUint32(at, this.inverted ? ~n : n, true);
   }
-  byte(n) { this.put(Uint8Array.of(n)); }
+  byte(n) { const at = this.reserve(1); this.bytes[at] = this.inverted ? n ^ 255 : n; }
   finish() {
-    const out = new Uint8Array(this.size); let at = 0;
-    for (const part of this.parts) { out.set(part, at); at += part.length; }
-    return out;
+    return this.size === this.bytes.length ? this.bytes : this.bytes.slice(0, this.size);
   }
 }
 function numberInteger(width, min, max, get, set) {
@@ -60,9 +73,8 @@ function numberInteger(width, min, max, get, set) {
       if (width === 1) {
         w.byte(raw);
       } else {
-        const bytes = new Uint8Array(width);
-        set.call(new DataView(bytes.buffer), 0, raw, !key);
-        w.put(bytes);
+        const at = w.reserve(width);
+        set.call(w.view, at, w.inverted ? ~raw : raw, !key);
       }
     }
   };
@@ -77,9 +89,8 @@ function bigInteger(min, max, get) {
     write(value, w, key) {
       if (typeof value !== 'bigint') throw new TypeError('expected bigint');
       if (value < min || value > max) throw new RangeError('integer out of range');
-      const bytes = new Uint8Array(8);
-      new DataView(bytes.buffer).setBigUint64(0, key ? value ^ min : value, !key);
-      w.put(bytes);
+      const raw = key ? value ^ min : value, at = w.reserve(8);
+      w.view.setBigUint64(at, w.inverted ? ~raw : raw, !key);
     }
   };
 }
@@ -94,8 +105,11 @@ const integers = {
   9: numberInteger(4, -0x80000000, 0x7fffffff, dataView.getInt32, dataView.setUint32),
   10: bigInteger(-0x8000000000000000n, 0x7fffffffffffffffn, dataView.getBigInt64)
 };
-function readBytes(r, key) {
-  if (!key) { const n = r.count(); return r.bytes.slice(r.take(n), r.at); }
+function readBytes(r, key, borrow = false) {
+  if (!key) {
+    const n = r.count(), bytes = r.bytes.subarray(r.take(n), r.at);
+    return borrow ? bytes : new Uint8Array(bytes);
+  }
   const bytes = [];
   for (;;) {
     const b = r.byte();
@@ -184,7 +198,7 @@ function compileReader(root, definitions, key) {
       case 2: return readChar;
       case 11: return readF32;
       case 12: return readF64;
-      case 13: return r => decodeString(readBytes(r, key));
+      case 13: return r => decodeString(readBytes(r, key, true));
       case 14: {
         if (t[1][0] === 3) return r => readBytes(r, key);
         const item = compile(t[1]);
@@ -255,9 +269,11 @@ function write(t, defs, value, w, key) {
   }
   if (op === 11 || op === 12) {
     if (typeof value !== 'number') throw new TypeError('expected float');
-    const b = new Uint8Array(op === 11 ? 4 : 8), view = new DataView(b.buffer);
-    if (op === 11) { if (Number.isNaN(value)) view.setUint32(0,0x7fc00000,true); else view.setFloat32(0,value,true); }
-    else { if (Number.isNaN(value)) view.setBigUint64(0,0x7ff8000000000000n,true); else view.setFloat64(0,value,true); } w.put(b); return;
+    const at = w.reserve(op === 11 ? 4 : 8), view = w.view;
+    if (op === 11) { if (Number.isNaN(value)) view.setUint32(at,0x7fc00000,true); else view.setFloat32(at,value,true); }
+    else { if (Number.isNaN(value)) view.setBigUint64(at,0x7ff8000000000000n,true); else view.setFloat64(at,value,true); }
+    if (w.inverted) for (let i = at; i < w.size; i++) w.bytes[i] ^= 255;
+    return;
   }
   if (op === 13) { writeBytes(stringBytes(value),w,key); return; }
   if (op === 14) {
@@ -269,9 +285,11 @@ function write(t, defs, value, w, key) {
     if (!(value instanceof Map)) throw new TypeError('expected Map');
     const seen = new Set(); w.count(value.size);
     for (const [k,v] of value) {
-      const kw = new Writer(); write(t[1],defs,k,kw,key); const encoded = kw.finish(), identity = keyString(encoded);
+      const start = w.size;
+      write(t[1],defs,k,w,key);
+      const identity = keyString(w.bytes.subarray(start,w.size));
       if (seen.has(identity)) throw new TypeError('duplicate map key'); seen.add(identity);
-      w.put(encoded); write(t[2],defs,v,w,key);
+      write(t[2],defs,v,w,key);
     } return;
   }
   if (op === 16 || op === 17) {

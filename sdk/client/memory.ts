@@ -1,4 +1,4 @@
-import {copyInstallation, type Installation, type Lease, type Storage} from './persistence.js';
+import {copyInstallation, type replaceRecords, type Installation, type Lease, type Storage} from './persistence.js';
 
 interface LockCell { held: boolean; queue: Array<() => void> }
 
@@ -38,11 +38,11 @@ export class MemoryStorage implements Storage {
     };
   }
 
-  async read(): Promise<Installation | null> {
-    return this.installation === null ? null : copyInstallation(this.installation);
+  async read(records?: typeof replaceRecords): Promise<Installation | null> {
+    return this.installation === null ? null : copyInstallation(this.installation, records);
   }
 
-  async write(state: Installation): Promise<void> {
-    this.installation = copyInstallation(state, this.installation ?? undefined);
+  async write(state: Installation, records?: typeof replaceRecords): Promise<void> {
+    this.installation = copyInstallation(state, records);
   }
 }

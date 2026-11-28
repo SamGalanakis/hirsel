@@ -1,6 +1,6 @@
 import {defaultClock, listenForBrowserWake, type Clock, type Socket} from './browser.js';
 import {claimStream, CorruptState, leaseStreams, recover, sameCaller, emptyStream, fresh, hex, intact, maxU64, randomGeneration, streamHex, replaceStream,
-  streamLock, u64, validCaller, validHttpRequest, copyStreamRecord, type Caller, type HttpRequest, type Installation,
+  streamLock, u64, validCaller, validHttpRequest, replaceRecords, type Caller, type HttpRequest, type Installation,
   type Lease, type Storage, type StreamId, type StreamRecord} from './persistence.js';
 export {CorruptState, RECOVERY_VERSION, intact, validCaller, validHttpRequest} from './persistence.js';
 export type {Clock, Socket} from './browser.js';
@@ -53,7 +53,7 @@ const sameWant = (a: Want, b: Want) => equal(a.identity, b.identity) && a.args_f
 const kindOf = (options: Options, want: Want): EntryKind | undefined => options.kinds[options.wants.findIndex(w => sameWant(w, want))];
 const granted = (options: Options) => (want: Want) => kindOf(options, want) === 'granted';
 const lost = (options: Options) => () => options.onRecovered?.({tag: 'LocallyUnknown'});
-const copyWant = (w: Want): Want => ({identity: w.identity.slice(), args_fp: w.args_fp, result_fp: w.result_fp});
+const copyWant = (w: Want): Want => ({identity: new Uint8Array(w.identity), args_fp: w.args_fp, result_fp: w.result_fp});
 const futureSlackMs = 300000n;
 const credentialUsable = (state: State) => state === 'Ready' || state === 'Connecting' || state === 'Backoff';
 
@@ -103,7 +103,7 @@ export class Client implements Transport {
   private constructor(private options: Options, state: Installation, leased: ReadonlyArray<readonly [string, Lease]>) {
     this.generation = state.generation; this.installationId = state.installation;
     this.caller = state.streams[leased[0][0]].caller;
-    for (const [stream, lease] of leased) this.addLeased(stream, copyStreamRecord(state.streams[stream]), lease);
+    for (const [stream, lease] of leased) this.addLeased(stream, state.streams[stream], lease);
     this.wants = options.wants.map(copyWant);
     this.clock = options.clock ?? defaultClock;
     this.ready = new Promise((resolve, reject) => {this.readyResolve = resolve; this.readyReject = reject;});
@@ -129,7 +129,7 @@ export class Client implements Transport {
     const leased: Array<[string, Lease]> = [];
     try {
       let state: Installation | null, reset = false;
-      try { state = await options.storage.read(); }
+      try { state = await options.storage.read(replaceRecords); }
       catch (error) {
         if (!(error instanceof CorruptState)) throw error;
         state = null;
@@ -141,8 +141,8 @@ export class Client implements Transport {
       leased.push(...await leaseStreams(options.storage, state));
       if (leased.length === 0) throw new ClientError('StreamLeaseUnavailable');
       let changed = false;
-      for (const [n] of leased) changed = recover(state, state.streams[n], granted(options), lost(options)) || changed;
-      if (changed) await options.storage.write(state);
+      for (const [n] of leased) changed = recover(state, n, granted(options), lost(options)) || changed;
+      if (changed) await options.storage.write(state, replaceRecords);
       if (reset) options.onRecovered?.({tag: 'LocallyUnknown'});
       const client = new Client(options, state, leased);
       await lock.release();
@@ -189,10 +189,10 @@ export class Client implements Transport {
     }
     try {
       let state: Installation | null;
-      try { state = await this.options.storage.read(); }
+      try { state = await this.options.storage.read(replaceRecords); }
       catch (e) { if (!(e instanceof CorruptState)) throw e; state = null; }
       if (!state || !intact(state)) {
-        await this.options.storage.write(fresh(state?.installation));
+        await this.options.storage.write(fresh(state?.installation), replaceRecords);
         await this.stop('Fenced', 'LocallyUnknown'); return;
       }
       if (state.installation !== this.installationId || state.generation !== this.generation ||
@@ -336,18 +336,18 @@ export class Client implements Transport {
         const lanes = [...this.lanes.values()];
         if (previous) {
           // The new Caller owns none of these streams: retire them all and go on with one fresh stream.
-          for (const lane of lanes) state.streams[lane.stream].retired = true;
+          for (const {stream} of lanes) state.streams[stream] = {...state.streams[stream], retired: true};
           const [first, ...rest] = lanes, record = emptyStream(caller);
           await this.moveStream(first, state, 'pending-' + hex(randomGeneration(), 32), record, true);
           // Publish the committed stream even if the transport went away during the write.
           this.overlays.clear();
           for (const lane of lanes) if (lane.record.pending) this.finish(lane, {tag: 'LocallyUnknown'});
           for (const lane of rest) await this.dropLane(lane);
-          first.record = copyStreamRecord(record);
+          first.record = record;
         } else {
-          for (const lane of lanes) state.streams[lane.stream] = {...copyStreamRecord(lane.record), caller};
-          await this.options.storage.write(state);
-          for (const lane of lanes) lane.record = copyStreamRecord(state.streams[lane.stream]);
+          for (const lane of lanes) state.streams[lane.stream] = {...lane.record, caller};
+          await this.options.storage.write(state, replaceRecords);
+          for (const lane of lanes) lane.record = state.streams[lane.stream];
         }
         this.caller = caller;
       }}));
@@ -479,7 +479,7 @@ export class Client implements Transport {
         ? {tag: 'Returned', value: JSON.parse(new TextDecoder().decode(outcome.value)) as HttpReply} : outcome);
   }
   private queueCall(want: Want, args: Uint8Array, options?: CallOptions, http?: HttpRequest): Promise<Outcome<Uint8Array>> {
-    const copied = copyWant(want), arg = args.slice(), {optimistic, signal, deadlineMs} = options ?? {};
+    const copied = copyWant(want), arg = new Uint8Array(args), {optimistic, signal, deadlineMs} = options ?? {};
     if (signal?.aborted) return Promise.reject(signal.reason);
     // Shown on the calling tick when Ready; the queued step still decides whether the call is sent.
     let overlay = optimistic && this.state === 'Ready' && this.wants.some(w => sameWant(w, copied)) ? this.addOverlay(optimistic) : undefined;
@@ -584,19 +584,19 @@ export class Client implements Transport {
       const free = [...this.lanes.values()].filter(lane => !lane.record.pending && !lane.call), used: Lane[] = [];
       for (const call of take) {
         const lane = free.shift() ?? await this.addLane(state);
-        let record = state.streams[lane.stream];
-        if (record.id === undefined) {
+        const before = state.streams[lane.stream];
+        if (before.id === undefined) {
           const id = this.mint(this.keyedTime()), stream = streamHex(id);
-          record = {...record, id, minter: state.installation};
+          const record = {...before, id, minter: state.installation};
           record.pending = pendingFor(record, call, state.installation);
           claimed.push({lane, stream, lease: await claimStream(this.options.storage, state, lane.stream, stream, record, false)});
-        } else record.pending = pendingFor(record, call, state.installation);
+        } else state.streams[lane.stream] = {...before, pending: pendingFor(before, call, state.installation)};
         lane.call = call;
         used.push(lane);
       }
-      await this.options.storage.write(state);
+      await this.options.storage.write(state, replaceRecords);
       for (const {lane, stream, lease} of claimed.splice(0)) await this.swapLease(lane, stream, lease);
-      for (const lane of used) lane.record = copyStreamRecord(state.streams[lane.stream]);
+      for (const lane of used) lane.record = state.streams[lane.stream];
     } catch (error) {
       for (const {lease} of claimed) await lease.release();
       for (const call of take) {
@@ -614,8 +614,8 @@ export class Client implements Transport {
       if (ours.has(n) || record.retired || record.pending || !sameCaller(record.caller, this.caller)) continue;
       const lease = await this.options.storage.lock(streamLock(state, n), false);
       if (!lease) continue;
-      recover(state, record, granted(this.options), lost(this.options));
-      return this.addLeased(n, copyStreamRecord(record), lease);
+      recover(state, n, granted(this.options), lost(this.options));
+      return this.addLeased(n, state.streams[n], lease);
     }
     let stream: string;
     do { stream = 'pending-' + hex(randomGeneration(), 32); } while (Object.hasOwn(state.streams, stream));
@@ -639,22 +639,20 @@ export class Client implements Transport {
     const now = this.keyedTime(), wire = this.options.deadlineMs ?? 30000, margin = futureSlackMs + BigInt(wire) + 1n;
     for (const lane of lanes) {
       let record = state.streams[lane.stream];
-      const pending = record.pending!;
-      if (pending.inflight) pending.untouched = false;
       if (!record.sent && record.minter === state.installation &&
           now - record.id!.t > this.retention / 2n - margin) {
         const id = this.mint(now);
-        record = {...record, id, next: 0n};
-        pending.p = 0n;
+        record = {...record, id, next: 0n, pending: {...record.pending!, p: 0n}};
         await this.moveStream(lane, state, streamHex(id), record);
       }
-      record.sent = true;
-      pending.inflight = true;
-      if (!pending.http) pending.slot = this.wants.findIndex(w => sameWant(w, pending.want));
+      const pending = record.pending!;
+      const slot = pending.http ? pending.slot : this.wants.findIndex(w => sameWant(w, pending.want));
+      state.streams[lane.stream] = {...record, sent: true,
+        pending: {...pending, slot, inflight: true, untouched: pending.untouched && !pending.inflight}};
     }
-    await this.options.storage.write(state);
+    await this.options.storage.write(state, replaceRecords);
     for (const lane of lanes) {
-      const record = lane.record = copyStreamRecord(state.streams[lane.stream]), pending = record.pending!, id = record.id!;
+      const record = lane.record = state.streams[lane.stream], pending = record.pending!, id = record.id!;
       const delivery = pending.http ? {tag: 'Http', p: pending.p} as const : {tag: 'WebSocket'} as const;
       // Each send carries its own call's remaining time, so the place refuses or abandons it alone.
       const left = lane.call?.deadlineAt === undefined ? wire : Math.ceil(lane.call.deadlineAt - this.clock.now());
@@ -689,10 +687,11 @@ export class Client implements Transport {
   }
   private async edit(lane: Lane, fn: (record: StreamRecord) => void, state?: Installation): Promise<boolean> {
     const write = async (installation: Installation) => {
-      const record = installation.streams[lane.stream];
+      const record = {...installation.streams[lane.stream]};
       fn(record);
-      await this.options.storage.write(installation);
-      lane.record = copyStreamRecord(record);
+      installation.streams[lane.stream] = record;
+      await this.options.storage.write(installation, replaceRecords);
+      lane.record = record;
       return true;
     };
     return state ? write(state) : !!await this.installation(write);
@@ -720,12 +719,13 @@ export class Client implements Transport {
     await this.installation(async state => {
       const granted = lost.filter(lane => this.granted(lane));
       for (const lane of lost) {
-        const record = state.streams[lane.stream];
+        const record = {...state.streams[lane.stream]};
         if (granted.includes(lane)) delete record.pending;
-        else Object.assign(record.pending!, {inflight: false, untouched: false});
+        else record.pending = {...record.pending!, inflight: false, untouched: false};
+        state.streams[lane.stream] = record;
       }
-      await this.options.storage.write(state);
-      for (const lane of lost) lane.record = copyStreamRecord(state.streams[lane.stream]);
+      await this.options.storage.write(state, replaceRecords);
+      for (const lane of lost) lane.record = state.streams[lane.stream];
       for (const lane of granted) this.finish(lane, {tag: 'LocallyUnknown'});
     });
   }
@@ -739,7 +739,7 @@ export class Client implements Transport {
         pending: {...pending, p: 0n, inflight: false, remintsLeft: 0},
       };
       await this.moveStream(lane, state, streamHex(id), record);
-      lane.record = copyStreamRecord(record);
+      lane.record = record;
       await this.run({tag: 'CallFinished', epoch: this.phase.epoch, lane: lane.id});
     });
   }
@@ -753,7 +753,7 @@ export class Client implements Transport {
       case 'CredentialLost':
         // Nothing was recorded, so the call stays pending, not in flight, for the same Caller
         // after a fresh credential binds.
-        await this.edit(lane, record => { record.pending!.inflight = false; });
+        await this.edit(lane, record => { record.pending = {...record.pending!, inflight: false}; });
         await this.run({tag: 'Resume', epoch, run: () => this.run({tag: 'CredentialLost', cause: 'HTTP 401'})});
         return;
       case 'Committed': {
@@ -772,7 +772,7 @@ export class Client implements Transport {
   // `proven`: the place answered that this delivery was not run, so the call stays untouched.
   private async retryPending(lane: Lane, proven: boolean, epoch = this.phase.epoch): Promise<void> {
     if (!proven) await this.noteLost([lane]);
-    else await this.edit(lane, record => { record.pending!.inflight = false; });
+    else await this.edit(lane, record => { record.pending = {...record.pending!, inflight: false}; });
     if (!lane.record.pending) return;
     await this.run({tag: 'RetryCall', epoch, lane: lane.id});
     if (lane.call && expired(lane.call, this.clock.now())) await this.drop(lane.call, {});
@@ -780,10 +780,10 @@ export class Client implements Transport {
   // Settles many lanes' answers in one storage write.
   private async completeCalls(done: readonly Completion[]): Promise<void> {
     await this.installation(async state => {
-      for (const completion of done) settle(state.streams[completion.lane.stream], completion);
-      await this.options.storage.write(state);
+      for (const completion of done) settle(state, completion);
+      await this.options.storage.write(state, replaceRecords);
       for (const {lane, outcome, http} of done) {
-        lane.record = copyStreamRecord(state.streams[lane.stream]);
+        lane.record = state.streams[lane.stream];
         if (http && !lane.call && this.options.onHttpRecovered) {
           await this.run({tag: 'CallFinished', epoch: this.phase.epoch, lane: lane.id});
           this.options.onHttpRecovered(http);
@@ -886,7 +886,7 @@ export class Client implements Transport {
   private async retire(lane: Lane, outcome: 'LocallyUnknown'): Promise<void> {
     if (!await this.edit(lane, record => {
       record.retired = true;
-      if (record.pending) Object.assign(record.pending, {inflight: false, untouched: false});
+      if (record.pending) record.pending = {...record.pending, inflight: false, untouched: false};
     })) return;
     this.finish(lane, {tag: outcome});
     await this.dropLane(lane);
@@ -900,7 +900,7 @@ export class Client implements Transport {
   // `lane` sent the mismatching request: its call learns why, and every other call is unknown.
   private async fence(outcome: 'LocallyUnknown' | 'RequestMismatch', lane?: Lane, epoch = this.phase.epoch): Promise<void> {
     await this.installation(state => this.run({tag: 'Resume', epoch, run: async () => {
-      await this.options.storage.write(fresh(state.installation));
+      await this.options.storage.write(fresh(state.installation), replaceRecords);
       if (lane?.record.pending && outcome === 'RequestMismatch') {
         this.finish(lane, {tag: outcome});
         delete lane.record.pending;

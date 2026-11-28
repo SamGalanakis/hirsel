@@ -110,7 +110,7 @@ try {
     onDiagnostic: message => diagnostics.push(message),
   });
   await raw.whenReady();
-  const input = new Uint8Array([7]);
+  const input = Buffer.from([7]);
   const result = raw.call(want[0], input, bytes => bytes);
   input[0] = 99;
   const outcome = await result;
@@ -134,12 +134,12 @@ try {
   let committed: Installation | null = null;
   const failing: Storage = {
     lock: (name, wait) => inner.lock(name, wait),
-    read: () => inner.read(),
-    write: async state => {
-      if (!armed) return inner.write(state);
+    read: records => inner.read(records),
+    write: async (state, records) => {
+      if (!armed) return inner.write(state, records);
       writes++;
       if (writes === 2) throw new Error('abort write');
-      await inner.write(state);
+      await inner.write(state, records);
       if (writes === 1) committed = await inner.read();
     },
   };

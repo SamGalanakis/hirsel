@@ -18,51 +18,35 @@ export interface Installation {
   directory: string[]; streams: Record<string, StreamRecord>;
 }
 export interface Lease { release(): Promise<void>; lost: Promise<void> }
+// The client replaces stream records before editing them. Built-in storage can share
+// those records between its committed snapshot and the client's working state.
+export const replaceRecords = Symbol('replaceRecords');
 // The installation shell, directory, stream records and pending records are mutable working
 // state between read and write. Nested caller, want, args, http, stream id and terminal outcome
 // values are immutable once stored.
 // Hold the installation lease across a read/modify/write sequence.
 export interface Storage {
   lock(name: string, wait: boolean): Promise<Lease | null>;
-  read(): Promise<Installation | null>;
-  write(state: Installation): Promise<void>;
+  read(records?: typeof replaceRecords): Promise<Installation | null>;
+  write(state: Installation, records?: typeof replaceRecords): Promise<void>;
 }
 
-// Copies the mutable installation, stream-record and pending shells. When replacing a previous
-// in-memory commit, unchanged records and directories keep the previous commit's copies: the input
-// shell is still distinct, so later caller mutation cannot reach stored state, but untouched streams
-// cost no fresh copy.
-export function copyInstallation(state: Installation, previous?: Installation): Installation {
-  const streams: Installation['streams'] = {};
-  let reuseStreams = previous !== undefined && Object.keys(previous.streams).length === Object.keys(state.streams).length;
-  for (const [name, record] of Object.entries(state.streams)) {
-    const before = previous?.streams[name];
-    const copy = before && sameRecord(record, before) ? before : copyStreamRecord(record);
-    streams[name] = copy;
-    if (before !== copy) reuseStreams = false;
+export function copyInstallation(state: Installation, records?: typeof replaceRecords): Installation {
+  const streams = {...state.streams};
+  if (records !== replaceRecords) {
+    for (const name of Object.keys(streams)) {
+      const record = streams[name];
+      streams[name] = {...record};
+      if (record.pending) streams[name].pending = {...record.pending};
+    }
   }
-  const directory = previous && sameDirectory(state.directory, previous.directory) ? previous.directory : state.directory.slice();
-  const copy: Installation = {...state, directory, streams: reuseStreams && previous ? previous.streams : streams};
-  return previous && sameFields(copy, previous) ? previous : copy;
-}
-function sameRecord(a: StreamRecord, b: StreamRecord): boolean {
-  return sameFields(a, b, 'pending') && (a.pending === b.pending || (!!a.pending && !!b.pending && sameFields(a.pending, b.pending)));
-}
-function sameDirectory(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && a.every((name, i) => name === b[i]);
+  return {...state, directory: state.directory.slice(), streams};
 }
 
 export const fresh = (installation = randomGeneration()): Installation => ({
   version: RECOVERY_VERSION, installation, generation: randomGeneration(), directory: [], streams: {},
 });
 export const emptyStream = (caller: Caller | null = null): StreamRecord => ({caller, next: 0n, retired: false, minter: null, sent: false});
-// Copies the mutable record and pending shells. Nested caller, want, args, http, stream id and
-// terminal outcome values are immutable once stored, so they move by reference.
-export function copyStreamRecord(record: StreamRecord): StreamRecord {
-  const copy: StreamRecord = {...record};
-  if (record.pending) copy.pending = {...record.pending};
-  return copy;
-}
 export const maxU64 = 0xffffffffffffffffn;
 export const hex = (value: bigint, width: number) => value.toString(16).padStart(width, '0');
 export const streamHex = (id: StreamId) => hex(id.t, 16) + hex(id.n, 16);
@@ -151,6 +135,7 @@ interface StatePatch {
 }
 
 function sameFields<T extends object>(before: T, after: T, nested?: keyof T): boolean {
+  if (before === after) return true;
   const keys = Object.keys(before) as Array<keyof T>;
   return keys.length === Object.keys(after).length
     && keys.every(key => Object.hasOwn(after, key) && (key === nested || before[key] === after[key]));
@@ -246,7 +231,7 @@ export async function claimStream(storage: Storage, state: Installation, previou
 export async function replaceStream(storage: Storage, state: Installation, previous: string,
   stream: string, record: StreamRecord, keepOld: boolean): Promise<Lease> {
   const lease = await claimStream(storage, state, previous, stream, record, keepOld);
-  try { await storage.write(state); }
+  try { await storage.write(state, replaceRecords); }
   catch (error) {
     await lease.release();
     throw error;
@@ -280,7 +265,7 @@ export async function leaseStreams(storage: Storage, state: Installation): Promi
       leased.push([stream, lease]);
       state.directory.push(stream);
       state.streams[stream] = emptyStream();
-      await storage.write(state);
+      await storage.write(state, replaceRecords);
     }
     return leased;
   } catch (error) {
@@ -292,19 +277,19 @@ export async function leaseStreams(storage: Storage, state: Installation): Promi
 // nothing is stored for it, so an attempt that may have been delivered is reported LocallyUnknown
 // (`onLost`) and never re-sent; any other such attempt is resent
 // under its key but is no longer untouched. A stream minted by another installation is imported.
-export function recover(state: Installation, record: StreamRecord, granted: (want: Want) => boolean, onLost: () => void): boolean {
-  const imported = record.id !== undefined && record.minter !== state.installation;
-  if (!record.pending?.inflight && !imported) return false;
-  if (record.pending?.inflight && !record.pending.http && granted(record.pending.want)) {
+export function recover(state: Installation, stream: string, granted: (want: Want) => boolean, onLost: () => void): boolean {
+  const before = state.streams[stream], pending = before.pending;
+  const imported = before.id !== undefined && before.minter !== state.installation;
+  if (!pending?.inflight && !imported) return false;
+  const record = {...before};
+  if (pending?.inflight && !pending.http && granted(pending.want)) {
     delete record.pending;
     onLost();
-  } else if (record.pending) {
-    record.pending.inflight = false;
-    record.pending.untouched = false;
-  }
+  } else if (pending) record.pending = {...pending, inflight: false, untouched: false};
   if (imported) {
     record.minter = null;
     record.sent = true;
   }
+  state.streams[stream] = record;
   return true;
 }

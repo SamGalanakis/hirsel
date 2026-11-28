@@ -170,9 +170,8 @@ b3:
         verify(&source.replace("(v1, v4, v3)", "(v3, v4, v3)")),
         Err(wf::Error::Invalid(_))
     ));
-    // Even a locally initialized length word at offset eight cannot attest to
-    // the live capacity of a collection. Keep both the charge and test tied to
-    // that very same read to exercise the provenance requirement.
+    // A count read from memory bounds the loop only through the charge that
+    // names that very read: the debit pays for whatever the read returned.
     let loaded = source
         .replace("sig g0", "type t0 = own \"sample@1/count/Header\" { word: u64, capacity: u64 }\nsig g0")
         .replace("  addr a0", "  slot s0 = t0\n  addr a0")
@@ -180,11 +179,127 @@ b3:
         .replace("  v3: u64 = const 0", "  live s0\n  v10: u64 = const 8\n  address a1\n  store a1, v1\n  v11: u64 = read a1\n  v3: u64 = const 0")
         .replace("(v1, v4, v3)", "(v11, v4, v3)")
         .replace("lt v6, v1", "lt v6, v11");
-    let fixture = load("locally read capacity", &loaded);
+    let fixture = load("locally read count", &loaded);
     wf::specialized_module(&fixture).unwrap();
-    assert!(
-        matches!(wf::metering_strict_with_budget(&fixture, &decode::Debit::unlimited()), Err(wf::Error::Invalid(ref why)) if why.contains("cycle"))
-    );
+    wf::metering_strict_with_budget(&fixture, &decode::Debit::unlimited()).unwrap();
+    for (forged, why) in [
+        // The same word, read again after the charge, can hold anything.
+        (
+            loaded
+                .replace(
+                    "  jump b1(v3)",
+                    "  store a1, v4\n  v12: u64 = read a1\n  jump b1(v3)",
+                )
+                .replace("lt v6, v11", "lt v6, v12"),
+            "re-read",
+        ),
+        // Paying for the value stored does not pay for the value read back.
+        (loaded.replace("(v11, v4, v3)", "(v1, v4, v3)"), "stored"),
+    ] {
+        let fixture = load(why, &forged);
+        wf::specialized_module(&fixture).unwrap();
+        assert!(
+            matches!(wf::metering_strict_with_budget(&fixture, &decode::Debit::unlimited()), Err(wf::Error::Invalid(ref e)) if e.contains("cycle")),
+            "{why}"
+        );
+    }
+}
+
+#[test]
+fn aggregate_repeat_pays_for_the_logical_size_of_each_copied_element() {
+    let source = r#"core v1
+type t0 = own "sample@1/count/Pair" { x: u64, y: u64 }
+type t1 = own "sample@1/count/Pairs" { items: array 513 t0 }
+sig g0 = (ptr, ptr) -> ()
+sig g1 = (u64, u64, u64) -> ()
+inst n0 = sample@1/count/fill [] []
+fn f0 = n0 g0 {
+  addr a0 = v0 : t1
+  addr a1 = a0 field 0 element v7 : t0
+  addr a2 = v1 : t0
+b0(v0: ptr, v1: ptr):
+  address a0
+  v2: u64 = const 8208
+  v3: u64 = const 12
+  v4: u64 = const 0
+  call rt.work_steps g1 (v2, v3, v4)
+  v5: u64 = const 513
+  v6: u64 = const 1
+  jump b1(v4)
+b1(v7: u64):
+  v8: bool = lt v7, v5
+  branch v8, b2, b3
+b2:
+  address a1
+  address a2
+  v9: u64 = held_size t0
+  copy a1, a2, v9
+  v10: u64 = wrapping_add v7, v6
+  jump b1(v10)
+b3:
+  return
+}
+"#;
+    let strict = |s: &str| {
+        let module = load("aggregate repeat", s);
+        wf::specialized_module(&module).unwrap();
+        wf::metering_strict_with_budget(&module, &decode::Debit::unlimited())
+    };
+    strict(source).unwrap();
+    // 513 pairs of 16 logical bytes; one element short of the debit.
+    assert!(matches!(
+        strict(&source.replace("8208", "8192")),
+        Err(wf::Error::Invalid(_))
+    ));
+}
+
+#[test]
+fn a_dynamic_fill_is_paid_by_a_saturating_charge_on_its_count() {
+    let source = r#"core v1
+type t0 = own "sample@1/count/Pair" { x: u64, y: u64 }
+sig g0 = (ptr, ptr, u64) -> ()
+sig g1 = (u64, u64, u64) -> ()
+inst n0 = sample@1/count/fill [] []
+fn f0 = n0 g0 {
+  addr a0 = v0 byte v10 : t0
+  addr a1 = v1 : t0
+b0(v0: ptr, v1: ptr, v2: u64):
+  v3: u64 = const 16
+  v4: u64 = saturating_mul v2, v3
+  v5: u64 = const 12
+  v6: u64 = const 0
+  call rt.work_steps g1 (v4, v5, v6)
+  v7: u64 = const 1
+  jump b1(v6)
+b1(v8: u64):
+  v9: bool = lt v8, v2
+  branch v9, b2, b3
+b2:
+  v10: u64 = wrapping_mul v8, v3
+  address a0
+  address a1
+  v11: u64 = held_size t0
+  copy a0, a1, v11
+  v12: u64 = wrapping_add v8, v7
+  jump b1(v12)
+b3:
+  return
+}
+"#;
+    let strict = |s: &str| {
+        let module = load("dynamic fill", s);
+        wf::specialized_module(&module).unwrap();
+        wf::metering_strict_with_budget(&module, &decode::Debit::unlimited())
+    };
+    strict(source).unwrap();
+    for forged in [
+        // 2^60 pairs wrap a 16-byte product to a zero charge.
+        source.replace("saturating_mul v2, v3", "wrapping_mul v2, v3"),
+        // A charge for 16 bytes per element does not pay for 32-byte elements.
+        source.replace("{ x: u64, y: u64 }", "{ x: u64, y: u64, z: u64, w: u64 }"),
+    ] {
+        assert!(matches!(strict(&forged), Err(wf::Error::Invalid(_))));
+    }
 }
 
 #[test]

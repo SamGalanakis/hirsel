@@ -1,14 +1,48 @@
 //! A successful COPY charge is single-use. Follow unique normal predecessors
 //! backwards from the operation. A join, failure transfer, or intervening
-//! consumer loses the proof. Equal byte counts may share an SSA value or the
-//! same wrapping product (the native clear uses that product as its length).
+//! consumer loses the proof. A charge covers an operation when both name the
+//! same SSA count: a saturating product covers the wrapping product the
+//! native clear uses as its length, and the exact element count a repeat
+//! writes; a wrapping product covers neither past a unit stride.
 use super::*;
 use hirsel_core_ids::work_steps::{Work, table};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum Bytes {
     Fixed(u64),
-    Value(ValueId, u64),
+    /// `count * stride` wrapped to u64, the bytes a single operation touches.
+    Wrap(ValueId, u64),
+    /// `count * stride` saturated to u64.
+    Sat(ValueId, u64),
+    /// The mathematical `count * stride` a counted repeat writes.
+    Exact(ValueId, u64),
+}
+
+impl Bytes {
+    fn count(self) -> Option<ValueId> {
+        match self {
+            Self::Fixed(_) => None,
+            Self::Wrap(v, _) | Self::Sat(v, _) | Self::Exact(v, _) => Some(v),
+        }
+    }
+
+    /// Whether a charge of `self` pays for `need`. A saturated charge is at
+    /// least the exact product and the wrapped one; one stride makes all
+    /// three the count itself.
+    pub(super) fn covers(self, need: Self) -> bool {
+        match (self, need) {
+            (Self::Fixed(a), Self::Fixed(b)) => a == b,
+            (
+                Self::Wrap(v, k) | Self::Sat(v, k) | Self::Exact(v, k),
+                Self::Wrap(w, j) | Self::Sat(w, j) | Self::Exact(w, j),
+            ) if v == w && k == j => {
+                k == 1
+                    || self == need
+                    || matches!(self, Self::Sat(..)) && !matches!(need, Self::Sat(..))
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -87,6 +121,10 @@ impl<'a> Facts<'a> {
         self.incoming[block].count
     }
 
+    pub(super) fn definition(&self, v: ValueId) -> Option<&'a Inst> {
+        self.definitions[v.index()]
+    }
+
     pub(super) fn constant(&self, v: ValueId) -> Option<u64> {
         match self.definitions[v.index()] {
             Some(Inst::Const { bits, .. }) => Some(*bits),
@@ -100,19 +138,22 @@ impl<'a> Facts<'a> {
         }
         if let Some(Inst::IntArith {
             op: ArithOp::Mul,
-            mode: ArithMode::Wrapping,
+            mode: mode @ (ArithMode::Wrapping | ArithMode::Saturating),
             left,
             right,
             ..
         }) = self.definitions[v.index()]
             && let Some(stride) = self.constant(*right)
         {
-            if let Some(n) = self.constant(*left) {
-                return Bytes::Fixed(n.wrapping_mul(stride));
-            }
-            return Bytes::Value(*left, stride);
+            let saturating = *mode == ArithMode::Saturating;
+            return match (self.constant(*left), saturating) {
+                (Some(n), false) => Bytes::Fixed(n.wrapping_mul(stride)),
+                (Some(n), true) => Bytes::Fixed(n.saturating_mul(stride)),
+                (None, false) => Bytes::Wrap(*left, stride),
+                (None, true) => Bytes::Sat(*left, stride),
+            };
         }
-        Bytes::Value(v, 1)
+        Bytes::Wrap(v, 1)
     }
 
     pub(super) fn positive_work(&self, b: &Body, call: &CallSite) -> bool {
@@ -126,9 +167,12 @@ impl<'a> Facts<'a> {
         mut bi: usize,
         mut before: usize,
         needed: Bytes,
+        after: Option<ValueId>,
         work: Work,
         budget: &Debit<'_>,
     ) -> Result<bool, Error> {
+        // `after`, when given, must be defined between the charge and the use.
+        let mut defined = after.is_none();
         // The length's defining activation must survive from the charge to use.
         // A repeated block on a unique-predecessor chain has no other entry.
         for _ in 0..=b.blocks.len() {
@@ -145,7 +189,8 @@ impl<'a> Facts<'a> {
                         return Ok(false);
                     };
                     return Ok(call.callee == Callee::Runtime(RtOp::WorkSteps)
-                        && self.bytes(*units) == needed
+                        && defined
+                        && self.bytes(*units).covers(needed)
                         && self.constant(*shift) == Some(u64::from(work.shift))
                         && self.constant(*weight) == Some(work.weight));
                 }
@@ -162,7 +207,8 @@ impl<'a> Facts<'a> {
                 ) {
                     return Ok(false);
                 }
-                if let Bytes::Value(n, _) = needed {
+                defined |= matches!(row, Inst::IntArith { result, .. } if Some(*result) == after);
+                if let Some(n) = needed.count() {
                     if matches!(row,
                         Inst::Const{result,..} | Inst::Binary{result,..} | Inst::IntArith{result,..}
                         | Inst::Compare{result,..} | Inst::Read{result,..} | Inst::Pointer{result,..}
@@ -173,7 +219,7 @@ impl<'a> Facts<'a> {
                     }
                 }
             }
-            if let Bytes::Value(n, _) = needed {
+            if let Some(n) = needed.count() {
                 for param in block.params.get(&b.pools.values).unwrap_or_default() {
                     budget.check()?;
                     if *param == n {
@@ -193,7 +239,8 @@ impl<'a> Facts<'a> {
     pub(super) fn check_operations(
         &self,
         b: &Body,
-        policy: Policy,
+        checks: Checks,
+        paid: &[bool],
         budget: &Debit<'_>,
     ) -> Result<(), Error> {
         for (bi, block) in b.blocks.iter().enumerate() {
@@ -209,20 +256,18 @@ impl<'a> Facts<'a> {
                 let (needed, work) = match *row {
                     Inst::Call { call } => {
                         let Some(requirement) =
-                            self.runtime_charge(b, &b.calls[call.index()], policy)?
+                            self.runtime_charge(b, &b.calls[call.index()], checks)?
                         else {
                             continue;
                         };
                         requirement
                     }
-                    Inst::Copy { bytes, .. } | Inst::Move { bytes, .. }
-                        if policy == Policy::Strict =>
-                    {
+                    // A paid repeat's charge covers the element its latch copies.
+                    Inst::Copy { .. } if paid[bi] => continue,
+                    Inst::Copy { bytes, .. } | Inst::Move { bytes, .. } if checks.copies => {
                         (self.bytes(bytes), table::COPY)
                     }
-                    Inst::Alloc { size, .. } | Inst::Grow { size, .. }
-                        if policy == Policy::Strict =>
-                    {
+                    Inst::Alloc { size, .. } | Inst::Grow { size, .. } if checks.allocations => {
                         (self.bytes(size), table::COPY)
                     }
                     _ => continue,
@@ -237,7 +282,7 @@ impl<'a> Facts<'a> {
                 if needed == Bytes::Fixed(0) {
                     continue;
                 }
-                if !self.prepaid(b, bi, k, needed, work, budget)? {
+                if !self.prepaid(b, bi, k, needed, None, work, budget)? {
                     return Err(Error::Invalid(format!(
                         "b{bi}: bulk operation lacks matching MEM-30 precharge"
                     )));
@@ -251,12 +296,18 @@ impl<'a> Facts<'a> {
         &self,
         body: &Body,
         call: &CallSite,
-        policy: Policy,
+        checks: Checks,
     ) -> Result<Option<(Bytes, Work)>, Error> {
         let Callee::Runtime(op) = call.callee else {
             return Ok(None);
         };
-        if op != RtOp::ZeroBytes && policy == Policy::Admission {
+        let enabled = match op {
+            RtOp::ZeroBytes => checks.zero_bytes,
+            RtOp::CompareBytes => checks.comparisons,
+            RtOp::Xxh3Short => checks.short_hashes,
+            _ => checks.kernels,
+        };
+        if !enabled {
             return Ok(None);
         }
         let args = call.args.get(&body.pools.args).unwrap_or_default();

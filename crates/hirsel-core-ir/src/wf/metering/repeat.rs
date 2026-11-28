@@ -1,11 +1,47 @@
 use super::*;
+use bulk::Bytes;
+use hirsel_core_layout::RecipeRow;
 
-// A scalar repeat has one entry from the paying block, a counted test and a
-// straight-line latch. Only the proved latch edge can be omitted. Every other
-// incoming edge, including a failure edge, invalidates this proof.
+/// The module's type layouts, computed on the first latch that copies a
+/// declared element and charged to the module-wide scratch that holds them.
+pub(super) struct Layouts<'s, 'b> {
+    scratch: &'s Debit<'b>,
+    rows: Option<Vec<RecipeRow>>,
+}
+
+impl<'s, 'b> Layouts<'s, 'b> {
+    pub(super) fn new(scratch: &'s Debit<'b>) -> Self {
+        Self {
+            scratch,
+            rows: None,
+        }
+    }
+
+    /// The logical (MEM-24) size the frontend charges per element of `t`;
+    /// none for a compact layout, which no fixed charge covers.
+    fn logical(&mut self, m: &Module, t: TypeId) -> Result<Option<u64>, Error> {
+        let rows = match &mut self.rows {
+            Some(rows) => rows,
+            None => self
+                .rows
+                .insert(crate::wf::own_names::layouts(m, self.scratch)?),
+        };
+        Ok(hirsel_core_layout::charge::held(
+            m.types[t.index()].repr,
+            &rows[t.index()],
+        ))
+    }
+}
+
+// A counted repeat has one entry from the paying block, a `<` test and a
+// straight-line latch that stores or copies one element. Only the proved latch
+// edge can be omitted. Every other incoming edge, including a failure edge,
+// invalidates this proof.
 pub(super) fn paid_repeats(
+    m: &Module,
     body: &Body,
     facts: &bulk::Facts<'_>,
+    layouts: &mut Layouts<'_, '_>,
     budget: &Debit<'_>,
 ) -> Result<Vec<bool>, Error> {
     let mut paid = Vec::new();
@@ -14,7 +50,15 @@ pub(super) fn paid_repeats(
     for (bi, term) in body.terminators.iter().enumerate() {
         budget.check()?;
         if let Terminator::Jump(edge) = term
-            && let Some(latch) = repeat(body, facts, bi, &body.edges[edge.index()], budget)?
+            && let Some(latch) = repeat(
+                m,
+                body,
+                facts,
+                layouts,
+                bi,
+                &body.edges[edge.index()],
+                budget,
+            )?
         {
             paid[latch] = true;
         }
@@ -22,9 +66,118 @@ pub(super) fn paid_repeats(
     Ok(paid)
 }
 
-fn repeat(
+/// The longest latch the frontend emits for one element: its offset, two
+/// addresses, the element's size, the write and the increment, with room for
+/// the constants it materializes.
+const MAX_LATCH: usize = 8;
+
+/// The one element a latch writes, and whether it is the array element store
+/// the active rule requires to be paid.
+struct Unit {
+    bytes: u64,
+    array_store: bool,
+}
+
+fn unit(
+    m: &Module,
     body: &Body,
     facts: &bulk::Facts<'_>,
+    layouts: &mut Layouts<'_, '_>,
+    rows: &[Inst],
+    index: ValueId,
+    next: ValueId,
+    budget: &Debit<'_>,
+) -> Result<Option<Unit>, Error> {
+    let steps = |a: AddressId| {
+        body.addresses[a.index()]
+            .steps
+            .get(&body.pools.steps)
+            .unwrap_or_default()
+    };
+    // Each paid unit covers one iteration of a short latch, so the work per
+    // charged byte stays within a constant factor of a bulk copy's.
+    if rows.len() > MAX_LATCH {
+        return Ok(None);
+    }
+    let mut found = None;
+    let mut increment = false;
+    for row in rows {
+        budget.check()?;
+        let write = match *row {
+            Inst::Store { address, .. } => match body.addresses[address.index()].ty {
+                PlaceTy::Value(Ty::Scalar(s)) => Some(Unit {
+                    bytes: s.size(),
+                    array_store: matches!(steps(address),
+                            [Step::Field(0), Step::Element(v)] if *v == index),
+                }),
+                _ => return Ok(None),
+            },
+            // One element's bytes, sized by the copied place's own type.
+            Inst::Copy { to, bytes, .. } => {
+                match (body.addresses[to.index()].ty, facts.definition(bytes)) {
+                    (
+                        PlaceTy::Declared(t),
+                        Some(Inst::LayoutConst {
+                            query: LayoutQuery::HeldSize(held),
+                            ..
+                        }),
+                    ) if *held == t => match layouts.logical(m, t)? {
+                        Some(bytes) => Some(Unit {
+                            bytes,
+                            array_store: false,
+                        }),
+                        None => return Ok(None),
+                    },
+                    _ => return Ok(None),
+                }
+            }
+            Inst::Binary {
+                result,
+                op: BinaryOp::Add,
+                left,
+                right,
+                ..
+            }
+            | Inst::IntArith {
+                result,
+                op: ArithOp::Add,
+                mode: ArithMode::Wrapping,
+                left,
+                right,
+                ..
+            } if result == next => {
+                if left != index || facts.constant(right) != Some(1) {
+                    return Ok(None);
+                }
+                increment = true;
+                None
+            }
+            // The element's address: its byte offset, a constant or a size.
+            Inst::IntArith {
+                op: ArithOp::Mul,
+                mode: ArithMode::Wrapping,
+                left,
+                ..
+            } if left == index => None,
+            Inst::Const { .. } | Inst::Address { .. } | Inst::LayoutConst { .. } => None,
+            _ => return Ok(None),
+        };
+        if let Some(write) = write {
+            if found.is_some() {
+                return Ok(None);
+            }
+            found = Some(write);
+        }
+    }
+    // A zero-sized element pays nothing, so it cannot bound the iterations.
+    Ok(found.filter(|u| increment && u.bytes > 0))
+}
+
+fn repeat(
+    m: &Module,
+    body: &Body,
+    facts: &bulk::Facts<'_>,
+    layouts: &mut Layouts<'_, '_>,
     pre: usize,
     entry: &Edge,
     budget: &Debit<'_>,
@@ -71,107 +224,63 @@ fn repeat(
     {
         return Ok(None);
     }
-    if facts.constant(*initial) != Some(0) {
-        return Ok(None);
-    }
     let Terminator::Jump(back) = body.terminators[latch] else {
         return Ok(None);
     };
     let back = &body.edges[back.index()];
-    let (address, next, increment, scalar_repeat) = match instructions(latch) {
-        [
-            Inst::Address { address, .. },
-            Inst::Store { address: dest, .. },
-            Inst::Binary {
-                result: next,
-                op: BinaryOp::Add,
-                left,
-                right,
-                ..
-            }
-            | Inst::IntArith {
-                result: next,
-                op: ArithOp::Add,
-                mode: ArithMode::Wrapping,
-                left,
-                right,
-                ..
-            },
-        ] if address == dest
-            && left == index
-            && matches!(body.addresses[address.index()].steps.get(&body.pools.steps),Some([Step::Field(0),Step::Element(v)]) if v == index) =>
-        {
-            (*address, *next, *right, true)
-        }
-        [
-            Inst::IntArith {
-                result: offset,
-                op: ArithOp::Mul,
-                mode: ArithMode::Wrapping,
-                left: pos,
-                right: stride,
-                ..
-            },
-            Inst::Address { address, .. },
-            Inst::Store { address: dest, .. },
-            Inst::IntArith {
-                result: next,
-                op: ArithOp::Add,
-                mode: ArithMode::Wrapping,
-                left,
-                right,
-                ..
-            },
-        ] if address == dest
-            && pos == index
-            && left == index
-            && matches!(body.addresses[address.index()].steps.get(&body.pools.steps), Some([Step::Byte(v)]) if v==offset)
-            && matches!(body.addresses[address.index()].ty,PlaceTy::Value(Ty::Scalar(s)) if facts.constant(*stride)==Some(s.size())) =>
-        {
-            (*address, *next, *right, false)
-        }
-        _ => return Ok(None),
-    };
-    let PlaceTy::Value(Ty::Scalar(s)) = body.addresses[address.index()].ty else {
+    let [next] = back.args.get(&body.pools.values).unwrap_or_default() else {
         return Ok(None);
     };
-    if facts.constant(increment) != Some(1)
-        || back.target.index() != head
-        || back.args.get(&body.pools.values) != Some(std::slice::from_ref(&next))
-    {
+    if back.target.index() != head {
         return Ok(None);
     }
-    let needed = if let Some(n) = facts.constant(*bound) {
-        let Some(bytes) = n.checked_mul(s.size()) else {
-            return Ok(None);
-        };
-        bulk::Bytes::Fixed(bytes)
-    } else {
-        // One byte per item makes the required count exact even at u64::MAX.
-        // Only entry SSA parameters are eligible; an untyped capacity read is
-        // never evidence of funded storage.
-        if scalar_repeat || s.size() != 1 {
-            return Ok(None);
-        }
-        let mut parameter = false;
-        for v in params(0) {
-            budget.check()?;
-            parameter |= v == bound;
-        }
-        if !parameter {
-            return Ok(None);
-        }
-        bulk::Bytes::Value(*bound, 1)
+    let Some(unit) = unit(
+        m,
+        body,
+        facts,
+        layouts,
+        instructions(latch),
+        *index,
+        *next,
+        budget,
+    )?
+    else {
+        return Ok(None);
+    };
+    // The trip count: `bound` from zero, or `count` from `initial` to
+    // `initial + count` (a wrapped end runs no iteration). An unknown count is
+    // an SSA value; the charge must name that same value with nothing
+    // redefining it in between, so no memory read stands in for the charge.
+    let (needed, after) = match (facts.definition(*bound), facts.constant(*initial)) {
+        (
+            Some(Inst::IntArith {
+                op: ArithOp::Add,
+                mode: ArithMode::Wrapping,
+                left,
+                right: count,
+                ..
+            }),
+            _,
+        ) if left == initial => (Bytes::Exact(*count, unit.bytes), Some(*bound)),
+        (_, Some(0)) => match facts.constant(*bound) {
+            Some(n) => match n.checked_mul(unit.bytes) {
+                Some(bytes) => (Bytes::Fixed(bytes), None),
+                None => return Ok(None),
+            },
+            None => (Bytes::Exact(*bound, unit.bytes), None),
+        },
+        _ => return Ok(None),
     };
     if !facts.prepaid(
         body,
         pre,
         instructions(pre).len(),
         needed,
+        after,
         hirsel_core_ids::work_steps::table::COPY,
         budget,
     )? {
-        if scalar_repeat {
+        if unit.array_store && matches!(needed, Bytes::Fixed(_)) {
             return Err(Error::Invalid(format!(
                 "b{head}: scalar repeat lacks matching MEM-30 precharge"
             )));

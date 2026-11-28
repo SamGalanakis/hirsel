@@ -12,7 +12,7 @@ use crate::*;
 mod available;
 mod descriptor;
 mod frame;
-mod metering;
+pub mod metering;
 mod own;
 mod own_flow;
 mod own_names;

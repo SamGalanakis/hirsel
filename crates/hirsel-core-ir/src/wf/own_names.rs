@@ -466,7 +466,10 @@ fn spans(m: &Module, b: &Body, scratch: &Debit<'_>) -> Result<Vec<Span>, Error> 
 }
 
 /// The module's type layouts, charged to `scratch`.
-fn layouts(m: &Module, scratch: &Debit<'_>) -> Result<Vec<hirsel_core_layout::RecipeRow>, Error> {
+pub(in crate::wf) fn layouts(
+    m: &Module,
+    scratch: &Debit<'_>,
+) -> Result<Vec<hirsel_core_layout::RecipeRow>, Error> {
     hirsel_core_layout::compute_budgeted(&m.types, |bytes| scratch.charge_bytes(bytes)).map_err(
         |err| match err {
             hirsel_core_layout::ComputeError::Budget(e) => Error::from(e),

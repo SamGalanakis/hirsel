@@ -6,10 +6,75 @@ mod bulk;
 mod repeat;
 mod scopes;
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub(super) enum Policy {
-    Admission,
-    Strict,
+/// How far the cycle law looks between successful charges.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub enum Cycles {
+    Off,
+    /// Cycles whose blocks hold only scalar arithmetic, comparisons,
+    /// conversions and markers; any other instruction ends the scan.
+    Scalar,
+    /// Cycles inside the module through any instruction kind, following
+    /// direct calls to local bodies.
+    Local,
+    /// `Local`, plus re-entry through opaque calls, drops and runtime calls.
+    Reentrant,
+}
+
+/// The metering laws, each switchable alone so admission can enforce exactly
+/// the ones the closed products satisfy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Checks {
+    pub cycles: Cycles,
+    /// `rt.zero_bytes` follows a matching COPY precharge.
+    pub zero_bytes: bool,
+    /// Explicit `copy` and `move` follow a matching COPY precharge.
+    pub copies: bool,
+    /// `alloc` and `grow` follow a matching COPY precharge; growth moves none.
+    pub allocations: bool,
+    /// `rt.compare_bytes` follows a precharge of both operand sizes.
+    pub comparisons: bool,
+    /// CRC, SHA block and XXH3 stripe kernels follow their table precharge.
+    pub kernels: bool,
+    /// `rt.xxh3_short` has a constant length within its short range.
+    pub short_hashes: bool,
+    /// Local step scopes balance on every success and failure transfer.
+    pub scopes: bool,
+}
+
+impl Checks {
+    /// The laws release admission enforces.
+    pub const ADMISSION: Self = Self {
+        cycles: Cycles::Scalar,
+        zero_bytes: true,
+        copies: false,
+        allocations: false,
+        comparisons: false,
+        kernels: false,
+        short_hashes: false,
+        scopes: false,
+    };
+    /// Every law.
+    pub const STRICT: Self = Self {
+        cycles: Cycles::Reentrant,
+        zero_bytes: true,
+        copies: true,
+        allocations: true,
+        comparisons: true,
+        kernels: true,
+        short_hashes: true,
+        scopes: true,
+    };
+    /// No law; enable fields one at a time.
+    pub const NONE: Self = Self {
+        cycles: Cycles::Off,
+        zero_bytes: false,
+        copies: false,
+        allocations: false,
+        comparisons: false,
+        kernels: false,
+        short_hashes: false,
+        scopes: false,
+    };
 }
 
 pub fn module(m: &Module) -> R {
@@ -18,14 +83,22 @@ pub fn module(m: &Module) -> R {
 
 /// Verify canonical CoreIR with the metering laws active at admission.
 pub fn metering_with_budget(m: &Module, budget: &Debit<'_>) -> Result<(), Error> {
-    structural(m, budget)?;
-    check(m, budget, Policy::Admission)
+    metering_checks_with_budget(m, budget, Checks::ADMISSION)
 }
 
 /// Verify canonical CoreIR, refusing cycles whose bound cannot be proved locally.
 pub fn metering_strict_with_budget(m: &Module, budget: &Debit<'_>) -> Result<(), Error> {
+    metering_checks_with_budget(m, budget, Checks::STRICT)
+}
+
+/// Verify canonical CoreIR with the chosen metering laws.
+pub fn metering_checks_with_budget(
+    m: &Module,
+    budget: &Debit<'_>,
+    checks: Checks,
+) -> Result<(), Error> {
     structural(m, budget)?;
-    check(m, budget, Policy::Strict)
+    check(m, budget, checks)
 }
 
 /// Recheck a compiler-transformed body after its canonical module was verified.
@@ -33,7 +106,7 @@ pub fn specialized_module(m: &Module) -> R {
     structural(m, &Debit::unlimited()).map_err(|e| e.to_string())
 }
 
-fn check(module: &Module, budget: &Debit<'_>, policy: Policy) -> Result<(), Error> {
+fn check(module: &Module, budget: &Debit<'_>, checks: Checks) -> Result<(), Error> {
     let scratch = budget.scratch();
     let mut entries = Vec::new();
     scratch.reserve(&mut entries, module.functions.len())?;
@@ -63,15 +136,20 @@ fn check(module: &Module, budget: &Debit<'_>, policy: Policy) -> Result<(), Erro
         incoming[to] += 1;
         Ok(())
     };
+    let reentrant = checks.cycles == Cycles::Reentrant;
+    let mut layouts = repeat::Layouts::new(&scratch);
     for (fi, function) in module.functions.iter().enumerate() {
         let Some(body) = &function.body else { continue };
         let local = scratch.scratch();
-        if policy == Policy::Strict {
+        if checks.scopes {
             scopes::check(body, &local)?;
         }
         let facts = bulk::Facts::new(body, &local)?;
-        facts.check_operations(body, policy, &local)?;
-        let paid = repeat::paid_repeats(body, &facts, &local)?;
+        let paid = repeat::paid_repeats(module, body, &facts, &mut layouts, &local)?;
+        facts.check_operations(body, checks, &paid, &local)?;
+        if checks.cycles == Cycles::Off {
+            continue;
+        }
         let entry = entries[fi];
         connect(external, entry)?;
         'blocks: for (bi, block) in body.blocks.iter().enumerate() {
@@ -94,7 +172,7 @@ fn check(module: &Module, budget: &Debit<'_>, policy: Policy) -> Result<(), Erro
                             connect(node, entries[f.index()])?;
                         }
                         Callee::Direct(_) | Callee::Indirect(_) | Callee::PackExport(_) => {
-                            if policy == Policy::Strict {
+                            if reentrant {
                                 connect(node, external)?;
                             }
                         }
@@ -114,18 +192,18 @@ fn check(module: &Module, budget: &Debit<'_>, policy: Policy) -> Result<(), Erro
                             | RtOp::Xxh3Stripes
                             | RtOp::Xxh3Short,
                         ) => {}
-                        Callee::Runtime(_) if policy == Policy::Strict => connect(node, external)?,
+                        Callee::Runtime(_) if reentrant => connect(node, external)?,
                         Callee::Runtime(_) => {}
                     },
-                    Inst::Drop { .. } | Inst::Release { .. } if policy == Policy::Strict => {
+                    Inst::Drop { .. } | Inst::Release { .. } if reentrant => {
                         connect(node, external)?
                     }
                     _ => {}
                 }
-                // The active rule rejects a cycle only when every traversed
+                // The scalar rule rejects a cycle only when every traversed
                 // instruction is known to do no metered work. Open calls and
-                // storage operations still need the strict proof.
-                if policy == Policy::Admission
+                // storage operations still need the wider proof.
+                if checks.cycles == Cycles::Scalar
                     && !matches!(
                         inst,
                         Inst::Const { .. }
@@ -169,6 +247,9 @@ fn check(module: &Module, budget: &Debit<'_>, policy: Policy) -> Result<(), Erro
             }
         }
     }
+    if checks.cycles == Cycles::Off {
+        return Ok(());
+    }
     let mut pending = Vec::new();
     scratch.reserve(&mut pending, size)?;
     for (i, &n) in incoming.iter().enumerate() {
@@ -189,12 +270,19 @@ fn check(module: &Module, budget: &Debit<'_>, policy: Policy) -> Result<(), Erro
             }
         }
     }
-    if removed != size {
-        return Err(Error::Invalid(
-            "control-flow or call cycle without a metering charge".into(),
-        ));
+    if removed == size {
+        return Ok(());
     }
-    Ok(())
+    // Name the first body block left in the graph: it lies on a cycle or
+    // downstream of one.
+    let left = incoming.iter().position(|&n| n != 0).unwrap_or(external);
+    let at = entries
+        .iter()
+        .rposition(|&e| e <= left && left < external)
+        .map_or_else(String::new, |f| format!("f{f} b{}: ", left - entries[f]));
+    Err(Error::Invalid(format!(
+        "{at}control-flow or call cycle without a metering charge"
+    )))
 }
 
 #[cfg(test)]
@@ -212,12 +300,12 @@ mod tests {
             depth: usize::MAX,
             deadline: None,
         });
-        for policy in [Policy::Admission, Policy::Strict] {
+        for checks in [Checks::ADMISSION, Checks::STRICT] {
             assert_eq!(
-                check(&module, &budget.debit(), policy),
+                check(&module, &budget.debit(), checks),
                 Err(Error::Limit(DecodeLimit::Bytes))
             );
-            check(&module, &Debit::unlimited(), policy).unwrap();
+            check(&module, &Debit::unlimited(), checks).unwrap();
         }
     }
 }

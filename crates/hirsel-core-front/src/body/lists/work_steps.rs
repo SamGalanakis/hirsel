@@ -35,7 +35,9 @@ impl Cx<'_, '_, '_> {
 
     /// `charge_work` for the bytes of `count` elements of `item`, each counted
     /// at its logical size (MEM-24), so every engine charges the same count
-    /// whatever layout it holds. `count` elements are a live range's.
+    /// whatever layout it holds. `count` elements are a live range's. The
+    /// product saturates, so an element loop the verifier bounds by `count`
+    /// is never charged a wrapped remainder.
     pub(in crate::body) fn charge_elements(
         &mut self,
         work: Work,
@@ -44,7 +46,7 @@ impl Cx<'_, '_, '_> {
         n: NodeId,
     ) -> Option<()> {
         let size = self.layout_size(item, true, n)?;
-        let (units, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, count, size, n);
+        let (units, _) = self.list_arith(ArithOp::Mul, ArithMode::Saturating, count, size, n);
         self.charge_work(work, units, n)
     }
 }

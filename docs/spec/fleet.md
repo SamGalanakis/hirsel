@@ -425,8 +425,10 @@ incoming handshakes. Live handles expire after 30 seconds of suspend-inclusive t
 Worker-to-worker RPC admission also requires current controller observations for both
 members, which expire after 30 seconds. Each failed dial waits at least 250 milliseconds
 before retry. Application RPCs carry a caller nonce and up to 1,024 bytes on a QUIC
-datagram. Delivery can be lost or reordered. Callers own reply correlation and any retry
-appropriate to the operation.
+datagram. A link's 192 KiB send budget admits a burst of 64 maximum-size RPCs into an
+empty queue. When a datagram's charge exceeds the remaining budget, the call returns
+`Transport(Limit)` without queuing it. Delivery can be lost or reordered. Callers own
+reply correlation and any retry appropriate to the operation.
 
 ## FLT-7: Proof-Ready Protocol Kernel contract (`K1`–`K13`)
 

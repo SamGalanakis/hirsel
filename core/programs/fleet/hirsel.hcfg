@@ -48,6 +48,13 @@ pkg_v1.Package(
         runs: [
             ("hirsel.ai/fleet@1/laws/sim_fleet_scale_1000_hosts", TestRun(limit: Some(536870912))),
             ("hirsel.ai/fleet@1/laws/sim_sm1_trace_export_ndjson_and_itf", TestRun(grant_change: Some(ReplaceNonDir([Stdout])))),
+            ("hirsel.ai/fleet@1/laws/fleet_expired_udp_polls_keep_draining", TestRun(
+                grant_change: Some(ReplaceNonDir([
+                    Clock,
+                    Net(UdpBind(cidr: "127.0.0.0/8", first_port: 0, last_port: 65535)),
+                    Net(UdpSend(cidr: "127.0.0.0/8", first_port: 0, last_port: 65535)),
+                ])),
+            )),
             ("hirsel.ai/fleet@1/laws/fleet_three_host_quic", TestRun(
                 grant_change: Some(ReplaceNonDir([
                     Clock,

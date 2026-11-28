@@ -3,8 +3,7 @@
 type TestHost {
     hub: roster.HostLinks,
     socket: UdpSocket,
-    incoming: List[roster.Incoming],
-    rounds: u64
+    incoming: List[roster.Incoming]
 }
 
 fn cluster_key(random: Random) -> quic.handshake.Identity {
@@ -34,21 +33,11 @@ fn bind_host(network: Net, ip: u32) -> (UdpSocket, Addr) waits {
 
 fn test_host(clock: Clock, random: Random, node: u64, incarnation: u64, take key: quic.handshake.Identity, take sock: UdpSocket, take initial: roster.Roster) -> TestHost {
     let hub = result.unwrap(roster.open_links(clock, random, node, incarnation, 0, take key, take initial))
-    TestHost(hub: take hub, socket: take sock, incoming: list.new(), rounds: 0)
+    TestHost(hub: take hub, socket: take sock, incoming: list.new())
 }
 
-// Most rounds poll without waiting. Every 16th round waits a short real interval:
-// a receive whose deadline has already passed returns before the host poller's
-// next turn, and only that turn refills the UDP receive budget (NET-16), so a
-// loop made only of expired receives stops reading after 256 KiB.
 fn tick(mut h: TestHost, clock: Clock) waits {
-    h.rounds += 1
-    let wait = if h.rounds % 16 == 0 {
-        20000u64
-    } else {
-        0u64
-    }
-    result.unwrap(roster.drive(mut h.hub, mut h.socket, clock, host.mono_ns(clock) + wait, mut h.incoming))
+    result.unwrap(roster.drive(mut h.hub, mut h.socket, clock, host.mono_ns(clock), mut h.incoming))
 }
 
 type DirectoryFixture {
@@ -150,6 +139,54 @@ fn timed_value(out: Stdout, key: String, ns: u64) waits {
     string.push_u64(mut s, ns)
     string.push(mut s, "\n")
     result.unwrap(stdout.write(out, s))
+}
+
+/// bug: Repeated expired receives never get another turn after spending the UDP capture budget.
+/// oracle: NET-16 delivers each queued datagram once, even when no receive waits for network readiness.
+@test
+fn fleet_expired_udp_polls_keep_draining(network: Net, clock: Clock) -> Result[(), ()] waits {
+    let (take s, _) = bind_host(network, 0x7f000001)
+    let (take r, addr) = bind_host(network, 0x7f000002)
+    let mut sender = take s
+    let mut receiver = take r
+    let mut data: Bytes = list.with_capacity(1024)
+    list.fill(mut data, 1024, 0u8)
+    let mut tx: List[UdpTx] = list.with_capacity(1)
+    list.push(mut tx, UdpTx(to: addr, at: 0, len: 1024, ecn: 0))
+    let mut received: Bytes = list.with_capacity(1024)
+    let mut packets: List[UdpPacket] = list.with_capacity(1)
+    for i in 0u64 .. 1024 {
+        data[0] = int.narrow(i % 256)
+        if result.unwrap(host.udp_send(mut sender, data, tx, Never)) != 1 {
+            fail("loopback datagram did not commit")
+        }
+        let start = host.mono_ns(clock)
+        while true {
+            match host.udp_recv(mut receiver, mut received, mut packets, At(clock, 0)) {
+                Ok(1) => break,
+                Error(TimedOut) => check_time(clock, start, "expired receives stopped draining loopback"),
+                _ => fail("unexpected expired receive result"),
+            }
+        }
+        if list.compare_bytes(data, received) != Equal {
+            fail("expired receive changed, duplicated or reordered a datagram")
+        }
+        list.clear(mut received)
+        list.clear(mut packets)
+    }
+    Ok(())
+}
+
+// Model one caller queuing 64 creates in its next IO round. Each RPC uses the full
+// FLT-6 payload allowance, so smaller encoded create requests fit as well.
+fn queue_create_burst(mut hub: roster.HostLinks) {
+    let mut data: Bytes = list.with_capacity(1024)
+    list.fill(mut data, 1024, 42u8)
+    for i in 0u64 .. 64 {
+        if let Error(_) = roster.rpc(mut hub, 0, i, clone(data)) {
+            fail("a 64-create burst exceeded the Fleet link send queue")
+        }
+    }
 }
 
 /// bug: Accept peer-declared node identity, stale incarnation or a revoked QUIC handle, or distribute different membership and directory views across live nodes.
@@ -281,6 +318,7 @@ fn fleet_three_host_quic(network: Net, clock: Clock, random: Random, out: Stdout
     let durable = result.unwrap(roster.load(db, cell))
     list.clear(mut original)
     result.unwrap(std.codec.encode(co, durable, mut original))
+    queue_create_burst(mut c.hub)
     result.unwrap(roster.shutdown(mut c.hub, mut c.socket, clock))
     let stopping = host.mono_ns(clock)
     while roster.connected(root.hub, 2) {

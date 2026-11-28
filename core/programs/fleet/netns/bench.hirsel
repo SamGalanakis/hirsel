@@ -8,7 +8,6 @@
 // the slot and answers. The workload ends at once: the worker retires the slot,
 // mints its next credit and offers it to the desk. No user program is launched.
 //
-// A datagram the bounded send queue refuses waits in the sender's outbox.
 // Datagrams may still be lost. Demand is a versioned level, grants are numbered and
 // acknowledged by the next demand, creates repeat until answered, and offers
 // repeat until redeemed. Every repeat is idempotent in the compute kernels.
@@ -36,43 +35,11 @@ const BENCH_SESSION: compute.worker.Session = compute.worker.Session(caller: 1, 
 /// `BenchCreated(exchange, result)`, `BenchStop`.
 type BenchWire: codec + send = BenchAssume(u64, u64, u64) | BenchOffer(compute.protocol.Offer[u64, u64]) | BenchWant(compute.desk.Ask, u64) | BenchGrant(u64, compute.protocol.Credit[u64, u64]) | BenchCreate(u64, compute.protocol.Credit[u64, u64], compute.protocol.Attempt, compute.protocol.RetryClass, u64) | BenchCreated(u64, compute.protocol.Consumption[u64, u64]) | BenchStop
 
-type BenchQueued {
-    dst: u64,
-    nonce: u64,
-    raw: Bytes
-}
-
-// Datagrams the link's bounded send queue refused. They go out in order on
-// later rounds, so a burst waits for room where it would otherwise be lost.
-type BenchOutbox {
-    queued: List[BenchQueued],
-    head: u64
-}
-
-fn bench_send(mut hub: roster.HostLinks, mut box: BenchOutbox, dst: u64, nonce: u64, msg: BenchWire) {
+fn bench_send(mut hub: roster.HostLinks, dst: u64, nonce: u64, msg: BenchWire) {
     let co: std.codec.Codec[BenchWire] = std.codec.of()
     let mut raw: Bytes = list.new()
-    let Ok(()) = std.codec.encode(co, msg, mut raw) else {
-        return
-    }
-    if box.head == list.len(box.queued) {
-        if let Ok(()) = roster.rpc(mut hub, dst, nonce, clone(raw)) {
-            return
-        }
-    }
-    list.push(mut box.queued, BenchQueued(dst, nonce, raw: take raw))
-}
-
-fn bench_flush(mut hub: roster.HostLinks, mut box: BenchOutbox) {
-    while box.head < list.len(box.queued) {
-        let q = box.queued[box.head]
-        if let Error(_) = roster.rpc(mut hub, q.dst, q.nonce, clone(q.raw)) {
-            return
-        }
-        box.head += 1
-    }
-    list.clear(mut box.queued)
-    box.head = 0
+    result.unwrap(std.codec.encode(co, msg, mut raw))
+    result.unwrap(roster.rpc(mut hub, dst, nonce, take raw))
 }
 
 fn bench_decode(data: Bytes) -> Option[BenchWire] {
@@ -123,7 +90,6 @@ fn bench_desk(mut root: TestHost, mut db: store.Db, cell: store.Cell[roster.Rost
     let cfg = compute.desk.Config(session: 1, workers: 1, slots_per_worker: BENCH_SLOTS, classes: 1, connections: 1, pending_per_connection: 1024, pending_per_principal: 1024, grants_per_connection: BENCH_SLOTS, grants_per_principal: BENCH_SLOTS, shares: bench_one(compute.desk.Share(principal: BENCH_PRINCIPAL, weight: 1)))
     let mut desk: List[compute.desk.State[u64, u64]] = bench_one(compute.desk.init(take cfg))
     let _ = desk_event(mut desk, Connect(1))
-    let mut box = BenchOutbox(queued: list.new(), head: 0)
     let mut unacked: List[BenchUnacked] = list.new()
     let mut issued: u64 = 0
     let mut step_ns: u64 = 0
@@ -133,7 +99,6 @@ fn bench_desk(mut root: TestHost, mut db: store.Db, cell: store.Cell[roster.Rost
     while true {
         result.unwrap(roster.drive(mut root.hub, mut root.socket, clock, host.mono_ns(clock) + BENCH_WAIT_NS, mut root.incoming))
         rounds += 1
-        bench_flush(mut root.hub, mut box)
         let mut stop = false
         for e in root.incoming {
             match e {
@@ -187,7 +152,7 @@ fn bench_desk(mut root: TestHost, mut db: store.Db, cell: store.Cell[roster.Rost
                                 issued += 1
                                 granted = true
                                 list.push(mut unacked, BenchUnacked(number: issued, connection: ask.connection, credit, sent: began))
-                                bench_send(mut root.hub, mut box, ask.connection, 0, BenchGrant(issued, credit))
+                                bench_send(mut root.hub, ask.connection, 0, BenchGrant(issued, credit))
                             }
                         }
                         if !granted {
@@ -209,7 +174,7 @@ fn bench_desk(mut root: TestHost, mut db: store.Db, cell: store.Cell[roster.Rost
             for i in 0u64 .. list.len(unacked) {
                 if now - unacked[i].sent > BENCH_RESEND_NS {
                     unacked[i].sent = now
-                    bench_send(mut root.hub, mut box, unacked[i].connection, 0, BenchGrant(unacked[i].number, unacked[i].credit))
+                    bench_send(mut root.hub, unacked[i].connection, 0, BenchGrant(unacked[i].number, unacked[i].credit))
                 }
             }
         }
@@ -238,11 +203,11 @@ fn bench_resources(n: u64) -> compute.resources.Vector {
 }
 
 // Send each fresh offer to the desk and remember it until it is redeemed.
-fn bench_offer(mut hub: roster.HostLinks, mut box: BenchOutbox, clock: Clock, mut offers: Map[u64, BenchOffered], actions: List[compute.worker.Action[u64, u64]]) {
+fn bench_offer(mut hub: roster.HostLinks, clock: Clock, mut offers: Map[u64, BenchOffered], actions: List[compute.worker.Action[u64, u64]]) {
     for a in actions {
         if let Offer(desk, offer) = a {
             map.insert(mut offers, offer.credit.slot, BenchOffered(offer: clone(offer), sent: host.mono_ns(clock), wait: BENCH_RESEND_NS))
-            bench_send(mut hub, mut box, desk, 0, BenchOffer(clone(offer)))
+            bench_send(mut hub, desk, 0, BenchOffer(clone(offer)))
         }
     }
 }
@@ -269,12 +234,11 @@ fn bench_worker(mut h: TestHost, clock: Clock, out: Stdout) waits {
         fail("worker assumed no desk owner")
     }
     let _ = worker_event(mut worker, OpenSession(BENCH_RUN, BENCH_SESSION))
-    let mut box = BenchOutbox(queued: list.new(), head: 0)
-    bench_send(mut h.hub, mut box, 0, 0, BenchAssume(2, BENCH_RUN, epoch))
+    bench_send(mut h.hub, 0, 0, BenchAssume(2, BENCH_RUN, epoch))
     let mut offers: Map[u64, BenchOffered] = map.new()
     for slot in 0u64 .. BENCH_SLOTS {
         let minted = worker_event(mut worker, Mint(BENCH_RUN, slot))
-        bench_offer(mut h.hub, mut box, clock, mut offers, minted)
+        bench_offer(mut h.hub, clock, mut offers, minted)
     }
     let mut floor: u64 = 0
     let mut scanned: u64 = 0
@@ -282,7 +246,6 @@ fn bench_worker(mut h: TestHost, clock: Clock, out: Stdout) waits {
     let mut answered: u64 = 0
     while true {
         result.unwrap(roster.drive(mut h.hub, mut h.socket, clock, host.mono_ns(clock) + BENCH_WAIT_NS, mut h.incoming))
-        bench_flush(mut h.hub, mut box)
         let mut stop = false
         for e in h.incoming {
             let Message(node: from, nonce: id, data: data, ..) = e else {
@@ -303,16 +266,16 @@ fn bench_worker(mut h: TestHost, clock: Clock, out: Stdout) waits {
                                 for s in worker_event(mut worker, Started(checkout)) {
                                     if let Redeemed(done) = s {
                                         answered += 1
-                                        bench_send(mut h.hub, mut box, from, id, BenchCreated(exchange, clone(done)))
+                                        bench_send(mut h.hub, from, id, BenchCreated(exchange, clone(done)))
                                     }
                                 }
                                 let _ = worker_event(mut worker, Retire(checkout))
                                 let minted = worker_event(mut worker, Mint(BENCH_RUN, credit.slot))
-                                bench_offer(mut h.hub, mut box, clock, mut offers, minted)
+                                bench_offer(mut h.hub, clock, mut offers, minted)
                             },
                             Redeemed(done) => {
                                 answered += 1
-                                bench_send(mut h.hub, mut box, from, id, BenchCreated(exchange, clone(done)))
+                                bench_send(mut h.hub, from, id, BenchCreated(exchange, clone(done)))
                             },
                             _ => (),
                         }
@@ -325,7 +288,7 @@ fn bench_worker(mut h: TestHost, clock: Clock, out: Stdout) waits {
             }
         }
         let now = host.mono_ns(clock)
-        if now - scanned > BENCH_SCAN_NS {
+        if !stop && now - scanned > BENCH_SCAN_NS && roster.connected(h.hub, 0) {
             scanned = now
             let mut late: List[u64] = list.new()
             for (slot, o) in offers {
@@ -337,8 +300,8 @@ fn bench_worker(mut h: TestHost, clock: Clock, out: Stdout) waits {
                 let mut o = option.unwrap(map.remove(mut offers, slot))
                 o.sent = now
                 o.wait = order.min(o.wait * 2, 64 * BENCH_RESEND_NS)
-                bench_send(mut h.hub, mut box, 0, 0, BenchAssume(2, BENCH_RUN, epoch))
-                bench_send(mut h.hub, mut box, 0, 0, BenchOffer(clone(o.offer)))
+                bench_send(mut h.hub, 0, 0, BenchAssume(2, BENCH_RUN, epoch))
+                bench_send(mut h.hub, 0, 0, BenchOffer(clone(o.offer)))
                 map.insert(mut offers, slot, take o)
             }
         }
@@ -377,7 +340,7 @@ type BenchCaller {
 }
 
 // Feed one event to one invocation and carry out what its kernel asks for.
-fn bench_advance(mut d: BenchCaller, mut hub: roster.HostLinks, mut box: BenchOutbox, clock: Clock, seq: u64, take event: compute.dispatcher.Event[u64, u64, u64]) {
+fn bench_advance(mut d: BenchCaller, mut hub: roster.HostLinks, clock: Clock, seq: u64, take event: compute.dispatcher.Event[u64, u64, u64]) {
     let Some(take state) = map.remove(mut d.states, seq) else {
         return
     }
@@ -396,7 +359,7 @@ fn bench_advance(mut d: BenchCaller, mut hub: roster.HostLinks, mut box: BenchOu
             },
             Send(exchange, credit, attempt, retry) => {
                 let wire: BenchWire = BenchCreate(exchange, credit, attempt, retry, d.floor)
-                bench_send(mut hub, mut box, credit.host, seq, clone(wire))
+                bench_send(mut hub, credit.host, seq, clone(wire))
                 d.sends += 1
                 call.sent = now
                 call.create = Some(take wire)
@@ -440,7 +403,6 @@ fn bench_dispatcher(mut h: TestHost, clock: Clock, out: Stdout, concurrency: u64
     let policy = compute.dispatcher.ReleasePolicy(no_grants: true, deterministic: true, tolerates_duplicates: true, sinks_deduplicate: false, single_handle: false, has_net: false)
     let mut session = bench_one(compute.dispatcher.open_session(1, BENCH_PRINCIPAL, 1))
     let mut d = BenchCaller(states: map.new(), calls: map.new(), placing: list.new(), placed: 0, finds: 0, spare: list.new(), floor: 0, done: 0, failed: 0, repeats: 0, sends: 0, answers: 0, creates, first: 0, last: 0, samples: list.with_capacity(creates))
-    let mut box = BenchOutbox(queued: list.new(), head: 0)
     let mut seen: Map[u64, ()] = map.new()
     let mut received: u64 = 0
     let mut next_seq: u64 = 1
@@ -470,7 +432,7 @@ fn bench_dispatcher(mut h: TestHost, clock: Clock, out: Stdout, concurrency: u64
             let created: compute.dispatcher.State[u64, u64, u64] = compute.dispatcher.init(1u64, 0, request, policy, false)
             map.insert(mut d.states, seq, take created)
             map.insert(mut d.calls, seq, BenchCall(began: host.mono_ns(clock), probe: 0, sent: 0, create: None))
-            bench_advance(mut d, mut h.hub, mut box, clock, seq, Begin)
+            bench_advance(mut d, mut h.hub, clock, seq, Begin)
         }
         while list.len(d.spare) > 0 && d.placed < list.len(d.placing) {
             let credit = option.unwrap(list.pop(mut d.spare))
@@ -480,7 +442,7 @@ fn bench_dispatcher(mut h: TestHost, clock: Clock, out: Stdout, concurrency: u64
                 Some(call) => call.probe,
                 None => 0u64,
             }
-            bench_advance(mut d, mut h.hub, mut box, clock, seq, Placed(probe, credit))
+            bench_advance(mut d, mut h.hub, clock, seq, Placed(probe, credit))
         }
         if d.placed == list.len(d.placing) && d.placed != 0 {
             list.clear(mut d.placing)
@@ -492,7 +454,7 @@ fn bench_dispatcher(mut h: TestHost, clock: Clock, out: Stdout, concurrency: u64
             version += 1
             wanted = d.finds
             stated = now
-            bench_send(mut h.hub, mut box, 0, 0, BenchWant(compute.desk.Ask(connection: 1, class_id: 0, principal: BENCH_PRINCIPAL, version, count: waiting), received))
+            bench_send(mut h.hub, 0, 0, BenchWant(compute.desk.Ask(connection: 1, class_id: 0, principal: BENCH_PRINCIPAL, version, count: waiting), received))
         }
         if now - scanned > BENCH_SCAN_NS {
             scanned = now
@@ -511,13 +473,12 @@ fn bench_dispatcher(mut h: TestHost, clock: Clock, out: Stdout, concurrency: u64
                 d.repeats += 1
                 d.sends += 1
                 if let Some(BenchCreate(exchange, credit, attempt, retry, _)) = call.create {
-                    bench_send(mut h.hub, mut box, credit.host, seq, BenchCreate(exchange, credit, attempt, retry, d.floor))
+                    bench_send(mut h.hub, credit.host, seq, BenchCreate(exchange, credit, attempt, retry, d.floor))
                 }
                 map.insert(mut d.calls, seq, take call)
             }
         }
         result.unwrap(roster.drive(mut h.hub, mut h.socket, clock, host.mono_ns(clock) + BENCH_WAIT_NS, mut h.incoming))
-        bench_flush(mut h.hub, mut box)
         for e in h.incoming {
             let Message(node: from, nonce: id, data: data, ..) = e else {
                 continue
@@ -536,7 +497,7 @@ fn bench_dispatcher(mut h: TestHost, clock: Clock, out: Stdout, concurrency: u64
                 Some(BenchCreated(exchange, take answer)) => {
                     if from == 2 {
                         d.answers += 1
-                        bench_advance(mut d, mut h.hub, mut box, clock, id, WorkerReply(exchange, Answer(take answer)))
+                        bench_advance(mut d, mut h.hub, clock, id, WorkerReply(exchange, Answer(take answer)))
                     }
                 },
                 _ => (),
@@ -560,8 +521,12 @@ fn bench_dispatcher(mut h: TestHost, clock: Clock, out: Stdout, concurrency: u64
         let now = host.mono_ns(clock)
         if now - told > BENCH_SCAN_NS {
             told = now
-            bench_send(mut h.hub, mut box, 0, 0, BenchStop)
-            bench_send(mut h.hub, mut box, 2, 0, BenchStop)
+            if roster.connected(h.hub, 0) {
+                bench_send(mut h.hub, 0, 0, BenchStop)
+            }
+            if roster.connected(h.hub, 2) {
+                bench_send(mut h.hub, 2, 0, BenchStop)
+            }
         }
         result.unwrap(roster.drive(mut h.hub, mut h.socket, clock, host.mono_ns(clock) + BENCH_WAIT_NS, mut h.incoming))
     }

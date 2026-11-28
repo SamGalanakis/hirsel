@@ -4,6 +4,10 @@ const RETRY_NS: u64 = 250000000
 
 const SESSION_NS: u64 = 30000000000
 
+// Room for 64 maximum-size RPCs on an empty link. Each charge is at most
+// 2 × 1152 bytes of backing capacity plus 712 bytes for Shared and queue records.
+const LINK_SEND_BYTES: u64 = 192 * 1024
+
 type Link {
     handle: quic.ConnectionHandle,
     ready: bool,
@@ -68,7 +72,7 @@ fn pins(r: Roster, self_id: u64) -> List[quic.handshake.Pin] {
 fn transport(take accepted: Option[List[quic.handshake.Pin]]) -> quic.TransportConfig {
     let mut alpn: List[String] = list.new()
     list.push(mut alpn, ALPN)
-    quic.TransportConfig(max_idle_ms: 5000, initial_max_data: 0, initial_max_stream_data: 0, max_streams_bidi: 0, max_streams_uni: 0, max_datagram_frame: 1152, send_bytes: 16384, max_gaps: 8, cc: Cubic, alpn: take alpn, client_pins: take accepted)
+    quic.TransportConfig(max_idle_ms: 5000, initial_max_data: 0, initial_max_stream_data: 0, max_streams_bidi: 0, max_streams_uni: 0, max_datagram_frame: 1152, send_bytes: LINK_SEND_BYTES, max_gaps: 8, cc: Cubic, alpn: take alpn, client_pins: take accepted)
 }
 
 pub fn open_links(clock: Clock, random: Random, local: u64, incarnation: u64, controller: u64, take id: quic.handshake.Identity, take members: Roster) -> Result[HostLinks, LinkError] {

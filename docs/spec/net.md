@@ -1702,7 +1702,8 @@ cut-record exception. The budget covers:
 - an intake's reading and dispatch;
 - the reading and filtering a waiting `udp_recv` does before it can deliver. The datagrams
   it delivers are paid for by the call's own steps (NET-16), and it delivers a whole batch
-  once it starts.
+  once it starts. If an expired receive's attempt runs out of turn budget, it can defer
+  once for another poller turn without waiting for socket readiness.
 
 Retirement drains nothing, so it is not on that list. The kernel's own work queueing
 datagrams for a socket, which its softirq does, is not host work and not charged to a turn.

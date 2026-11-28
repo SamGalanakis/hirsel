@@ -1,4 +1,11 @@
 use super::*;
+use hirsel_core_net::udp::Captured;
+
+pub(super) enum Received {
+    Batch(usize),
+    Empty,
+    BudgetExhausted,
+}
 
 impl Call {
     pub(super) unsafe fn create(&mut self, bind: bool) -> Outcome {
@@ -146,7 +153,7 @@ impl Call {
                     };
                     socket.pool.advance();
                 }
-                Some(Captured::Discarded) if n == 0 => return Ok(Received::Runnable),
+                Some(Captured::Discarded) if n == 0 => return Ok(Received::BudgetExhausted),
                 Some(Captured::Datagram {
                     peer,
                     ecn,
@@ -201,7 +208,7 @@ impl Call {
                     };
                     let ingress = (!resource.bound).then_some(resource.rules.as_ref());
                     if socket.pool.read(&socket.socket, ingress, &mut budget)? == 0 {
-                        return Ok(Received::Runnable);
+                        return Ok(Received::BudgetExhausted);
                     }
                 }
                 _ => break,

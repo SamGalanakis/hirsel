@@ -17,9 +17,8 @@ use crate::{
     secret::{Charge, ChargeCell, HandedCharge, HandedOver},
 };
 use hirsel_core_net::UdpMember;
-use hirsel_core_net::udp::{
-    self, Captured, Options, ReceivePool, Socket, Steer, TxPacket, UdpRules, Window,
-};
+use hirsel_core_net::udp::{self, Options, ReceivePool, Socket, Steer, TxPacket, UdpRules, Window};
+use native::Received;
 use std::{
     collections::BTreeMap,
     io,
@@ -485,6 +484,7 @@ struct Call {
     bytes: *mut Buffer,
     packets: *mut Buffer,
     progress: usize,
+    receive_deferred: bool,
     served: served::Delivery,
     #[cfg(feature = "record")]
     tape_start: (usize, usize),
@@ -511,12 +511,6 @@ impl Waiters {
             waiter.complete(token);
         }
     }
-}
-
-enum Received {
-    Batch(usize),
-    Empty,
-    Runnable,
 }
 
 fn complete(outcome: Outcome) -> Step {
@@ -639,13 +633,20 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64) -> Step {
             match call.receive(resource, &mut files.sockets) {
                 Ok(Received::Batch(n)) => return complete(count(n)),
                 Ok(Received::Empty) => {}
-                Ok(Received::Runnable) => runnable = true,
-                Err(problem) if problem.kind() == io::ErrorKind::Interrupted => runnable = true,
+                Ok(Received::BudgetExhausted) => {
+                    // An expired receive still gets a nonblocking attempt. If the turn's
+                    // budget blocked that attempt, let the poller give it one fresh turn.
+                    runnable = due != Due::Passed || !call.receive_deferred;
+                    call.receive_deferred = true;
+                }
+                Err(problem) if problem.kind() == io::ErrorKind::Interrupted => {
+                    runnable = due != Due::Passed;
+                }
                 Err(problem) if problem.kind() == io::ErrorKind::WouldBlock => {}
                 Err(problem) => return complete(transport(problem)),
             }
         }
-        if due == Due::Passed {
+        if due == Due::Passed && !runnable {
             resource.cancel_waiter(sending, token, waiters);
             return complete(if call.progress != 0 {
                 count(call.progress)
@@ -865,6 +866,7 @@ unsafe fn create(
             bytes: ptr::null_mut(),
             packets: output,
             progress: 0,
+            receive_deferred: false,
             served: served::Delivery::default(),
             #[cfg(feature = "record")]
             tape_start: (0, if output.is_null() { 0 } else { (*output).len }),
@@ -968,6 +970,7 @@ unsafe fn existing(
             bytes,
             packets,
             progress: 0,
+            receive_deferred: false,
             served: served::Delivery::default(),
             #[cfg(feature = "record")]
             tape_start: (

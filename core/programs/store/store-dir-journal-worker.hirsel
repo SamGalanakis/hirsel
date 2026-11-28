@@ -114,7 +114,7 @@ fn journal_write_aligned(mut segment: HostFile, at: u64, mut buffer: Bytes) -> R
     }
 }
 
-fn journal_write_oversized(mut segment: HostFile, block_at: u64, frame: Bytes, mut buffer: Bytes) -> Result[(), types.Failure] waits {
+fn journal_write_oversized(mut segment: HostFile, block_at: u64, frame: Bytes, mut buffer: Bytes, mut writes: u64) -> Result[(), types.Failure] waits {
     let room = list.capacity(buffer)
     let mut at = block_at
     let mut consumed = 0u64
@@ -122,6 +122,7 @@ fn journal_write_oversized(mut segment: HostFile, block_at: u64, frame: Bytes, m
         let width = order.min(room - list.len(buffer), list.len(frame) - consumed)
         list.append(mut buffer, list.slice(frame, consumed, consumed + width))
         journal_write_aligned(mut segment, at, mut buffer)?
+        writes += 1u64
         consumed += width
         if consumed < list.len(frame) {
             at += room
@@ -167,6 +168,7 @@ fn journal_run(id: types.StoreKey, initial_seq: u64, take segment: HostFile, tak
     // group that large amortizes its own extension, so zero steps wait until
     // 64 smaller groups in a row (§3.3a Bulk).
     let mut small_groups = 64u64
+    let mut stats = empty_journal_stats()
     loop {
         let mut next_message: Option[DirJournalMsg] = None
         let mut closing = false
@@ -191,6 +193,12 @@ fn journal_run(id: types.StoreKey, initial_seq: u64, take segment: HostFile, tak
                     if end != end_named {
                         journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut schema_binding)?
                         end_named = end
+                        stats.end_writes += 1u64
+                        if interval_ns == 0 {
+                            stats.end_idle += 1u64
+                        } else {
+                            stats.end_deadline += 1u64
+                        }
                     }
                     groups = 0
                     end_due = None
@@ -215,6 +223,8 @@ fn journal_run(id: types.StoreKey, initial_seq: u64, take segment: HostFile, tak
                     Error(Empty) => {
                         let width = order.min(JOURNAL_WINDOW_STEP, journal_align_up(end + target) - window)
                         journal_window_step(mut segment_file, window, width)?
+                        stats.segment_writes += 1u64
+                        stats.window_writes += 1u64
                         window += width
                     },
                     Error(Closed) => break,
@@ -226,6 +236,8 @@ fn journal_run(id: types.StoreKey, initial_seq: u64, take segment: HostFile, tak
                 if end != end_named {
                     journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut schema_binding)?
                     end_named = end
+                    stats.end_writes += 1u64
+                    stats.end_idle += 1u64
                     groups = 0
                     end_due = None
                 }
@@ -240,16 +252,19 @@ fn journal_run(id: types.StoreKey, initial_seq: u64, take segment: HostFile, tak
         let mut last_frame = 0u64
         let block_at = end - end % 4096
         match take next_message {
-            Some(Group(take raw, number, size)) => {
+            Some(Group(take raw, number, size, frames, reason, submitted)) => {
                 let mut buffer = take raw
                 journal_write_aligned(mut segment_file, block_at, mut buffer)?
+                stats.segment_writes += 1u64
+                record_group(mut stats, frames, reason, host.mono_ns(clock) - submitted)
                 let _ = channel.try_send(returned, take buffer)
                 group_bytes = size
                 last_frame = number
             },
-            Some(Oversized(take raw, take frame, number)) => {
+            Some(Oversized(take raw, take frame, number, submitted)) => {
                 let mut buffer = take raw
-                journal_write_oversized(mut segment_file, block_at, frame, mut buffer)?
+                journal_write_oversized(mut segment_file, block_at, frame, mut buffer, mut stats.segment_writes)?
+                record_group(mut stats, 1u32, Size, host.mono_ns(clock) - submitted)
                 let _ = channel.try_send(returned, take buffer)
                 group_bytes = list.len(frame)
                 last_frame = number
@@ -259,6 +274,9 @@ fn journal_run(id: types.StoreKey, initial_seq: u64, take segment: HostFile, tak
             },
             Some(Barrier) => {
                 let _ = channel.try_send(notices, Written)
+            },
+            Some(ReadStats(to)) => {
+                let _ = channel.try_send(to, clone(stats))
             },
             None => {
                 closing = true
@@ -296,12 +314,24 @@ fn journal_run(id: types.StoreKey, initial_seq: u64, take segment: HostFile, tak
         if (time_end || closing || rotate_now || load_end) && end != end_named {
             journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut schema_binding)?
             end_named = end
+            stats.end_writes += 1u64
+            if load_end {
+                stats.end_cap += 1u64
+            } else if time_end {
+                stats.end_deadline += 1u64
+            } else if rotate_now {
+                stats.end_rotate += 1u64
+            } else {
+                stats.end_close += 1u64
+            }
             groups = 0
             end_due = None
             let target = journal_window_target(end, window_limit)
             if load_end && small_groups >= 64 && window - end < target / 2 {
                 let width = order.min(JOURNAL_WINDOW_STEP, journal_align_up(end + target) - window)
                 journal_window_step(mut segment_file, window, width)?
+                stats.segment_writes += 1u64
+                stats.window_writes += 1u64
                 window += width
             }
         }
@@ -319,6 +349,27 @@ fn journal_run(id: types.StoreKey, initial_seq: u64, take segment: HostFile, tak
             manifest.disk_io(host.close(take end_handle))?
             return Ok(())
         }
+    }
+}
+
+fn record_group(mut stats: JournalStats, frames: u32, reason: GroupClose, elapsed: u64) {
+    let count: u64 = int.widen(frames)
+    stats.frames += count
+    stats.frames_per_group[order.min(count, 65u64) - 1] += 1u64
+    stats.group_durable_ns = int.saturating_add(stats.group_durable_ns, elapsed)
+    match reason {
+        Size => {
+            stats.group_size += 1u64
+        },
+        EarlySync => {
+            stats.group_early_sync += 1u64
+        },
+        Immediate => {
+            stats.group_immediate += 1u64
+        },
+        Boundary => {
+            stats.group_boundary += 1u64
+        },
     }
 }
 

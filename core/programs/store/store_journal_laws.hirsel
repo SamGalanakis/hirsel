@@ -272,7 +272,7 @@ fn journal_worker_case(d: Dir, c: Clock, tasks: Tasks, mode: u64) -> bool waits 
         100u32
     }
     let (returned, recycled): (Sender[Bytes], Receiver[Bytes]) = channel.new(1)
-    let group = journal.group_head(max_frames, max_bytes * 2, header, take recycled)
+    let group = journal.group_head(max_frames, max_bytes * 2, header, c, take recycled)
     let input = journal.JournalWorker(store: store_key_to_rep(id), seq: 7, segment: take segment, end_file: take end_file, returned: take returned, group_bytes: max_bytes, clock: c, cadence: JOURNAL_IMMEDIATE_CADENCE, zero_extension: true, receive: take receive, send: take acks, ready: take ready, written: take written_send, synced: take synced_send)
     let reserve = journal.journal_group_room(int.widen(max_bytes))
     let worker = if mode == 0 || mode == 2 {
@@ -285,7 +285,7 @@ fn journal_worker_case(d: Dir, c: Clock, tasks: Tasks, mode: u64) -> bool waits 
     result.unwrap(journal.append_frame(group, send, take first, 1))
     if mode == 3 {
         let (take rotated, take rotated_end, take rotated_header) = result.unwrap(failure_result_from_rep(journal.disk_new_segment(d, c, store_key_to_rep(id), 8, 114, mut creation)))
-        result.unwrap(journal.seal_group(group, send, true))
+        result.unwrap(journal.seal_group(group, send, true, Boundary))
         journal.reset_header(group, take rotated_header)
         result.unwrap(channel.send(send, Rotate(take rotated, take rotated_end)))
     }
@@ -329,7 +329,7 @@ fn journal_worker_case(d: Dir, c: Clock, tasks: Tasks, mode: u64) -> bool waits 
         }
         previously_acked = 4
     }
-    result.unwrap(journal.seal_group(group, send, true))
+    result.unwrap(journal.seal_group(group, send, true, EarlySync))
     let _ = take send
     result.unwrap(result.unwrap(task.join(take worker)))
     let mut group_count = 0u64

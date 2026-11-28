@@ -24,6 +24,21 @@ pub fn accounts(db: Db) -> Accounts {
     Accounts(logical: int.saturating_add(int.saturating_add(db.accounting.resident, db.accounting.tiered), db.call_streams.keyed_credit.padding), tiered: db.accounting.tiered, exact: !retaining(db) || db.accounting.changes == db.accounting.settled, frames: frames, journal: journal, resident: resident)
 }
 
+/// Live Directory journal counters for the current open. The snapshot includes
+/// completed worker messages without sealing the head's open group or forcing
+/// an END. Memory and Object stores return None. Group durability time spans
+/// buffer handoff to durable completion. Ticket wait time counts successful
+/// blocking waits in durable() after its initial poll.
+pub fn journal_stats(db: Db) -> Result[Option[journal.JournalStats], Error] waits {
+    if let Some(state) = db.disk {
+        if let DirBackend(directory) = state.backend {
+            let stats = failure_result_from_rep(journal.read_stats(directory))?
+            return Ok(Some(take stats))
+        }
+    }
+    Ok(None)
+}
+
 // A Memory store's page images, counted now over every head and pin. A walk
 // whose scratch cannot be allocated reports u64 max: the figure is unknown,
 // never understated (§13.8).

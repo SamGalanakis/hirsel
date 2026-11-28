@@ -67,7 +67,7 @@ fn edit_accounting[R](mut state: DiskState, edit: scoped fn(mut journal.QueueAcc
 fn journal_barrier(state: DiskState) waits {
     match state.backend {
         DirBackend(directory) => {
-            let _ = journal.submit_group(directory, true)
+            let _ = journal.submit_group(directory, true, Boundary)
             let _ = channel.send(journal.dir_sender(directory), Barrier)
         },
         ObjectBackend(writer) => {
@@ -154,7 +154,7 @@ fn failed_handoff(mut db: Db) -> Result[(), Error] {
 pub fn submit_journal_group(mut db: Db, wait: bool) -> Result[(), Error] waits {
     let closed = match db.disk {
         Some(state) => match state.backend {
-            DirBackend(directory) => match journal.submit_group(directory, wait) {
+            DirBackend(directory) => match journal.submit_group(directory, wait, EarlySync) {
                 Ok(()) => false,
                 Error(_) => true
             },
@@ -178,7 +178,7 @@ fn wait_for_frame_room(mut db: Db, frame: Option[format.DraftFrame]) -> Result[(
                         InGroup(n) => n,
                         Detached(_) => 0u64
                     }
-                    match journal.seal_group_keep(journal.draft_group(directory), journal.dir_sender(directory), true, keep) {
+                    match journal.seal_group_keep(journal.draft_group(directory), journal.dir_sender(directory), true, keep, Size) {
                         Ok(()) => false,
                         Error(_) => true,
                     }
@@ -220,12 +220,25 @@ fn durable_groups(mut db: Db, t: Ticket) -> Result[u64, Error] waits {
         })
     }
     let mut groups = drained ?=> durable_latch_error
-    if is_disk(db) {
-        while !covered(db, t.mark) {
-            submit_journal_group(mut db, true)?
-            let ack = journal_receive(db)
-            journal_ack(mut db, take ack) ?=> durable_latch_error
-            groups += 1
+    if !is_disk(db) || covered(db, t.mark) {
+        return Ok(groups)
+    }
+    let start = match disk_state(db).backend {
+        DirBackend(_) => Some(host.mono_ns(db.clock)),
+        ObjectBackend(_) => None,
+    }
+    while !covered(db, t.mark) {
+        submit_journal_group(mut db, true)?
+        let ack = journal_receive(db)
+        journal_ack(mut db, take ack) ?=> durable_latch_error
+        groups += 1
+    }
+    if let Some(at) = start {
+        let elapsed = host.mono_ns(db.clock) - at
+        if let Some(mut state) = db.disk {
+            if let DirBackend(mut directory) = state.backend {
+                journal.note_ticket_wait(mut directory, elapsed)
+            }
         }
     }
     Ok(groups)

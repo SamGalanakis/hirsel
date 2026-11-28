@@ -1,6 +1,36 @@
 pub const JOURNAL_WORKER_SLACK: u64 = 32768
 
-pub type DirJournalMsg: send = Group(Bytes, u64, u64) | Oversized(Bytes, Bytes, u64) | Rotate(HostFile, HostFile) | Barrier
+pub type GroupClose: cross = Size | EarlySync | Immediate | Boundary
+
+pub type DirJournalMsg: send = Group(Bytes, u64, u64, u32, GroupClose, u64) | Oversized(Bytes, Bytes, u64, u64) | Rotate(HostFile, HostFile) | Barrier | ReadStats(Sender[JournalStats])
+
+/// Successful Directory journal I/O since open. Segment writes include creation
+/// and window extension. END writes include creation and the five cadence reasons.
+/// The frame histogram has exact bins from 1 through 64 and a final 65+ bin.
+pub type JournalStats: send {
+    segment_writes: u64,
+    window_writes: u64,
+    creations: u64,
+    end_writes: u64,
+    frames: u64,
+    frames_per_group: Inline[u64, 65],
+    group_size: u64,
+    group_early_sync: u64,
+    group_immediate: u64,
+    group_boundary: u64,
+    end_deadline: u64,
+    end_cap: u64,
+    end_idle: u64,
+    end_rotate: u64,
+    end_close: u64,
+    group_durable_ns: u64,
+    ticket_waits: u64,
+    ticket_wait_ns: u64
+}
+
+fn empty_journal_stats() -> JournalStats {
+    JournalStats(segment_writes: 0, window_writes: 0, creations: 0, end_writes: 0, frames: 0, frames_per_group: [0; 65], group_size: 0, group_early_sync: 0, group_immediate: 0, group_boundary: 0, end_deadline: 0, end_cap: 0, end_idle: 0, end_rotate: 0, end_close: 0, group_durable_ns: 0, ticket_waits: 0, ticket_wait_ns: 0)
+}
 
 pub type DirAck: send = DirJournaled(u64, u64) | DirBroken(IoError)
 
@@ -42,6 +72,9 @@ pub opaque type DirJournalState {
     file_end: u64,
     group: GroupHead,
     head_managed: bool,
+    creations: u64,
+    ticket_waits: u64,
+    ticket_wait_ns: u64,
     journal: Sender[DirJournalMsg],
     acks: Receiver[DirAck],
     accounting: QueueAccounting,
@@ -93,7 +126,7 @@ pub fn start_directory(tasks: Tasks, d: Dir, c: Clock, id: types.StoreKey, group
     let DirJournalChannels(frames: take frames, queued: take queued, acks: take journal_acks, received: take journal_received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive) = take channels
     let (returned, group) = manifest.disk_allocation(scoped fn() -> Result[(Sender[Bytes], GroupHead), types.Failure] {
         let (released, recycled): (Sender[Bytes], Receiver[Bytes]) = channel.new(1)
-        Ok((take released, group_head(group_commits, group_bytes, header, take recycled)))
+        Ok((take released, group_head(group_commits, group_bytes, header, c, take recycled)))
     })?
     let input = JournalWorker(store: id, seq: seq, segment: take segment, end_file: take end_file, returned: take returned, group_bytes: group_bytes, clock: c, cadence: cadence, zero_extension: zero_extension, receive: take queued, send: take journal_acks, ready: take ready, written: channel.sender(written_send), synced: take synced_send)
     let writer = match task.try_spawn(tasks, bytes JOURNAL_WORKER_SLACK, take input, journal_worker) {
@@ -101,7 +134,7 @@ pub fn start_directory(tasks: Tasks, d: Dir, c: Clock, id: types.StoreKey, group
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
     types.capacity(result.unwrap(channel.receive(waiting)))?
-    Ok(DirJournalState(lock: take lock, d: d, creation: take creation, file_seq: seq, file_end: 72, group: take group, head_managed: false, journal: take frames, acks: take journal_received, accounting: queue_accounting(uncovered), written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), writer: take writer))
+    Ok(DirJournalState(lock: take lock, d: d, creation: take creation, file_seq: seq, file_end: 72, group: take group, head_managed: false, creations: 1, ticket_waits: 0, ticket_wait_ns: 0, journal: take frames, acks: take journal_received, accounting: queue_accounting(uncovered), written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), writer: take writer))
 }
 
 pub fn directory(state: DirJournalState) -> Dir {
@@ -137,8 +170,34 @@ pub fn manage_groups(mut state: DirJournalState) {
     state.head_managed = true
 }
 
-pub fn submit_group(state: DirJournalState, wait: bool) -> Result[(), types.Failure] waits {
-    seal_group(state.group, state.journal, wait)
+pub fn submit_group(state: DirJournalState, wait: bool, reason: GroupClose) -> Result[(), types.Failure] waits {
+    seal_group(state.group, state.journal, wait, reason)
+}
+
+pub fn read_stats(state: DirJournalState) -> Result[JournalStats, types.Failure] waits {
+    let (reply, answer) = manifest.disk_allocation(scoped fn() -> Result[(Sender[JournalStats], Receiver[JournalStats]), types.Failure] {
+        Ok(channel.new(1))
+    })?
+    if let Error(_) = channel.send(state.journal, ReadStats(take reply)) {
+        return Error(Poisoned(Closed))
+    }
+    match channel.receive(answer) {
+        Ok(take received) => {
+            let mut stats = take received
+            stats.segment_writes += state.creations
+            stats.end_writes += state.creations
+            stats.creations = state.creations
+            stats.ticket_waits = state.ticket_waits
+            stats.ticket_wait_ns = state.ticket_wait_ns
+            Ok(take stats)
+        },
+        Error(_) => Error(Poisoned(Closed)),
+    }
+}
+
+pub fn note_ticket_wait(mut state: DirJournalState, elapsed: u64) {
+    state.ticket_waits += 1u64
+    state.ticket_wait_ns = int.saturating_add(state.ticket_wait_ns, elapsed)
 }
 
 pub fn draft_group(state: DirJournalState) -> View[GroupHead] in state {
@@ -152,8 +211,10 @@ pub fn queue_frame(state: DirJournalState, take frame: format.DraftFrame, number
         Detached(take raw) => append_frame(state.group, state.journal, take raw, number)?,
     }
     let window = state.group.max_bytes
-    if !state.head_managed || (state.file_end - size) / window != state.file_end / window {
-        submit_group(state, true)?
+    if !state.head_managed {
+        submit_group(state, true, Immediate)?
+    } else if (state.file_end - size) / window != state.file_end / window {
+        submit_group(state, true, Size)?
     }
     Ok(())
 }
@@ -184,7 +245,8 @@ pub fn dir_sync_notices(mut state: DirJournalState) -> Option[Receiver[()]] {
 
 pub fn rotate(mut state: DirJournalState, c: Clock, id: types.StoreKey, seq: u64, previous: u64) -> Result[bool, types.Failure] waits {
     let (take segment, take end_file, take header) = disk_new_segment(state.d, c, id, seq, previous, mut state.creation)?
-    submit_group(state, true)?
+    state.creations += 1u64
+    submit_group(state, true, Boundary)?
     reset_header(state.group, take header)
     Ok(match channel.send(state.journal, Rotate(take segment, take end_file)) {
         Ok(()) => false,

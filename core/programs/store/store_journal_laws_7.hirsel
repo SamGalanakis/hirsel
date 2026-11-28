@@ -428,6 +428,12 @@ fn cadence_ack(acks: Receiver[journal.DirAck], synced: Receiver[()], number: u64
     fail("L94: extra group ack")
 }
 
+fn cadence_stats(send: Sender[journal.DirJournalMsg]) -> journal.JournalStats waits {
+    let (to, from): (Sender[journal.JournalStats], Receiver[journal.JournalStats]) = channel.new(1)
+    result.unwrap(channel.send(send, ReadStats(take to)))
+    result.unwrap(channel.receive(from))
+}
+
 fn cadence_wait(mut hand: ClockHand, due: Option[u64]) waits {
     if clock.idle(mut hand) != due {
         fail("L94: wrong pending deadline")
@@ -451,10 +457,10 @@ fn journal_coalesce_and_end_cadence(tasks: Tasks) -> Result[(), Error] waits {
     let (take segment, take end_file, take header) = failure_result_from_rep(journal.disk_new_segment(d, c, store_key_to_rep(id), 7, 0, mut creation))?
     let journal.DirJournalChannels(frames: take send, queued: take receive, acks: take acks, received: take received, ready: take ready, waiting: take waiting, written_send: take notices, written_receive: take written, synced_send: take synced_send, synced_receive: take synced) = journal.dir_journal_channels()
     let (returned, recycled): (Sender[Bytes], Receiver[Bytes]) = channel.new(1)
-    let group = journal.group_head(4, 65536, header, take recycled)
+    let group = journal.group_head(4, 65536, header, c, take recycled)
     cadence_frame(group, send, ctx, 1)
     cadence_frame(group, send, ctx, 2)
-    result.unwrap(journal.seal_group(group, send, true))
+    result.unwrap(journal.seal_group(group, send, true, EarlySync))
     let cadence_spec = journal.JournalCadence(end_groups: 3, end_interval_ms: 10)
     let input = journal.JournalWorker(store: store_key_to_rep(id), seq: 7, segment: take segment, end_file: take end_file, returned: take returned, group_bytes: 65536, clock: c, cadence: cadence_spec, zero_extension: true, receive: take receive, send: take acks, ready: take ready, written: take notices, synced: take synced_send)
     let worker = task.spawn(tasks, bytes journal.JOURNAL_WORKER_SLACK, take input, journal.journal_worker)
@@ -462,7 +468,7 @@ fn journal_coalesce_and_end_cadence(tasks: Tasks) -> Result[(), Error] waits {
     cadence_ack(received, synced, 2)
     cadence_wait(mut hand, Some(10000000u64))
     cadence_frame(group, send, ctx, 3)
-    result.unwrap(journal.seal_group(group, send, true))
+    result.unwrap(journal.seal_group(group, send, true, EarlySync))
     cadence_ack(received, synced, 3)
     cadence_wait(mut hand, Some(10000000u64))
     if let Ok(_) = channel.try_receive(written) {
@@ -471,6 +477,10 @@ fn journal_coalesce_and_end_cadence(tasks: Tasks) -> Result[(), Error] waits {
     if failure_result_from_rep(journal.disk_end(d, store_key_to_rep(id), 7))? != Some(72u64) {
         fail("L94: END advanced before the time or count threshold")
     }
+    let pending = cadence_stats(send)
+    if pending.end_writes != 0 || pending.segment_writes != 2 || pending.frames != 3 {
+        fail("L94: reading metrics must not force an END or count its pending write")
+    }
     clock.advance_to(mut hand, 10000000)
     cadence_wait(mut hand, Some(sentinel_at))
     if failure_result_from_rep(journal.disk_end(d, store_key_to_rep(id), 7))? != Some(198u64) {
@@ -478,15 +488,19 @@ fn journal_coalesce_and_end_cadence(tasks: Tasks) -> Result[(), Error] waits {
     }
     for number in 4u64 .. 7 {
         cadence_frame(group, send, ctx, number)
-        result.unwrap(journal.seal_group(group, send, true))
+        result.unwrap(journal.seal_group(group, send, true, EarlySync))
         cadence_ack(received, synced, number)
     }
     cadence_wait(mut hand, Some(sentinel_at))
     if failure_result_from_rep(journal.disk_end(d, store_key_to_rep(id), 7))? != Some(324u64) {
         fail("L94: END did not advance on the group count")
     }
+    let stats = cadence_stats(send)
+    if stats.segment_writes != 5 || stats.window_writes != 0 || stats.frames != 6 || stats.frames_per_group[0] != 4 || stats.frames_per_group[1] != 1 || stats.group_early_sync != 5 || stats.end_writes != 2 || stats.end_deadline != 1 || stats.end_cap != 1 {
+        fail("L94: metrics differ from the five durable groups and two END writes")
+    }
     cadence_frame(group, send, ctx, 7)
-    result.unwrap(journal.seal_group(group, send, true))
+    result.unwrap(journal.seal_group(group, send, true, EarlySync))
     cadence_ack(received, synced, 7)
     drop(take send)
     failure_result_from_rep(result.unwrap(task.join(take worker)))?
@@ -520,7 +534,7 @@ fn cadence_failed_write(tasks: Tasks, c: Clock, fail_end: bool) -> Result[(), Er
     let journal.DirJournalChannels(frames: take send, queued: take receive, acks: take acks, received: take received, ready: take ready, waiting: take waiting, written_send: take notices, written_receive: take written, synced_send: take synced_send, synced_receive: take synced) = journal.dir_journal_channels()
     let cadence_spec = journal.JournalCadence(end_groups: 1, end_interval_ms: 10)
     let (returned, recycled): (Sender[Bytes], Receiver[Bytes]) = channel.new(1)
-    let group = journal.group_head(1, 65536, header, take recycled)
+    let group = journal.group_head(1, 65536, header, c, take recycled)
     let input = journal.JournalWorker(store: store_key_to_rep(id), seq: 7, segment: take segment, end_file: take end_file, returned: take returned, group_bytes: 65536, clock: c, cadence: cadence_spec, zero_extension: true, receive: take receive, send: take acks, ready: take ready, written: take notices, synced: take synced_send)
     cadence_frame(group, send, format.DiskContext(store: store_key_to_rep(id), role: 2, seq: 7), 1)
     let worker = task.spawn(tasks, bytes journal.JOURNAL_WORKER_SLACK, take input, journal.journal_worker)

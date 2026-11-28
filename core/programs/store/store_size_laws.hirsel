@@ -98,19 +98,19 @@ fn check_directory_sizing_boundary(o: Overrides) {
 // group used to size inside a 39,839,262 B share. At the resident floor:
 //   journal worker and buffers: 67,108,864 + 8,192 + 80 + 32,768 + 288 + 64 = 67,150,256
 //   segment creation block: 4,096
-//   six journal channels: 632
+//   six journal channels: 640
 //   writer state: 1,768
 //   resident: 1,048,576
 //   cut phase: round8(16,777,726) + 65,536 + 2 × 95,326 + (4,096 + 16,711,680)
 //            = 33,749,692, above the write peak of 2 × 16,777,296
-//   total: 101,955,020
+//   total: 101,955,028
 @test
 fn directory_grant_covers_journal_worker(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    if journal_channel_bytes() != 632 {
-        fail("§1.1: the six Directory channels cost 632 bytes")
+    if journal_channel_bytes() != 640 {
+        fail("§1.1: the six Directory channels cost 640 bytes")
     }
     let o = group_override(67108864)
-    let need = 101955020u64
+    let need = 101955028u64
     match (bound bytes 0u64 {
         directory_writer_need(o)
     }) {
@@ -147,14 +147,14 @@ fn directory_grant_covers_journal_worker(d: Dir, c: Clock, r: Random, tasks: Tas
 // With a 64 KiB group, 64 commits and the 1 MiB resident floor:
 //   journal worker and buffers: 65,536 + 8,192 + 80 + 32,768 + 288 + 64 = 106,928
 //   segment creation block: 4,096
-//   six journal channels: 632
+//   six journal channels: 640
 //   writer state: 1,768
 //   resident: 1,048,576
 //   write peak: 2 × 327,760 = 655,520, above the cut phase
 //     max(65,536, round8(72 + 16 + 236 + 65,536 + 20 + 166)) + 65,536 + 2 × 95,326
 //     + (4,096 + 262,144) = 588,476 and recovery 65,536 + 327,760 = 393,296
-//   total: 1,817,520 <= 2,097,152
-// The same sizes with the ceilings need 34,911,692 (the cut phase,
+//   total: 1,817,528 <= 2,097,152
+// The same sizes with the ceilings need 34,911,700 (the cut phase,
 // 33,749,692, wins there; directory_grant_covers_journal_worker keeps the
 // default figure).
 @test
@@ -163,12 +163,12 @@ fn small_directory_place_need(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     o.pack_bytes = Some(65536)
     o.resident_limit = Some(history.MIB)
     o.limits = Some(small_place_limits())
-    let need = 1817520u64
+    let need = 1817528u64
     if directory_writer_need(o) != need || need > 2 * history.MIB {
         fail("§11.1 AP4a: the small Directory Place need")
     }
     o.limits = None
-    if directory_writer_need(o) != 34911692u64 {
+    if directory_writer_need(o) != 34911700u64 {
         fail("§1.1: the same sizes at the ceilings")
     }
     o.limits = Some(small_place_limits())

@@ -105,7 +105,7 @@ fn scrub_next(mut tour: Scrub, mut spent: u64) -> Result[(), Error] waits {
         let mut input = failure_result_from_rep(journal.journal_input(take opened, false))?
         let header = failure_result_from_rep(manifest.disk_read_header(path, failure_result_from_rep(manifest.scrub_prefix(mut input, path, 0, 72, mut spent))?, 3, Some(seq), optional_store_key_to_rep(Some(tour.store))))?
         let index_at = tour.packs[tour.position].index
-        tour.open = Some(manifest.ScrubInput(input: take input, path: take path, context: header.context, checked_pack: manifest.pack_scan_indexed(class, tour.next_stamp, index_at), expected: take expected, slot: 0))
+        tour.open = Some(failure_result_from_rep(manifest.scrub_input(take input, take path, header.context, manifest.pack_scan_indexed(class, tour.next_stamp, index_at), take expected))?)
         tour.at = 72
         return Ok(())
     }

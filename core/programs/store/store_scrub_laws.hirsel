@@ -139,6 +139,84 @@ fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     close(take db)
 }
 
+// Rewrites the stamp of row 0 in the first PACK_INDEX frame of a listed
+// class-3 or class-4 pack and seals the frame again, so its envelope still
+// verifies and only the row disagrees with the data frame it names.
+fn scrub_restamp_index_row(dir: Dir, id: StoreId, seq: u64, index_at: u64) -> Result[String, Error] waits {
+    let path = failure_result_from_rep(manifest.paged_pack_path(seq))?
+    let mut raw = failure_result_from_rep(manifest.disk_read_paged_file(dir, path, 67108864))?
+    let size = format.read_le(raw, index_at + 4, 4)
+    let mut payload = failure_result_from_rep(types.copied(list.slice(raw, index_at + 16, index_at + 16 + size)))?
+    // PACK_INDEX payload (§13.1): count u32, prev u64, then each row as
+    // offset u64, len u32, kind u8, collection u32, stamp u64.
+    let stamp = list.word_le(payload, 29)
+    if stamp < 2 {
+        fail("scrub PACK_INDEX: the first row's stamp leaves room for an older one")
+    }
+    list.set_word_le(mut payload, 29, stamp - 1)
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: seq)
+    let flags: u16 = int.truncate(format.read_le(raw, index_at + 2, 2))
+    let sealed = failure_result_from_rep(types.capacity(format.disk_seal(ctx, index_at, manifest.PACK_INDEX_KIND, flags, payload)))?
+    list.copy_from_slice(mut raw, index_at, sealed)
+    failure_result_from_rep(manifest.disk_write_synced(dir, path, raw))?
+    Ok(take path)
+}
+
+// §13.8 "What lazy open cannot see": a scrub tour checks a class-3 and a
+// class-4 pack's PACK_INDEX against its frames. Each pack's index names one
+// frame by an older stamp, in a frame whose own envelope verifies; the tour
+// reports each pack once, and a tour before the damage reports nothing.
+@test
+fn disk_test_scrub_pack_index_names_its_frames(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let path = disk_test_directory(d)
+    let options = l96_tiered_options(182375272u64, 65536, 500)?
+    let mut db = open(tasks, path, c, r, options)?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    l96_put_bytes(mut db, rows, 0, l96_blob_value(1, 32))?
+    l96_put_bytes(mut db, rows, 1, l96_blob_value(2, 2000))?
+    set_residency(mut db, rows.id, Tiered)?
+    let mut clean: List[Fault] = list.new()
+    let mut before = begin_scrub(mut db)?
+    let _ = scrub_to_end(mut before, 1048576, mut clean)?
+    drop(take before)
+    if list.len(clean) != 0 {
+        fail("scrub PACK_INDEX: the undamaged Tiered packs are clean")
+    }
+    let mut damaged: List[String] = list.new()
+    let mut classes: List[u8] = list.new()
+    let mut listed = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
+    while let Some((seq, pack)) = std.omap.next(mut listed) {
+        if pack.class >= 3 {
+            list.push(mut damaged, scrub_restamp_index_row(path, db.store, seq, pack.index)?)
+            list.push(mut classes, pack.class)
+        }
+    }
+    if !list.contains(classes, 3u8) || !list.contains(classes, 4u8) {
+        fail("scrub PACK_INDEX: the table seals a class-3 and a class-4 pack")
+    }
+    let mut faults: List[Fault] = list.new()
+    let mut tour = begin_scrub(mut db)?
+    let _ = scrub_to_end(mut tour, 1048576, mut faults)?
+    drop(take tour)
+    if list.len(faults) != list.len(damaged) {
+        fail("scrub PACK_INDEX: each pack whose index misnames a frame is reported once")
+    }
+    for file in damaged {
+        let mut named = false
+        for found in faults {
+            if found.file == file {
+                named = true
+            }
+        }
+        if !named {
+            fail("scrub PACK_INDEX: the fault names the pack whose index misnames a frame")
+        }
+    }
+    trust_opt_out("scrub/pack-index", mut db)
+    close(take db)
+}
+
 @test
 fn disk_test_scrub_damage_budget(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let path = disk_test_directory(d)

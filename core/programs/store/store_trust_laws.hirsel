@@ -101,7 +101,7 @@ fn trust_expected_fault(case: String, problem: Error) -> bool {
     match problem {
         Corrupt(Fault(file: file, why: Truncated, ..)) if case == "read-only/torn-manifest" => file == "MANIFEST",
         Corrupt(Fault(why: Absent, ..)) => case == "bucket_test_m2_retention_witness",
-        Corrupt(_) => case == "L69/seeded-write" || case == "scrub/misdirected" || case == "scrub/damage-budget" || case == "tiered/corrupt-fold" || case == "catchup/settled-leaf",
+        Corrupt(_) => case == "L69/seeded-write" || case == "scrub/misdirected" || case == "scrub/damage-budget" || case == "scrub/pack-index" || case == "tiered/corrupt-fold" || case == "catchup/settled-leaf",
         Poisoned(_) => case == "journal/poison" || case == "follower-crash/enospc" || case == "crash-sim/fault",
         _ => false,
     }
@@ -112,7 +112,7 @@ fn trust_expected_reopen_fault(case: String, problem: Error) -> bool {
 }
 
 fn trust_allows_teardown_opt_out(case: String) -> bool {
-    case == "L69/seeded-write" || case == "scrub/misdirected" || case == "scrub/damage-budget" || case == "tiered/corrupt-fold" || case == "catchup/settled-leaf" || case == "journal/poison" || case == "follower-crash/enospc" || case == "teardown/opt-out-control" || case == "teardown/session-scope" || case == "scrub/paced-history" || case == "crash-sim/fault"
+    case == "L69/seeded-write" || case == "scrub/misdirected" || case == "scrub/damage-budget" || case == "scrub/pack-index" || case == "tiered/corrupt-fold" || case == "catchup/settled-leaf" || case == "journal/poison" || case == "follower-crash/enospc" || case == "teardown/opt-out-control" || case == "teardown/session-scope" || case == "scrub/paced-history" || case == "crash-sim/fault"
 }
 
 fn trust_require_opt_out(case: String) {

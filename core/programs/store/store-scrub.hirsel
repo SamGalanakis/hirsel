@@ -21,7 +21,72 @@ pub type ScrubInput {
     context: format.DiskContext,
     checked_pack: PackScan,
     expected: List[std.page.PagePtr],
-    slot: u64
+    slot: u64,
+    named: ScrubNamed
+}
+
+// A class-3 or class-4 pack's frames against its PACK_INDEX (§13.8). The data
+// frames come first and their rows after, so each side folds its (offset,
+// length, stamp) triples in order into one chained xxh3 and the pack's end
+// compares the two: constant memory and no second read.
+type ScrubNamed {
+    scratch: Bytes,
+    frames: u64,
+    rows: u64,
+    row_count: u64,
+    prev_index: u64,
+    last_row: u64
+}
+
+pub fn scrub_input(take input: format.JournalInput, take path: String, context: format.DiskContext, take checked_pack: PackScan, take expected: List[std.page.PagePtr]) -> Result[ScrubInput, types.Failure] {
+    let scratch = disk_allocation(scoped fn() -> Result[Bytes, types.Failure] {
+        let mut zeroed: Bytes = list.with_capacity(32)
+        for _ in 0u64 .. 32 {
+            list.push(mut zeroed, 0u8)
+        }
+        Ok(take zeroed)
+    })?
+    Ok(ScrubInput(input: take input, path: take path, context: context, checked_pack: take checked_pack, expected: take expected, slot: 0, named: ScrubNamed(scratch: take scratch, frames: 0, rows: 0, row_count: 0, prev_index: 0, last_row: 0)))
+}
+
+fn scrub_chain(mut scratch: Bytes, digest: u64, offset: u64, len: u64, stamp: u64) -> u64 {
+    list.set_word_le(mut scratch, 0, digest)
+    list.set_word_le(mut scratch, 8, offset)
+    list.set_word_le(mut scratch, 16, len)
+    list.set_word_le(mut scratch, 24, stamp)
+    std.check.xxh3(scratch, 0, 32)
+}
+
+// One PACK_INDEX frame of a class-3 or class-4 pack: its envelope, its place
+// in the chain of index frames, and its rows folded for the pack's end.
+fn scrub_index_frame(mut reading: ScrubInput, at: u64, mut spent: u64) -> Result[u64, types.Failure] waits {
+    let head = scrub_prefix(mut reading.input, reading.path, at, 16, mut spent)?
+    let frame = disk_read_frame_head(reading.path, head, at)?
+    if frame.size > format.PACK_INDEX_LIMIT {
+        return Error(format.disk_fault(reading.path, at, Malformed))
+    }
+    let payload = disk_stream_payload_counted(mut reading.input, reading.path, reading.context, at, head, frame, frame.size, mut spent)?
+    let _ = scan_pack_frame(mut reading.checked_pack, reading.path, at, frame.kind, frame.flags, frame.size, payload)?
+    let row_kind = if reading.checked_pack.class == 3 {
+        0x21u8
+    } else {
+        0x22u8
+    }
+    let (prev, take initial) = start_pack_index(reading.path, at, payload, reading.named.last_row)?
+    if prev != reading.named.prev_index {
+        return Error(format.disk_fault(reading.path, at, Order))
+    }
+    let mut cursor = take initial
+    while let Some(take row) = next_pack_index(reading.path, at, payload, mut cursor)? {
+        if row.kind != row_kind {
+            return Error(format.disk_fault(reading.path, at, Malformed))
+        }
+        reading.named.rows = scrub_chain(mut reading.named.scratch, reading.named.rows, row.offset, int.widen(row.len), row.stamp)
+        reading.named.row_count += 1
+        reading.named.last_row = row.offset
+    }
+    reading.named.prev_index = at
+    Ok(at + 16 + frame.size)
 }
 
 pub fn scrub_pack_pointers(known: PageLocations, seq: u64) -> Result[List[std.page.PagePtr], types.Failure] {
@@ -58,7 +123,16 @@ pub fn scrub_frame(mut reading: ScrubInput, frames: u64, payload_bytes: u64, at:
         if !pack_scan_finished(reading.checked_pack, frames, payload_bytes, at) {
             return Error(format.disk_fault(reading.path, at, Malformed))
         }
+        if reading.checked_pack.class >= 3 && (reading.named.row_count != frames || reading.named.rows != reading.named.frames) {
+            return Error(format.disk_fault(reading.path, reading.checked_pack.index, Checksum))
+        }
         return Ok(None)
+    }
+    if reading.checked_pack.class >= 3 && at >= reading.checked_pack.index {
+        if has_pointer {
+            return Error(format.disk_fault(reading.path, reading.expected[reading.slot].offset, Checksum))
+        }
+        return Ok(Some(scrub_index_frame(mut reading, at, mut spent)?))
     }
     let check_pointer = has_pointer && reading.expected[reading.slot].offset == at
     let frame = read_pack_frame(mut reading.input, reading.path, reading.context, mut reading.checked_pack, at, check_pointer, mut spent)?
@@ -71,6 +145,11 @@ pub fn scrub_frame(mut reading: ScrubInput, frames: u64, payload_bytes: u64, at:
         reading.slot += 1
     }
     let end = at + 16 + frame.size
+    if reading.checked_pack.class >= 3 {
+        if let Some(stamp) = frame.stamp {
+            reading.named.frames = scrub_chain(mut reading.named.scratch, reading.named.frames, at, frame.size, stamp)
+        }
+    }
     if reading.slot < list.len(reading.expected) && reading.expected[reading.slot].offset < end {
         return Error(format.disk_fault(reading.path, reading.expected[reading.slot].offset, Checksum))
     }

@@ -29,10 +29,10 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `check` | [check](../../core/core/check.hirsel) | SEM-8, SEM-11, MEM-30 |
 | `sha1` | [sha1](../../core/core/sha1.hirsel) | SEM-8, MEM-30 |
 | `sha256` | [sha256](../../core/core/sha256.hirsel) | SEM-8, MEM-30 |
-| `ed25519`, `p256` | [ed25519](../../core/core/ed25519.hirsel), [p256](../../core/core/p256.hirsel) | SEM-8, MEM-30; [Signature verification](#signature-verification) |
-| `sha512` | [sha512](../../core/core/sha512.hirsel) | SEM-8, MEM-30 |
-| `rsa`, `p384` | [rsa](../../core/core/rsa.hirsel), [p384](../../core/core/p384.hirsel) | SEM-8, MEM-30; [Signature verification](#signature-verification) |
-| `argon2` | [argon2](../../core/core/argon2.hirsel) | SEM-8, MEM-30; [Argon2id](#argon2id) |
+| `ed25519`, `p256` | [ed25519](../../core/core/ed25519.hirsel), [p256](../../core/core/p256.hirsel) | SEM-8, MEM-30; [Signature verification](core-crypto.md#signature-verification) |
+| `sha512` | [sha512](../../core/core/sha512.hirsel) | SEM-8, MEM-30; [SHA-512 laws](core-crypto.md#sha-512-laws) |
+| `rsa`, `p384` | [rsa](../../core/core/rsa.hirsel), [p384](../../core/core/p384.hirsel) | SEM-8, MEM-30; [Signature verification](core-crypto.md#signature-verification) |
+| `argon2` | [argon2](../../core/core/argon2.hirsel) | SEM-8, MEM-30; [Argon2id](core-crypto.md#argon2id) |
 | `box`, `rc`, `arc`, `unique` | [box](../../core/core/box.hirsel), [rc](../../core/core/rc.hirsel), [arc](../../core/core/arc.hirsel), [unique](../../core/core/unique.hirsel) | MEM-13 to MEM-18 |
 | `list`, `string`, `text`, `map`, `span`, `dest` | [list](../../core/core/list.hirsel), [string](../../core/core/string.hirsel), [text](../../core/core/text.hirsel), [map](../../core/core/map.hirsel), [span](../../core/core/span.hirsel), [dest](../../core/core/dest.hirsel) | SEM-3 to SEM-6, MEM-3, MEM-4, MEM-12 |
 | `charge` | [charge](../../core/core/charge.hirsel) | MEM-24, MEM-33 |
@@ -48,7 +48,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `log`, `cell` | [log](../../core/core/log.hirsel), [cell](../../core/core/cell.hirsel) | MEM-29 |
 | `code` | [code](../../core/core/code.hirsel) | PROG-9 |
 | `flow` | [flow](../../core/core/flow.hirsel) | CONC-14 |
-| `provide`, `clock`, `process` | [provide](../../core/core/provide.hirsel), [clock](../../core/core/clock.hirsel), [process](../../core/core/process.hirsel) | CAP-2, CAP-5, CONC-7, FAIL-13, FAIL-15, MEM-24, TLS-5; [Provide](#provide) |
+| `provide`, `clock`, `process` | [provide](../../core/core/provide.hirsel), [clock](../../core/core/clock.hirsel), [process](../../core/core/process.hirsel) | CAP-2, CAP-5, CONC-7, FAIL-13, FAIL-15, MEM-24, TLS-5; [Provide](provider-operations.md#provide) |
 | `net`, `tls`, `secret` | [net](../../core/core/net.hirsel), [tls](../../core/core/tls.hirsel), [secret](../../core/core/secret.hirsel) | NET-1 to NET-14, TLS-1 to TLS-6 |
 | `foreign` | [foreign](../../core/core/foreign.hirsel) (raw handle type `Ptr`) | FFI-4 to FFI-7 |
 | `exec` | [exec](../../core/core/exec.hirsel) | EXEC-2 to EXEC-8 |
@@ -388,8 +388,7 @@ operations it names; nothing else about them may be inferred from an implementat
   charge unchanged ([MEM-26](budgets.md#mem-26-growth-charges-the-current-limit)). A column is lent `mut` only to
   `list.set_lanes`, which keeps its length. A `Columns` is cleaned as a `List` is: rows in
   ascending index order, each row's owning columns in field order. It does not cross a unit
-  boundary ([CONC-15](tasks.md#conc-15-units)), and a clone of one whose rows own storage
-  is not built.
+  boundary ([CONC-15](tasks.md#conc-15-units)).
 - **Deques and heaps.** `deque.push_back` and `deque.push_front` add at either end of a
   `Deque[T]`, and `heap.push` adds to a `Heap[T]`; a refused growth leaves the collection
   unchanged and `x` untaken. `deque.pop_front`, `deque.pop_back` and `heap.pop` remove and
@@ -498,7 +497,7 @@ operations it names; nothing else about them may be inferred from an implementat
   writing, creating the file when absent and emptying it otherwise; `Append` opens for
   writing at the end, creating it when absent; `CreateNew` creates a file for writing and
   returns `Exists` when one is present; `ReadWrite` opens for reading and writing, creating
-  the file when absent and never emptying it. `Durable` (Store v2.92, not yet built) is `Write` whose every
+  the file when absent and never emptying it. `Durable` is `Write` whose every
   completed write survives a host crash, as if `host.sync` had returned after it. `Direct`
   is `Durable` whose `write_at` and `host.zero_at(f, at, len)` (write `len` zeros at `at`)
   take offsets, lengths and buffer addresses that are multiples of 4,096, else `Other(22)`
@@ -509,7 +508,7 @@ operations it names; nothing else about them may be inferred from an implementat
   its in-flight direct writes, so another process can run while they land: a program that hands such a
   file to another process orders the handoff itself, as Store does with an exclusive `host.try_lock` on
   the writing handle, which the kernel holds until the last request issued through it completes
-  (Store §3.3b, v2.98). A read never returns bytes the host failed to read: an unreadable page is an
+  ([Store §3.3b](../../core/programs/store/STORE-SPEC.md)). A read never returns bytes the host failed to read: an unreadable page is an
   error for the read that reaches it, never zeros. `host.read` appends to `buf` at most its spare
   capacity and advances the cursor by the returned count. `Ok(0)` means EOF. A buffer
   with no spare capacity gives `Error(Other(22))` (EINVAL) before issue, even at EOF.
@@ -667,531 +666,20 @@ takes unchecked offsets, and nothing in the document moves.
 
 ## SHA-512
 
-The kernel is the SHA-512 blocks rule above; `std.sha512` and `std.sha384` are library code
-over it. This section holds their laws and build slice.
-
-**One backend.** Every new kernel here and in [TLS-5](tls.md#tls-5-secrets) runs on ring
-0.17.14, the crate the existing signature kernels, `wrap`, `sign` and rustls already link, through
-wrappers in `hirsel-core-net` beside the existing ones: AES-GCM and ChaCha20-Poly1305
-(`ring::aead`), HKDF-SHA256 (`ring::hkdf`), RSA and P-384 verification
-(`ring::signature`), and the SHA-384 inside P-384 verification. Two things ring lacks are
-not on ring. Argon2id is RustCrypto `argon2` 0.6.0 ([Argon2id](#argon2id)), the one
-outside crypto crate for kernels; ring has no memory-hard function. (TLS-8's simulation
-backend adds RustCrypto `p256` and `x25519-dalek` for virtual key draws only; open items,
-below.) The SHA-512 block kernel is
-Hirsel's own compression, as SHA-256's and SHA-1's are, for the reason above.
-
-### SHA-512 laws
-
-The CAVP files are `SHA384ShortMsg.rsp`, `SHA384LongMsg.rsp`, `SHA512ShortMsg.rsp` and
-`SHA512LongMsg.rsp` in [shabytetestvectors.zip](https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/shs/shabytetestvectors.zip),
-copied byte for byte.
-
-| law | bug | oracle and setup |
-|---|---|---|
-| **H1** CAVP | a wrong round constant, rotation or initial word, or SHA-384 returning the wrong 48 bytes | Every record of the four files: `sha512.hash` or `sha384.hash` of `Msg` (the first `Len / 8` bytes) equals `MD`. Also check the published NIST `abc` and 896-bit two-block examples for both hashes. |
-| **H2** padding and streaming | a wrong pad at the 112-byte boundary, a 64-bit length field in the 128-bit slot, or a pending block lost between `add` calls | For every length 0 to 300 of the bytes `i mod 251`, and every split of the input into two `add` calls, `sha512.hash` and `sha384.hash` equal Python `hashlib`'s `sha512` and `sha384` digests, which the test reads from a checked-in table that `hashlib` generated, not from this build. A million `a` bytes streamed 1000 bytes per `add` give the million-`a` digests published with FIPS 180-2's SHA-384 and SHA-512 examples. |
-| **H3** `finish` keeps the state | `finish` mutating the state it was given | After `finish` on the first 100 bytes, adding the remaining 200 and finishing equals the one-shot digest of all 300, for both hashes. |
-| **H4** steps grow by the work-step formula only | a charge per block, no charge for bulk bytes, or `add` compressing block by block in user code | On the reference evaluator, let `k` be the least bound under which `bound steps k { let mut s = take st; sha512.add(mut s, b, 0, list.len(b)); s }` succeeds for a 256-byte `b`, with `st` from `start()` and `b` bound outside the scope. For a 1 MiB `b` (8192 blocks, 32768 work steps where the 256-byte `b` takes 8) the same scope fails under `k + 32759` with `OutOfTime` and succeeds under `k + 32760`. The invariant is MEM-30's: `add` makes one `blocks` call over all its whole blocks, whose work steps are `ceil(bytes / 32)` by the SHA-512 row of the work table, and has no loop over blocks. |
-
-The laws are cases in [sha512.hirsel](../../core/std/tests/sha512.hirsel), run by the shared walker with
-`--backend all`.
-
-### SHA-512 build slice
-
-| slice | size | depends on | contents | laws |
-|---|---|---|---|---|
-| **S5** SHA-512 | S | — | [Core SHA-512](../../core/core/sha512.hirsel) (`blocks`, `block`), `RtOp::Sha512Blocks` lowered as `Sha256Blocks` is, its C entry over a `hirsel-core-rt` `sha512.rs` shaped as `sha256.rs` is (portable rounds, plus the CPU's SHA-512 instructions where present), the evaluator arm; [std.sha512](../../core/std/sha512.hirsel) and [std.sha384](../../core/std/sha384.hirsel) with their API pages. | H1–H4 |
+See the [SHA-512 laws](core-crypto.md#sha-512).
 
 ## Signature verification
 
-The modules `ed25519`, `p256`, `p384` and `rsa` check signatures. The curve modules
-provide functions of type `(key: Bytes, msg: Bytes, sig: Bytes) -> bool`: `ed25519.verify`,
-`p256.verify`, `p256.verify_der`, `p384.verify` and `p384.verify_der`. The `rsa` module
-takes the key as its two integers, `(n: Bytes, e: Bytes, msg: Bytes, sig: Bytes) -> bool`:
-`rsa.verify_pkcs1_sha256` and `rsa.verify_pss_sha256`. Each returns `true` exactly when
-`sig` is a valid signature of all of `msg` under the key by the rule below, and `false`
-otherwise. Every input that is not well formed gives `false`, including a key or signature
-of the wrong length, and no input makes the call fail. The answer does not say which check
-failed. That is how ring reports it, and a caller checking untrusted bytes
-needs no failure path for them. Together these verify every signature an OpenID Connect
-provider issues under the algorithms JWS registers for it: `RS256`, `PS256`, `ES256`,
-`ES384` and `EdDSA` with Ed25519 ([RFC 7518 §3.1](https://www.rfc-editor.org/rfc/rfc7518#section-3.1),
-[RFC 8037](https://www.rfc-editor.org/rfc/rfc8037)).
-Signing is `secret.sign` ([TLS-5](tls.md#tls-5-secrets)), and ephemeral key agreement is
-`secret.key_share`, consumed by a `schedule` constructor ([TLS-8](tls.md#tls-8-packet-ciphers-and-key-agreement)):
-both keep the private key in a `Secret` or a `KeyShare`, never in program bytes, and the
-agreed value never leaves the schedule.
-
-- **Ed25519.** `ed25519.verify` is pure Ed25519 ([RFC 8032 §5.1.7](https://www.rfc-editor.org/rfc/rfc8032#section-5.1.7)),
-  without context or prehash. `key` is the 32-byte encoding of the point `A`, and `sig` is
-  64 bytes `R || S`. It returns `false` unless all of these hold:
-  - `S`, read as a little-endian integer, is below the group order `L`. It is not reduced.
-  - `key` decodes to a point. `y` is the low 255 bits taken mod `p`, so an encoding of
-    `y ≥ p` is accepted. `x` is the root that the top bit selects, and `false` results when
-    there is none. When `x = 0` the top bit is ignored.
-  - The encoding of `[S]B − [k]A` equals the 32 bytes of `R`, where
-    `k = SHA-512(R || key || msg) mod L` hashes `R` and `key` exactly as given.
-
-  This is the cofactorless equation. `R` is never decoded, so a non-canonical or
-  off-curve `R` never matches. `A`'s order is not checked, so small-order and mixed-order
-  keys are accepted whenever the equation holds. That is ring's `ED25519`, and RFC 8032
-  permits it.
-- **P-256.** `p256.verify` and `p256.verify_der` are ECDSA over NIST P-256 with SHA-256
-  ([FIPS 186-5 §6.4.2](https://csrc.nist.gov/pubs/fips/186-5/final)). The kernel hashes
-  `msg`, and `e` is its SHA-256 digest mod `n`.
-  - `key` is an uncompressed SEC 1 point: 65 bytes `0x04 || X || Y` with `X` and `Y` below
-    `p`, on the curve. A compressed (`0x02`, `0x03`) or hybrid (`0x06`, `0x07`) point, a
-    bare 64-byte `X || Y` and the one-byte point at infinity give `false`. ring parses only
-    the uncompressed form, and JWK and COSE keys carry `X` and `Y` whole.
-  - `p256.verify` takes `sig` as 64 bytes `r || s`, each 32 bytes big-endian. That is the
-    IEEE P1363 form that JWS `ES256` uses ([RFC 7518 §3.4](https://www.rfc-editor.org/rfc/rfc7518#section-3.4)).
-  - `p256.verify_der` takes the DER `ECDSA-Sig-Value`, `SEQUENCE { r INTEGER, s INTEGER }`
-    ([RFC 3279 §2.2.3](https://www.rfc-editor.org/rfc/rfc3279#section-2.2.3)). That is the
-    form X.509, WebAuthn and most package signatures use. Only strict DER is accepted:
-    minimal definite lengths, minimal non-negative integers and no trailing bytes. Any BER
-    variation gives `false`.
-  - Both forms need `1 ≤ r, s < n`. The result is `true` exactly when
-    `u1·G + u2·Q` is not the point at infinity and its `x` is `r` mod `n`, where
-    `w = s⁻¹ mod n`, `u1 = e·w` and `u2 = r·w`. A high `s` (`s > n/2`) is accepted, as
-    FIPS 186-5 accepts it, so `(r, s)` and `(r, n − s)` both verify. A caller that needs one
-    signature per message must enforce that itself.
-
-  Both forms are kernels because the conversion between them is where malleability bugs
-  live: Wycheproof's BER cases test exactly that conversion. ring parses strict DER itself
-  (`ECDSA_P256_SHA256_ASN1`), and its `r || s` path is `ECDSA_P256_SHA256_FIXED`.
-- **P-384.** `p384.verify` and `p384.verify_der` are the P-256 rule over NIST P-384 with
-  SHA-384, word for word, with these sizes: `e` is the SHA-384 digest mod `n`, `key` is 97
-  bytes `0x04 || X || Y`, and `p384.verify`'s `sig` is 96 bytes `r || s`, each 48 bytes
-  big-endian, the JWS `ES384` form. The same forms give `false` (compressed, hybrid, bare
-  96-byte and infinity keys), only strict DER is accepted, and a high `s` is accepted. The
-  kernel is ring 0.17.14's `ECDSA_P384_SHA384_FIXED` and `ECDSA_P384_SHA384_ASN1` through
-  `UnparsedPublicKey::verify`, as P-256's is. ring parses only the uncompressed point
-  (`parse_uncompressed_point` refuses any first byte but `0x04` and any other length), and
-  hashes `msg` with its own SHA-384, so no digest truncation rule applies: SHA-384's output
-  is the curve's size.
-- **RSA.** `n` and `e` are unsigned big-endian integers: a JWK's `n` and `e` after base64url
-  decoding ([RFC 7518 §6.3.1](https://www.rfc-editor.org/rfc/rfc7518#section-6.3.1)), or
-  the two fields of an X.509 `RSAPublicKey`. Leading zero bytes in either are ignored, as
-  their values are what is specified. Each function returns `false` unless all of these hold:
-  - `n` is odd, and its form without leading zero bytes is 256 to 1024 bytes long, so it
-    has 2041 to 8192 significant bits. That is ring's `2048_8192` parameter set exactly:
-    ring compares the modulus's length rounded up to whole bytes with 2048 bits, and its
-    exact bit length with 8192. A smaller modulus is not a key a verifier should trust, and
-    8192 bounds the work.
-  - `e` is odd and `3 ≤ e < 2^33`, ring's range.
-  - `sig` has exactly `k` bytes, `k` being the byte length of `n`, and read as an integer it
-    is at least 1 and below `n` ([RFC 8017 §8.2.2](https://www.rfc-editor.org/rfc/rfc8017#section-8.2.2)
-    steps 1 and 2a; a zero signature never verifies, and ring refuses it before the
-    exponentiation). A shorter signature is not padded with zeros, and `n` is not
-    subtracted from a larger one.
-
-  `rsa.verify_pkcs1_sha256` is RSASSA-PKCS1-v1_5 with SHA-256 (JWS `RS256`). The encoded
-  message `sig^e mod n` must equal, byte for byte, the EMSA-PKCS1-v1_5 encoding of `msg`'s
-  SHA-256 digest ([RFC 8017 §9.2](https://www.rfc-editor.org/rfc/rfc8017#section-9.2)),
-  whose `DigestInfo` carries the SHA-256 OID with a NULL parameter. The check encodes and
-  compares; it never parses the padding, so no BER variant, no garbage after the digest and
-  no `DigestInfo` without its NULL is accepted, though RFC 8017's note permits the last.
-  `rsa.verify_pss_sha256` is RSASSA-PSS with SHA-256, MGF1 with SHA-256 and a salt of
-  exactly 32 bytes (JWS `PS256`, which fixes the salt to the hash length, [RFC 7518 §3.5](https://www.rfc-editor.org/rfc/rfc7518#section-3.5)),
-  verified by EMSA-PSS-VERIFY ([RFC 8017 §9.1.2](https://www.rfc-editor.org/rfc/rfc8017#section-9.1.2)):
-  trailer `0xbc`, the bits above `emBits` zero, the padding `PS` zero then `0x01`, and `H`
-  equal to the recomputed hash. The salt length is not detected from the signature, so a
-  signature made with another salt length gives `false`.
-
-  The kernel is ring 0.17.14's `RsaPublicKeyComponents { n, e }.verify` with
-  `RSA_PKCS1_2048_8192_SHA256` or `RSA_PSS_2048_8192_SHA256`. ring refuses a leading zero
-  byte in `n` or `e`, so the wrapper strips them first; an `e` of only zero bytes is then
-  empty, which ring refuses. ring checks the rest of the rules above itself: the modulus
-  size, odd `n`, `e`'s range and parity, `sig`'s length and range, and, for PKCS#1 v1.5,
-  encode-and-compare (`pkcs1_encode`, then a byte comparison). ring's PSS takes the salt
-  length from the hash: its `PSSMetrics` sets `sLen = hLen`, 32 bytes for SHA-256, which is
-  the fixed 32-byte salt this rule and `PS256` require, so the rule needs no salt argument
-  and no check of the wrapper's own. MGF1 uses the same hash. Verification uses only public
-  values.
-- **Charges.** Each call admits no bytes and takes one step plus its work steps
-  ([MEM-30](budgets.md#mem-30-step-bounds)): the fixed weight of its algorithm and one step
-  for each quantum, or part, of `msg`, both from MEM-30's work table. A weight
-  covers the largest key the rules above accept, 8192 bits for RSA, so the steps bound the
-  work whatever the key.
-- **Determinism.** The answer is a function of the input byte strings alone. Verification
-  is not a host or provider operation, and nothing about it is recorded: replay computes it
-  again ([recording](../recording.md#what-a-recording-holds)). An engine may use ring's
-  CPU-specific code. Every path gives the same answer, so by
-  [SEM-8](semantics.md#sem-8-determinism) a run behaves the same on every CPU. The inputs
-  are public, so the time a call takes may depend on them.
-
-### Laws
-
-Each law names the bug it catches and the oracle its expected value comes from. The
-vectors are copied from their sources byte for byte. The Wycheproof files are `testvectors_v1/`
-at [C2SP/wycheproof](https://github.com/C2SP/wycheproof) commit
-`65ca494727a52944c204441c860b039e6786b99b`, cited by `tcId`. Keys come from the test's
-group: `publicKey.pk` for Ed25519, `publicKey.uncompressed` for ECDSA. NIST records are
-counted from 1 within the `[P-256,SHA-256]` section of `SigVer.rsp` in
-[186-4ecdsatestvectors.zip](https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/dss/186-4ecdsatestvectors.zip),
-with key `0x04 || Qx || Qy` and signature `R || S`.
-
-| law | bug | oracle and setup |
-|---|---|---|
-| **SV1** Ed25519 accepts | the wrong hash input order, a prehash or context variant, or a wrong base point | RFC 8032 §7.1 TEST 1 (empty message), TEST 2 (`72`) and TEST 3 (`af82`), with their public keys and signatures: each gives `true`. |
-| **SV2** message bound | `msg` not hashed, or hashed only in part | TEST 3's key and signature over `af83`, TEST 3's message with the low bit of its last byte flipped, give `false`. The pinned file has no message-change case. By hand: changing `msg` changes `k`, so `[S]B − [k]A` no longer encodes `R`. |
-| **SV3** S below L | `S` reduced mod `L` instead of checked | `ed25519_test.json` tcId 63 (`S + L`) gives `false`. tcId 3, the same signature with the original `S`, gives `true`. |
-| **SV4** small-order key | a key-order check that ring and this rule do not make | `ed25519_test.json` tcId 152 gives `true`. The key is the identity, `R` is the encoding of `B` and `S = 1`, so `[1]B − [k]·identity = B`, whose encoding is `R`. Wycheproof marks this `acceptable`, so the expected value comes from the equation. |
-| **SV5** Ed25519 lengths | a wrong length that fails the call, reads past the carrier, or is accepted | Each of these gives `false` and the call does not fail: TEST 1's key cut to 31 bytes, TEST 1's key with `00` appended, TEST 1's signature cut to 63 bytes, and `ed25519_test.json` tcIds 30 (empty signature) and 33 (signature too long). |
-| **SV6** P-256 SigVer | a wrong curve, a truncated digest, or a message passed where the digest belongs | `p256.verify` gives `true` for NIST record 4 (`Result = P`) and `false` for record 1 (`F (3 - S changed)`). |
-| **SV7** high S | low-S normalisation that rejects a valid signature | `p256.verify` gives `true` for `ecdsa_secp256r1_sha256_p1363_test.json` tcId 64, which is valid with `s > n/2`. `p256.verify_der` gives `true` for `ecdsa_secp256r1_sha256_test.json` tcId 7, the high-S twin of tcId 5. |
-| **SV8** strict DER | a BER-lenient parser, or a sign bit read as magnitude | In `ecdsa_secp256r1_sha256_test.json`, `p256.verify_der` gives `true` for tcId 5. It gives `false` for tcId 8 (the sequence length in long form) and for tcId 6 (`s` without its leading zero, so negative). |
-| **SV9** P-256 forms and lengths | a compressed or bare key decoded on one engine only, or a wrong length that fails the call | Each of these gives `false` and the call does not fail. With NIST record 4's message and signature: the key compressed (`0x02` or `0x03` by `Qy`'s parity, then `Qx`) and the bare 64-byte `Qx \|\| Qy`. With record 4's key and message: the signature cut to 63 bytes. And `ecdsa_secp256r1_sha256_p1363_test.json` tcId 121, a 2-byte signature. |
-| **SV10** reference charge | a kernel lowered as library code that loops, a charge per byte or per block, or a weight missing | In a core test body, whose calls of core functions take no call step, on the reference evaluator `bound bytes 0 { bound steps 256 { ed25519.verify(k, m, s) } }` gives `Ok(Ok(true))` for TEST 1, whose message is empty, and `bound steps 255` gives `Error(OutOfTime(steps: 255))`. Under `bound steps 513` and `512`, `p256.verify` gives the same for NIST record 4, whose message is 128 bytes, and `p256.verify_der` for tcId 5. The arguments are locals bound outside the scopes. The expected value follows by hand from MEM-30's table: Ed25519's weight 256 and P-256's 512, one step for a nonempty message under the quantum (64 and 256 bytes) and none for an empty one, and nothing admitted. |
-| **SV11** P-384 accepts and rejects | a wrong curve or hash, a P-256 routine reused, or a Wycheproof case read the other way | Over all of `ecdsa_secp384r1_sha384_p1363_test.json` with `p384.verify` and all of `ecdsa_secp384r1_sha384_test.json` with `p384.verify_der`: each `valid` case gives `true` and each `invalid` case gives `false`. Neither file has an `acceptable` case. With NIST records counted within `[P-384,SHA-384]` of the same `SigVer.rsp`, each record gives `true` exactly when its `Result` is `P`. |
-| **SV12** P-384 forms, DER and high S | a compressed key decoded, a BER-lenient parser, or low-S normalisation | In `ecdsa_secp384r1_sha384_test.json`, `p384.verify_der` gives `true` for tcIds 5 and 7 (its high-S twin), and `false` for tcIds 6 (`s` without its leading zero), 8 and 9 (BER sequence lengths). In the P1363 file, tcIds 1 and 147 (high `s`) give `true`, and tcIds 164 (`r > n`) and 165 (`s > n`) give `false`. With tcId 1's message and signature, the key compressed by `Qy`'s parity, and the bare 96-byte `Qx \|\| Qy`, give `false`; tcId 1's signature cut to 95 bytes gives `false`. None of them fails the call. |
-| **SV13** RS256 accepts | a wrong DigestInfo, a hash over the wrong bytes, or a big-endian/little-endian slip in `n` or `e` | `rsa_signature_2048_sha256_test.json` tcIds 1 to 7, with `n` and `e` from the group's `publicKey.modulus` and `publicKey.publicExponent`, give `true`. The JWS of [RFC 7515 Appendix A.2](https://www.rfc-editor.org/rfc/rfc7515#appendix-A.2), with `msg` its ASCII JWS Signing Input and `n` and `e` from its JWK, gives `true`, and with the last byte of the signing input changed gives `false`. tcId 1 with one leading zero byte added to `n` gives `true`. |
-| **SV14** PKCS#1 v1.5 is encode-and-compare | a padding parser that accepts BER, trailing garbage or a missing NULL (Bleichenbacher 2006 forgeries against `e = 3`) | Over all of `rsa_signature_2048_sha256_test.json`, each `invalid` case gives `false`, among them tcIds 236 and 237 (the message not hashed), 244 and 245 (`sig ≥ n`) and 246 (two bytes too long). tcId 8, which Wycheproof marks `acceptable` (`MissingNull`), gives `false`: the expected value follows from §9.2's encoding, which the rule compares byte for byte. |
-| **SV15** PS256 with a fixed salt | salt-length auto-detection, a wrong MGF hash, or a wrong `emBits` mask | Over all of `rsa_pss_2048_sha256_mgf1_32_test.json` with `rsa.verify_pss_sha256`, each `valid` case gives `true` (tcIds 73 and 74 among them: salts of all zero and all one bits) and each `invalid` case gives `false`. Each `valid` case of `rsa_pss_2048_sha256_mgf1_0_test.json` gives `false`, since its salt is empty and the rule fixes 32 bytes. |
-| **SV16** RSA key bounds | a small or even key accepted, or a bad key that fails the call | Each gives `false` and none fails the call: the nine SHA-256 cases of `rsa_pkcs1_1024_sig_gen_test.json` (marked `acceptable` with `SmallModulus`), SV13's tcId 1 with `e` replaced by `01 00 00` (even) and by `01` (below 3), with `e` given as nine bytes `01 00 00 00 00 00 00 00 01` (≥ 2^33), with its signature cut to 255 bytes, and with the modulus replaced by either an even 256-byte integer or the 8201-bit odd integer encoded as `01`, 1023 zero bytes, then `01`. |
-| **SV17** reference charge | a per-byte charge, a missing weight, or RSA's modular exponentiation lowered as a loop | In a core test body, on the reference evaluator, `bound bytes 0 { bound steps 2048 { rsa.verify_pkcs1_sha256(n, e, m, s) } }` gives `Ok(Ok(true))` for SV13's tcId 1 and `bound steps 2047` gives `Error(OutOfTime(steps: 2047))`; the same two scopes over `rsa.verify_pss_sha256` give the same for `rsa_pss_2048_sha256_mgf1_32_test.json` tcId 1. Both messages are empty. `p384.verify` for its P1363 tcId 1, whose message is 6 bytes, gives `Ok(Ok(true))` under 8193 and refuses under 8192. The arguments are locals bound outside the scopes. By hand from MEM-30's table: the weight (RSA 2048, P-384 8192), one step for a nonempty message under the quantum, and nothing admitted. |
-| **SV18** Ed25519 edge vectors | a verifier change that switches between cofactorless, cofactored (ZIP-215) or strict-point-decoding acceptance sets, or checks `S <= L` instead of `S < L` | All 12 vectors of "Taming the many EdDSAs" (`novifinancial/ed25519-speccheck` commit `65519336fda78a3d016e947df6d82848aca0c9da`, `cases.json` 0–11), selected ZIP-215 vectors (`hdevalence/ed25519consensus` commit `15731de461e4d21d6a79d5b7aaf473454f9d2009`, `zip215_test.go` cases 0, 8, 12, 14, 112, 168, 182), ZIP-215 case 0 with `S = L` (`[L]B = [0]B`), and Wycheproof `ed25519_test.json` tcIds 18 and 151. Expected verdicts follow the cofactorless rule above (matching ring 0.17.14): `true` for speccheck cases 0–3 and 11 and ZIP-215 cases 0, 112, 168, 182; `false` for `S = L`, `S > L`, `S >> L` (cases 6–7, tcId 18), cofactored-only cases (cases 4–5, ZIP-215 case 14), non-canonical `R` (cases 8–9, ZIP-215 cases 8, 12, tcId 151) and canonicalized-key hash case 10. |
-
-The laws are cases in the core contract harness, in `core/core/tests/ed25519.hirsel`,
-`core/core/tests/p256.hirsel`, `core/core/tests/p384.hirsel` and `core/core/tests/rsa.hirsel`.
-SV11, SV14 and SV15 walk whole Wycheproof files, which are checked in under
-`core/core/tests/vectors/` byte for byte from the pinned commit. They take no capability, so the shared walker's `--backend all`
-runs each on the evaluator, Cranelift dev and LLVM release ([README](../../core/std/tests/README.md)).
-
-### Build slice
-
-| slice | size | depends on | contents | laws |
-|---|---|---|---|---|
-| **SV** signature verification | S | — | `core/core/ed25519.hirsel` and `core/core/p256.hirsel` with the three bodiless headers, and their rows in `core_ops.rs` as `Lane::Value` kernels. Separate functions in `hirsel-core-net` wrap ring 0.17.14's `ED25519`, `ECDSA_P256_SHA256_FIXED` and `ECDSA_P256_SHA256_ASN1`. The `RtOp`s `Ed25519Verify`, `P256Verify` and `P256VerifyDer` take key, message and signature pointer and length pairs and return a `u64` 0 or 1. The C entries `hirsel_core_ed25519_verify`, `hirsel_core_p256_verify` and `hirsel_core_p256_verify_der` in `hirsel-core-rt` each call the corresponding wrapper, as does the evaluator's `RtOp` arm (its `eval` feature already links `hirsel-core-net`), so compiled code and the evaluator answer from the same code. Cranelift and LLVM lower these as native calls, as `Sha256Blocks` is lowered. There is no `HostOp`, provider path or recording change. The module row's `unbuilt` mark is removed when the slice lands. | SV1–SV10 |
-| **SR** P-384 and RSA | S | SV | `core/core/p384.hirsel` and `core/core/rsa.hirsel` with the four bodiless headers, their `core_ops.rs` rows as `Lane::Value` kernels, the `RtOp`s `P384Verify`, `P384VerifyDer`, `RsaVerifyPkcs1Sha256` and `RsaVerifyPssSha256` (pointer and length pairs in, `u64` 0 or 1 out), wrappers in `hirsel-core-net` beside the ring ones over ring 0.17.14's `ECDSA_P384_SHA384_FIXED`, `ECDSA_P384_SHA384_ASN1`, `RSA_PKCS1_2048_8192_SHA256` and `RSA_PSS_2048_8192_SHA256` (the RSA wrapper stripping leading zero bytes from `n` and `e` before `RsaPublicKeyComponents::verify`), the C entries in `hirsel-core-rt`, and the evaluator's arms calling the same wrappers. Lowered as native calls, as SV's kernels are. | SV11–SV17 |
+See the [signature verification contract](core-crypto.md#signature-verification).
 
 ## Argon2id
 
-```hirsel core
-pub type Argon2Cost { memory_kib: u32, passes: u32, lanes: u32 }
-pub type Argon2Error = Params | Capacity(Capacity)
-pub fn id(password: Bytes, salt: Bytes, key: Bytes, data: Bytes, cost: Argon2Cost, len: u64, mut out: Bytes) -> Result[(), Argon2Error]
-```
-
-`argon2.id` computes Argon2id version `0x13`, the function `H` of
-[RFC 9106](https://www.rfc-editor.org/rfc/rfc9106) §3, with `password` as `P`, `salt` as
-`S`, `key` as the secret value `K`, `data` as the associated data `X`, `memory_kib` as `m`,
-`passes` as `t`, `lanes` as `p` and `len` as the tag length `T`. It appends the `len` tag
-bytes to the spare capacity of `out`. `key` and `data` are empty in ordinary password
-hashing; they are there because RFC 9106's own test vector uses them. Lanes are computed
-one after another on the calling thread, which gives the same tag as parallel lanes. Only
-version `0x13` exists here: RFC 9106 specifies no other.
-
-The results, decided in this order:
-
-- `Params` before any work, admitting nothing and taking no step beyond the call's own,
-  when any of these fails: `1 ≤ lanes ≤ 2^24 − 1`, `memory_kib ≥ 8 × lanes`, `passes ≥ 1`,
-  `4 ≤ len ≤ 2^32 − 1`, `8 ≤ len(salt) ≤ 2^32 − 1`, `len(password) ≤ 2^32 − 1`,
-  `len(key) ≤ 2^32 − 1` and `len(data) ≤ 32`. All but the last two bounds are RFC 9106 §3.1's;
-  the eight-byte salt floor and the 32-byte associated-data ceiling are the RustCrypto
-  crate's, refused here explicitly rather than inherited as a hidden failure.
-- `Capacity(c)` before any work, with `len` as `requested`, when the tag does not fit the
-  spare of `out`. Nothing is appended.
-- The work charge, below. When the current bound has too few steps it raises `OutOfTime` at
-  the call, having admitted and computed nothing.
-- `Capacity(c)` when the limit refuses the working memory, below, with nothing computed.
-- `Ok(())` with the tag appended.
-
-**Charge.** The call takes one step, as every core call does, and then one further step
-for each 1 KiB block compression the parameters choose: `passes × m′`, where
-`m′ = 4 × lanes × ⌊memory_kib / (4 × lanes)⌋` is the block count RFC 9106 §3.2 rounds
-`memory_kib` down to. The steps are taken at the call, before the memory is admitted and
-before any work, as `secret.scram_sha256` takes its iteration steps
-([MEM-30](budgets.md#mem-30-step-bounds)). This is MEM-30's per-unit exception and not the
-one step of `sha256.blocks`, because here the work is not bounded by any length a limit
-bounds: `passes` alone can make a call with small arguments run for an hour, and a
-stored hash that names its own cost is outside input. The
-initial and final BLAKE2b hashing is bounded by the argument lengths and is covered by the
-call's own step. The call then admits `1024 × m′` bytes of working memory from the
-current limit ([MEM-24](budgets.md#mem-24-logical-charges)), zeroes it after the tag is
-computed and refunds it before it returns. The tag lands in capacity the caller holds, so
-nothing else is admitted.
-
-**Determinism and timing.** The tag is a function of the arguments alone. The kernel is a
-pure computation: it passes no replay point and replay computes it again. The engine may
-use the crate's vector code; the tag is the same on every CPU (SEM-8). Argon2id's first
-half pass addresses memory independently of the password, and the rest addresses it by
-the data, as RFC 9106 §3.4 designs; no further constant-time property is required or
-claimed. The kernel is RustCrypto `argon2` 0.6.0 with `Algorithm::Argon2id`,
-`Version::V0x13` and `Argon2::new_with_secret` for a nonempty `key`, computing with
-`hash_password_into_with_memory` over the admitted blocks.
-
-**Std.** `std.argon2` is library code over the kernel. Its `PhcError` has two cases,
-`Malformed` and `Argon2(Argon2Error)`.
-
-```hirsel
-fn hash(password: Bytes, salt: Bytes, cost: Argon2Cost) -> Result[String, std.argon2.PhcError] {
-  std.argon2.hash(password, salt, cost)
-}
-fn verify(password: Bytes, phc: Bytes) -> Result[bool, std.argon2.PhcError] {
-  std.argon2.verify(password, phc)
-}
-fn recommended() -> Argon2Cost { std.argon2.recommended() }
-```
-
-`hash` computes a 32-byte tag and writes
-`$argon2id$v=19$m=<m>,t=<t>,p=<p>$<salt>$<tag>`, the PHC string format that libargon2 and
-RustCrypto write, with decimal parameters without leading zeros and the salt and tag in
-standard base64 without padding. `verify` parses exactly that form, recomputes with the
-decoded salt, the parameters and the decoded tag's length, and compares the tags with
-`hmac.equal`, whose time depends only on the lengths. Any other text is `Malformed`: another
-variant (`argon2i`, `argon2d`), a version other than `19` or none, parameters out of order
-or repeated, a `keyid` or `data` field, base64 with padding or outside the alphabet, and a
-tag shorter than 4 bytes. A well-formed string whose parameters the kernel refuses gives
-`Argon2(Params)`. The salt is the caller's, drawn with `host.random`; `std.argon2` takes no
-capability. `recommended` returns RFC 9106 §4's second recommendation, `m = 65536`, `t = 3`,
-`p = 4`, which costs `196,609` steps and 64 MiB.
-
-A password sealed as a `Secret` derives a key with `secret.derive_argon2id`
-([TLS-5](tls.md#tls-5-secrets)). It uses the same Argon2id parameters, block steps
-and working-memory charge. TLS-5 defines the child policy, storage charge and
-refusal order.
+See the [Argon2id contract](core-crypto.md#argon2id).
 
 ### Argon2id laws
 
-In the scoped laws, `out` is moved into the scope and returned with the result, since
-MEM-30 refuses a body that lends `mut` a place declared outside it; the other arguments are
-locals bound outside.
-
-| law | bug | oracle and setup |
-|---|---|---|
-| **AR1** RFC vector | a wrong `H0` (missing `K` or `X`, wrong length prefixes), wrong addressing, or Argon2i or Argon2d computed | `argon2.id` with `P` 32 bytes `01`, `S` 16 bytes `02`, `K` 8 bytes `03`, `X` 12 bytes `04`, `m = 32`, `t = 3`, `p = 4` and `len = 32` appends RFC 9106 §5.3's tag. |
-| **AR2** reference vectors and PHC | a lane-count or memory-size slip that only shows at larger `m`, or a PHC encoding that other implementations do not read | The seven `Argon2_id` `hashtest` cases in [phc-winner-argon2](https://github.com/P-H-C/phc-winner-argon2) `src/test.c` (password `password` or `differentpassword`, salt `somesalt`, `m` from 2^8 to 2^18, `t` from 1 to 4, `p` 1 or 2): `argon2.hash` returns each case's PHC string exactly, and `argon2.verify` of it gives `true`. The same string with its tag's last character changed so the decoded tag differs gives `false`. |
-| **AR3** parameter refusals | a refusal after work, or a crate error that fails the call | Each gives `Params`, appends nothing and, under `bound bytes 0 { bound steps 1 { ... } }` with its arguments bound outside, returns `Ok(Ok(Error(Params)))`: `m = 15, p = 2`; `t = 0`; `p = 0`; `p = 2^24`; a 7-byte salt; `len = 3`; 33 bytes of `data`. |
-| **AR4** per-block charge | the work counted as one step, `m` not rounded down, or the steps taken after the work | With AR2's `m = 256, t = 2, p = 2` case (`m′ = 256`, so 512 blocks), `bound steps 513 { ... }` succeeds and `bound steps 512 { ... }` gives `Error(OutOfTime(steps: 512))` with nothing appended to `out`. With `m = 259` and otherwise the same, `m′` is still 256 and the same two bounds give the same two results. By hand from RFC 9106 §3.2 and MEM-30. |
-| **AR5** memory admission | working memory taken from nowhere, kept after return, or admitted before the steps | Under a limit with `262,143` bytes free, AR4's call gives `Capacity(c)` with `c.requested = 262,144`; with `262,144` free it succeeds, and afterwards the limit has `262,144` free again. |
-| **AR6** PHC strictness | a lenient parser that accepts a downgraded variant or version | Starting from AR2's first string, `argon2.verify` gives `Malformed` for `$argon2i$` in its place, `v=16`, `v=` removed, `t=2,m=65536` swapped, `m=065536`, a trailing `=` on the salt, and `,keyid=AAAA` after the parameters. |
-
-The laws are cases in `core/core/tests/argon2.hirsel` and `core/std/tests/argon2.hirsel`
-with `--backend all`. AR2's larger cases take a quarter of a GiB and a fraction of a second
-each on native engines; on the evaluator only the `m = 256` cases run.
-
-### Argon2id build slices
-
-| slice | size | depends on | contents | laws |
-|---|---|---|---|---|
-| **CK** the `argon2` crate | S | — | `argon2 =0.6.0` (default features off, `alloc` on) through `third-party/` and reindeer, with its dependency closure (`blake2`, which computes RFC 9106's `H` and `H′`, among it), each with its licence file. It is the only RustCrypto crate the kernels use. No kernel is added in this slice. | builds and lints |
-| **A2** Argon2id | M | CK | `Argon2Cost` and `Argon2Error` in the prelude, `core/core/argon2.hirsel` with `id`, its `core_ops.rs` row, `RtOp::Argon2id` taking the seven arguments as pointer and length pairs and words, the per-block steps in the reference evaluator and in every engine (MEM-30's list), the working-memory admission and refund, the native C entry and the evaluator arm over one wrapper; `core/std/argon2.hirsel` and its [API page](../../core/std/api/argon2.md). | AR1–AR6 |
-
-### Open
-
-*Not normative.* Questions the crypto kernels (SHA-512, P-384, RSA, Argon2id here; the AEAD
-and derivation sinks in [TLS-5](tls.md#tls-5-secrets)) leave for a later decision:
-
-Two earlier questions are closed. The backend: every new kernel runs on ring 0.17.14 but
-Argon2id, on RustCrypto `argon2` because ring has none, and the SHA-512 block kernel, which
-is Hirsel's own as SHA-256's is ([SHA-512](#sha-512)). The one exception is TLS-8's
-simulation backend: RustCrypto `p256` 0.14.0 and `x25519-dalek` 3.0.0 compute key shares and
-P-256 signatures from virtual draws, because ring takes randomness only through its
-`SecureRandom` and cannot be fed an ordered stream. Host keys stay on ring
-(media-crypto-amend-2227; reversible if ring gains a scalar-from-bytes constructor). The `rsa` crate's age and RUSTSEC-2023-0071: no `rsa` crate is used.
-
-1. **Argon2 associated data** is capped at 32 bytes, the crate's limit, where RFC 9106
-   allows `2^32 − 1`. No known format needs more.
-2. **No cost floor.** `argon2.id` and `std.argon2.hash` accept any RFC-valid cost, where
-   SCRAM refuses fewer than 4096 iterations. A floor for `hash` alone (OWASP's
-   `m = 19456, t = 2`) would refuse weak new hashes without refusing old stored ones.
-3. **More JWS algorithms.** `RS384`, `RS512`, `PS384` and `PS512` are left out; each is a
-   row in this section over ring's `RSA_PKCS1_2048_8192_SHA384`, `_SHA512`,
-   `RSA_PSS_2048_8192_SHA384` or `_SHA512` and its Wycheproof file when a provider needs it.
-   `ES512` needs P-521, which ring 0.17.14 lacks, so it would reopen the backend question.
-4. **HKDF on program bytes** and HKDF over SHA-512 are not specified; the first is library
-   code over `std.hmac` with no kernel, and ring's `HKDF_SHA512` would back the second.
-   HKDF over SHA-384 on secrets is not a sink either: TLS-8's schedules run it inside,
-   under fixed labels, and no generic Extract or Expand on a `Secret` exists.
-5. **A pepper under `Secret`.** Argon2's secret value `K` is program bytes in `argon2.id`;
-   a `secret.argon2id_hash` that takes `K` from a `Secret` is not specified.
-6. **Random-nonce AEAD at scale.** XChaCha20-Poly1305 or AES-GCM-SIV would let callers
-   draw nonces without the `2^32` message bound, and let `wrap` drop its per-blob HKDF.
-   ring 0.17.14 offers neither, so either would reopen the backend question.
-7. **Key state left after a call.** ring 0.17.14 implements no `Drop` that zeroes its AEAD
-   key schedules (`LessSafeKey`) or its HMAC and HKDF keys (`hmac::Key`, `Prk`), so the
-   AEAD and derivation sinks, like the MAC sink, `wrap` and `sign`, promise run-owned
-   memory and no charge, not zeroing of that state. The secret's own bytes and Argon2id's
-   working memory, which Hirsel holds, are still zeroed as their rules say. Zeroing ring's
-   state would need a ring that does it or an allocator that clears what the sinks free.
-   TLS-8 erases only what Hirsel owns: schedule secrets, sealer and opener IVs, and the VAES
-   `AesKey` and `HTable` built in place in the slot. The state of its ring values
-   (ChaCha20-Poly1305 and non-VAES AES-GCM keys, HMAC-SHA1 keys, ephemeral and ECDSA keys)
-   falls under this item too, as do earlier copies, registers and stack.
+See the [Argon2id laws](core-crypto.md#argon2id-laws).
 
 ## Provide
 
-`provide` makes capabilities of virtual construction
-([CAP-2](capabilities.md#cap-2-capabilities-are-opaque)) and answers their operations in the
-program's own code ([CAP-5](capabilities.md#cap-5-provider-operations)). Callers see nothing
-new: a `Dir`, `Net`, `Exec`, `Stdout`, `Stderr`, `Clock`, `Random` or `Process` from `provide` has its
-ordinary type and supports the same operations as a host grant.
-A `provide.net` port also answers the Unix operations ([NET-14](net.md#net-14-unix-datagrams)).
-`provide.exec` makes an `Exec` answered on a `Served[ExecOp]` port
-([EXEC-8](exec.md#exec-8-exec-at-the-replay-point-and-served-exec)).
-
-Version note (2026-11-25, served-reply-table-2694): `DirOp` gains `ZeroExtension`,
-`TryLockShared` and `ZeroAt` and `DirReply` gains `ZeroExtensionSupported`, as
-[core.hirsel](../../core/core/core.hirsel) already declared them, and **Handles** now lists
-the reply each operation takes. Before this note the runtime refused `Locked` for
-`TryLockShared`, so a served port's server failed on the only reply it could give.
-
-```hirsel core
-pub opaque resource type Served[Op]
-pub opaque resource type Call[Op]
-pub opaque type Reply[Op]
-pub opaque resource type ClockHand
-pub opaque resource type StopTrigger
-pub type Withdrawn = Withdrawn()
-pub type Part = Whole | Read | Write
-pub type DirOp = Open(dir: u64, path: u64, mode: OpenMode) | OpenDir(dir: u64, path: u64) | Mkdtemp(dir: u64, prefix: u64, room: u64) | Stat(dir: u64, path: u64) | Mkdir(dir: u64, path: u64) | Remove(dir: u64, path: u64) | RemoveTree(dir: u64, path: u64) | Rename(dir: u64, from: u64, to: u64) | SyncDir(dir: u64) | Entries(dir: u64, path: u64) | Read(file: u64, room: u64) | ReadAt(file: u64, at: u64, room: u64) | Write(file: u64, len: u64) | WriteAt(file: u64, at: u64, len: u64) | StatFile(file: u64) | Sync(file: u64) | TryLock(file: u64) | Unlock(file: u64) | Close(file: u64) | NextEntries(entries: u64, room: u64) | Released(id: u64) | Mkstemp(dir: u64, prefix: u64, room: u64) | ZeroExtension(dir: u64) | TryLockShared(file: u64) | ZeroAt(file: u64, at: u64, len: u64)
-pub type DirReply = Done | Failed(IoError) | WriteFailed(WriteError) | Count(u64) | Locked(bool) | Stat(Stat) | File(u64) | Dir(u64) | Entries(u64) | ZeroExtensionSupported(bool)
-pub type NetOp = Connect(addr: Addr, public: bool) | Resolve(name: u64, room: u64) | Listen(addr: Addr, backlog: u16) | Accept(listener: u64) | Recv(socket: u64, room: u64, max: u64) | Send(socket: u64, prefix: u64, tail: u64) | Handshake(socket: u64, name: u64, alpn: u64, system: bool) | SendSecret(socket: u64, wire: u64, secrets: u64, marks: u64) | Released(id: u64, part: Part) | ConnectUnix(root: u64, path: u64) | ListenUnix(root: u64, path: u64, backlog: u16) | AcceptUnix(listener: u64) | OpenDatagram | BindDatagram(root: u64, path: u64) | ConnectDatagram(datagram: u64, root: u64, path: u64) | SendDatagram(datagram: u64, len: u64) | SendTo(datagram: u64, root: u64, path: u64, len: u64) | RecvDatagram(datagram: u64, room: u64) | Ready(socket: u64) | LocalAddr(id: u64) | PeerAddr(socket: u64) | UdpOpen(v6: bool, slots: u32, slot_bytes: u32) | UdpBind(addr: Addr, slots: u32, slot_bytes: u32, members: u16, steer: Steer) | UdpRecv(socket: u64, room: u64, entries: u64) | UdpSend(socket: u64, data: u64, pkts: u64) | UdpLocal(socket: u64) | Hello(socket: u64, room: u64) | Serve(socket: u64, chain: u64, alpn: u64)
-pub type NetReply = Done | Failed(NetError) | Count(u64) | Socket(u64, Addr) | Listener(u64, Addr) | Secured(Handshake) | UnixSocket(u64) | UnixListening(u64) | Datagram(u64) | Packet(len: u64, truncated: bool) | Address(Addr) | UdpSockets(first: u64, count: u16, addr: Addr) | UdpPackets(count: u64) | Accepted(protocol: Option[u64])
-pub type StreamOp = Write(len: u64)
-pub type StreamReply = Done | WriteFailed(WriteError)
-
-pub fn dir(bytes n: u64) -> (Dir, Served[DirOp])
-pub fn net(bytes n: u64) -> (Net, Served[NetOp])
-pub fn stdout(bytes n: u64, terminal: Option[TermSize]) -> (Stdout, Served[StreamOp])
-pub fn stderr(bytes n: u64, terminal: Option[TermSize]) -> (Stderr, Served[StreamOp])
-pub fn next[Op](mut s: Served[Op]) -> Option[Call[Op]] waits
-pub fn dir_op(c: Call[DirOp]) -> DirOp
-pub fn net_op(c: Call[NetOp]) -> NetOp
-pub fn stream_op(c: Call[StreamOp]) -> StreamOp
-pub fn payload[Op](c: Call[Op], field: u64, mut out: Bytes)
-pub fn payload_prefix[Op](c: Call[Op], field: u64, max: u64, mut out: Bytes) -> u64
-pub fn fill[Op](mut s: Served[Op], mut c: Call[Op], b: Bytes) -> u64
-pub fn secret(c: Call[NetOp], i: u64) -> Secret
-pub fn reply[Op](mut s: Served[Op], take c: Call[Op], take r: Reply[Op]) -> Result[(), Withdrawn]
-pub fn dir_reply(r: DirReply) -> Reply[DirOp]
-pub fn net_reply(r: NetReply) -> Reply[NetOp]
-pub fn stream_reply(r: StreamReply) -> Reply[StreamOp]
-pub fn clock(start_mono_ns: u64, start_wall_ms: u64) -> (Clock, ClockHand)
-pub fn random(seed: u64) -> Random
-pub fn process() -> (Process, StopTrigger)
-pub fn advance_to(mut h: ClockHand, mono_ns: u64)
-pub fn advance_to_with_boot(mut h: ClockHand, mono_ns: u64, boot_ns: u64)
-pub fn set_wall(mut h: ClockHand, wall_ms: u64)
-pub fn idle(mut h: ClockHand) -> Option[u64] waits
-pub fn trigger(take t: StopTrigger)
-```
-
-`advance_to`, `set_wall` and `idle` are in module `clock`, and `trigger` in module `process`.
-- **Served ports.** `provide.dir`, `net`, `stdout` and `stderr` admit the port's room of `n`
-  bytes, with a cell's 32, from the current limit and raise `Capacity` when it is refused;
-  the room is held until that limit ends, when the port is withdrawn (Cell lifetime,
-  below). Each operation on the capability waits after issue as a `Call`
-  queued on the port, in the order the operations were issued. `provide.next` returns the
-  first queued call, and `provide.dir_op`, `net_op` and `stream_op` read its `Op`, which holds
-  only scalars: a path, name or data field is its byte length, which `provide.payload(c,
-  field, mut out)` appends to `out` (fields numbered from 0 in declaration order;
-  `Bounds` when `out`'s spare capacity is short). `provide.payload_prefix` appends only the
-  first `max` bytes and returns the number of bytes omitted. It checks spare capacity
-  against the bytes to append. A settled call supplies no bytes and returns zero.
-  The `room` field is the spare capacity the caller offers for a result.
-  `provide.fill` stages result bytes in the room, at most the
-  call's `room`, and returns how many it took. No caller storage reaches the server, and
-  no server storage reaches the caller until the reply.
-- **Handles.** Ids name the server's own objects: 0 is the capability `provide` returned,
-  and every other id is one the server issued in a reply (`File`, `Dir`, `Entries`,
-  `Socket`, `Listener`). The caller receives a fresh handle of the ordinary type bound to
-  the port, the kind and the id, so it reaches only that port's object of that kind, and a
-  handle of another provider or another port given to an operation is refused before it
-  reaches the server (`Denied`). A port's ids are one space, since `Released(id)` names no
-  kind. Each issued id holds 32 bytes of the port's room until the server receives its
-  `Released`; a `Dir` id, plain like the capability, holds them until the run ends. A
-  `DirOp` is answered by `Failed` or by its own variants: `File` for `Open` and `Mkstemp`;
-  `Dir` for `OpenDir` and `Mkdtemp`; `Stat` for `Stat` and `StatFile`; `Entries` for
-  `Entries`; `Count` for `Read`, `ReadAt` and `NextEntries`; `Done` or `WriteFailed` for
-  `Write` and `WriteAt`; `Locked` for `TryLock` and `TryLockShared`;
-  `ZeroExtensionSupported` for `ZeroExtension`; and `Done` for every other operation, `ZeroAt`
-  included. `Released` takes no reply. A reply
-  that issues id 0, an id already live, or a variant that does not answer the call's
-  operation fails the server with `Fail`, and a reply that issues an id when the room is
-  short raises `Capacity` in the server; either way the call is settled as for a sealed
-  port. `Close(file)` ends the caller's handle at issue, and its id once the server has
-  taken the call; a `Close` cancelled before then queues `Released(file)` as a drop does.
-  `NextEntries` bytes are whole records in `host.next_entries`'s format. `net.split` divides a socket in the caller
-  and asks the server nothing; dropping a half queues `Released(id, Read)` or
-  `Released(id, Write)` (FAIL-13).
-- **Reply.** `provide.reply` is the commit point of the call: it copies the staged bytes into
-  the caller's capacity and completes the operation with the reply's result. If
-  cancellation or the call's deadline settled it first
-  ([CONC-7](tasks.md#conc-7-cancellation-points)), it returns `Error(Withdrawn)`, discards
-  the staged bytes and issues nothing. A `Call` given to the `reply` of another port is
-  consumed as a dropped one and answers `Error(Withdrawn)`. A `Released` call needs no
-  reply. A `Call` dropped without a reply settles its caller as a sealed port does.
-- **Sealing.** Cleaning the `Served` end, or the end of its task, seals the port: every
-  queued and later call completes with `Closed` (`Dir`, `Stdout`, `Stderr`) or `Reset`
-  (`Net`), and drops of its handles still succeed. A sealed `Net` port retires its dropped
-  `UdpSocket` ids at the seal and later ones at their drop, since no server will take their
-  `Released` ([NET-16](net.md#net-16-udp-sockets-and-batches)). `provide.next` returns `None` only at
-  quiescence ([FAIL-15](failure.md#fail-15-run-stops)).
-- **Terminal.** `provide.stdout` and `provide.stderr` take the stream's terminal
-  explicitly: `None` is not a terminal, and `Some(size)` is a terminal of that size. For the
-  stream's whole life `stdout.is_terminal` and `stderr.is_terminal` on the result return
-  whether it is `Some`, and `stdout.size` and `stderr.size` return the size, or `None` when
-  either dimension is 0 ([Size](../../core/std/api/stdin.md#size)). Both are answered by the
-  capability itself, never queued on the port, and a sealed port still answers them. There
-  is no virtual `Stdin`; a model-world stream answers `false` and `None`.
-- **Net authority.** A `provide.net` `Net` permits every address, name and TLS name, and
-  `net.narrow` narrows it. Its TLS handshakes are answered by its server, so it never
-  authorizes a granted `Secret` ([TLS-5](tls.md#tls-5-secrets)). `net.join` reunites a
-  virtual socket's halves in the caller and asks the server nothing
-  ([NET-7](net.md#net-7-owned-connections)). `secret.scram_sha256` on a virtual TLS half
-  reaches its server only as `Send` calls, and only for a sealed `Secret`
-  ([TLS-6](tls.md#tls-6-scram-sha-256)).
-- **Cells.** `host.mono_ns`, `host.boot_ns`, `host.wall_ms`, `host.random` and `host.stopped` on a cell's
-  capability answer at issue from the cell, never switch task and never allocate.
-  `provide.clock` starts its monotonic and boot readings at `start_mono_ns` and its wall
-  reading at `start_wall_ms`. `clock.advance_to(mut h, t)` raises monotonic
-  time to `t` (a smaller `t` changes nothing), advances boot time by the same increase,
-  and completes every sleep and expires every
-  deadline at or before it, in deadline order and then issue order. `clock.set_wall` sets
-  wall time alone and completes every `host.sleep_until_wall` it reaches, in reading order
-  and then issue order. `clock.advance_to_with_boot(mut h, mono, boot)` raises the two
-  elapsed readings to the supplied values without decreasing either, with boot time
-  at least monotonic time. Both readings update before any monotonic wait is readied.
-  This lets a simulated node's boot clock count time during a pause in its monotonic clock.
-  A pending wall wait is no deadline of `clock.idle`'s. `clock.idle(mut h)` waits until every other task in every unit of the run
-  waits on something inside the run (another task, a channel, a connection between its units, or a
-  virtual provider), then returns the earliest pending deadline on the clock, or `None` when there is none. `provide.random(seed)`
-  answers each draw with the next bytes of a SplitMix64 stream from `seed`, eight
-  little-endian bytes per step, so the same seed gives the same bytes on every engine.
-  `provide.random_tape(take b)` supplies successive whole draws from `b`, or raises
-  `Bounds` without moving the cursor if the next draw does not fit. The cell retains
-  its 32-byte charge and `len(b)` until it is withdrawn (below), as specified in [TLS-8](tls.md#tls-8-packet-ciphers-and-key-agreement).
-  `provide.process()` gives a `Process` whose `host.stopped` completes once
-  `process.trigger` has run, including a trigger before the call; dropping a `StopTrigger`
-  without triggering never stops. Dropping a `ClockHand` freezes its clock: pending sleeps
-  and deadlines on it never fire.
-- **Cell lifetime.** A Clock, Random or Process cell or a port is charged to the limit
-  current at its construction and withdrawn when that limit ends: its bound scope exits,
-  its finalizer returns or its task finishes, by a fault too
-  ([MEM-24](budgets.md#mem-24-logical-charges)).
-  Its charge is refunded then, not handed over. Its capability is plain, so a copy can
-  outlive the limit; every operation through such a copy, a `ClockHand`'s and a
-  `StopTrigger`'s included, fails at issue with `Bounds`, as an exhausted
-  `provide.random_tape` does. A wait parked on the cell when it is withdrawn is readied
-  and fails the same way, and an `Until` on a withdrawn clock has passed. A withdrawn port
-  is sealed: every unsettled call, a parked one included, fails its caller with `Bounds`,
-  and so does every later operation through its capability or handles but a close, which
-  succeeds; a parked `provide.next` fails with `Bounds`, and so does every later one. A
-  `Call` its server already holds is settled: `payload` and `fill` supply nothing and
-  `reply` returns `Error(Withdrawn)`. The slot can serve a new port of the same vocabulary.
-  The new port has fresh designations even when its server uses the same object IDs.
-- **Replay.** A virtual provider's results are computed by the run, so they are not
-  inputs of [CAP-8](capabilities.md#cap-8-the-replay-point): a replay recomputes them. The
-  host operations a server makes pass the replay point as every provider operation does.
-  A virtual capability is `cross`, so it can reach another unit
-  ([CONC-15](tasks.md#conc-15-units)). There its operations depend on another unit's order,
-  so they pass the replay point in the unit that issues them, and so does every operation
-  on the same cell in its home unit after the home's frame that first carries a
-  capability of the cell out of the unit
-  ([unit recordings](../recording.md#unit-recordings)).
-  A seeded simulation is a test-run configuration over today's task order, not an order
-  promise.
-
+See the [provider operations contract](provider-operations.md#provide).

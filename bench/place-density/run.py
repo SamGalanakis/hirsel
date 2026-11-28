@@ -68,12 +68,19 @@ def publish(compiler, scratch):
     source.mkdir()
     for name in ("hirsel.hcfg", "main.hirsel"):
         shutil.copyfile(HERE / name, source / name)
-    return checked([
+    recipe = checked([
         compiler, "build", source, "--emit", "recipe", "--backend", "llvm", "--limit", str(ROOT_LIMIT),
         "--n-place", str(1 << 20), "--code-store", scratch / "code", "--store", scratch / "compile",
         "--dir", "live", "--grant", "Clock", "--grant", "Random", "--grant", "Tasks",
         "--grant", "Process", "--grant", "Stderr", "--grant", "Net=Listen 127.0.0.1/32 0-65535",
     ], timeout=120)
+    # Prepare the native objects before the first operator wait. Admission
+    # still verifies the recipe and links its image from those objects.
+    checked([
+        compiler, "build", "--recipe", recipe, "--code-store", scratch / "code",
+        "--release", "-o", scratch / "prepared",
+    ])
+    return recipe
 
 
 def wait_until(probe, message, seconds=20):

@@ -62,13 +62,15 @@ fn arch_law_count_sink_lists(report: std.sim.s3.Report) -> u64 {
 // identical / verified shorter prefix / Diverged hard stop.
 @test
 fn test_la1_named_after_stored_and_no_relisting(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    // Separate S3 simulator for archive sinks vs source Bucket so we can prove
-    // strictly ZERO LIST requests are ever sent to the archive sink (A1).
+    // Both endpoints share a timeline: the archive step carries its deadline
+    // from the sink client through the Bucket source, which can wait on reclaim.
+    // Separate request logs let us check that the sink never receives a LIST.
     let sink_sim = df_complete_expired_sim(tasks, c, 33271)
-    let place_sim = df_complete_expired_sim(tasks, c, 33272)
-    let outcome = la1_run(d, sink_sim, place_sim, tasks, c, r)
+    let uncut = bucket_law_wire_cut(0xffffffffffffffffu64, false)
+    let (place_endpoint, take place_server) = bucket_law_server(tasks, sink_sim.time, Some(uncut), list.new(), list.new(), std.sim.world.plan(33272))
+    let outcome = la1_run(d, sink_sim, place_endpoint, tasks, r)
+    let _ = result.unwrap(task.join(take place_server))
     let sink_report = bucket_law_report(take sink_sim)
-    let _ = bucket_law_report(take place_sim)
     outcome?
     // Verify zero LIST requests were issued against the archive sink simulator.
     if arch_law_count_sink_lists(sink_report) != 0 {
@@ -77,7 +79,7 @@ fn test_la1_named_after_stored_and_no_relisting(d: Dir, c: Clock, r: Random, tas
     Ok(())
 }
 
-fn la1_run(d: Dir, sim: BucketSim, place_sim: BucketSim, tasks: Tasks, c: Clock, r: Random) -> Result[(), Error] waits {
+fn la1_run(d: Dir, sim: BucketSim, place_endpoint: std.sim.s3.Endpoint, tasks: Tasks, r: Random) -> Result[(), Error] waits {
     // --- Part 1: log@1 (Directory) A1, A2, A3, and j-<seq>-<from> conflict rules ---
     let dir1 = disk_test_directory(d)
     let opts = archive_hold_options(true)
@@ -211,10 +213,10 @@ fn la1_run(d: Dir, sim: BucketSim, place_sim: BucketSim, tasks: Tasks, c: Clock,
         Error(Stream(Overlap)) => (),
         _ => fail("L-A1: overlapping Bucket source and archive prefix was not refused"),
     }
-    let place_client = arch_law_sink_client(place_sim, tasks, 106, string.from("obj-place/"))?
+    let place_client = df_client_host(place_endpoint, sim.time, tasks, "spare.test", 106, "obj-place/", 2)?
     let obj_sink = arch_law_sink_client(sim, tasks, 107, string.from("arch-obj/"))?
     let obj_auth = archived(object_authority(take place_client, "bucket", DF_OP_MS), take obj_sink, a_opts)?
-    let mut obj_db = match open_authority(tasks, take obj_auth, place_sim.time, r, exit_open_opts(true, 4)) {
+    let mut obj_db = match open_authority(tasks, take obj_auth, sim.time, r, exit_open_opts(true, 4)) {
         Ok(take opened) => take opened,
         Error(Refusal(error: take e, ..)) => return Error(take e),
     }

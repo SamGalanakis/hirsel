@@ -503,6 +503,61 @@ fn test_l96_d_corrupt_incoming_cold_pointer_at_r4(d: Dir, c: Clock, r: Random, t
     close(take db)
 }
 
+// L96 (f): the real Cold walk sorts a touched pack's reached rows within
+// a budget for one reached list and one index buffer.
+@test
+fn test_l96_f_cold_walk_allocation(d: Dir) -> Result[(), Error] waits {
+    let id = types.StoreKey(hi: 3, lo: 4)
+    let seq = 7u64
+    let frame_total = 128u64
+    let mut draft = failure_result_from_rep(pager.begin_tiered_pack(id, seq, 4, 16384))?
+    let mut deferred: List[manifest.DeferredFree] = list.with_capacity(frame_total)
+    let body = arc.new(b"blob")
+    for stamp in 1u64 .. frame_total + 1 {
+        let frame = manifest.PackFrame(stamp: stamp, size: 12, body: BlobBody(arc.share(body)))
+        let Some(ptr) = failure_result_from_rep(pager.add_tiered_pack_frame(mut draft, frame, 1, b"key", scoped fn(_stamp: u64) -> std.page.PagePtr {
+            fail("L96 (f): a BLOB cannot have a child")
+        }))? else {
+            fail("L96 (f): fixture did not fit one pack")
+        }
+        let reference = std.page.BlobRef(stamp: stamp, len: 4, checksum: ptr.checksum, pack: seq, offset: ptr.offset, body: 0)
+        list.push(mut deferred, manifest.DeferredFree(branch_id: 0, target: TieredBlob(reference)))
+    }
+    // Visit the physical rows in reverse order so the join with the index needs the sort.
+    std.list.reverse(mut deferred)
+    let (take raw, pack) = failure_result_from_rep(pager.finish_tiered_pack(take draft))?
+    let path = failure_result_from_rep(manifest.paged_pack_path(seq))?
+    failure_result_from_rep(manifest.disk_write_synced(d, path, raw))?
+    let mut packs: Map[u64, pages.PagePack] = map.new()
+    map.insert(mut packs, seq, pack)
+    let mut stamps: Map[u64, std.page.PagePtr] = map.new()
+    map.reserve(mut stamps, frame_total)
+    let next_stamp = frame_total + 1
+    // AP21's stamp storage is pre-funded. Under charge-v1 the reached list
+    // peaks at (64 + 128) * 42 B on growth, then at 128 * 42 B plus the
+    // 3,744 B index frame while matching. 10 KiB leaves room for pack maps,
+    // authentication and a row cursor, but cannot hold a second reached list.
+    let enough = bound bytes 10240 {
+        pager.walk_cold_reachable(d, id, packs, next_stamp, 0, list.new(), deferred, mut stamps)
+    }
+    match take enough {
+        Ok(Ok(())) => (),
+        Ok(Error(take problem)) => return Error(failure_from_rep(take problem)),
+        Error(problem) => return Error(Full(Allocation(problem))),
+    }
+    if map.len(stamps) != frame_total {
+        fail("L96 (f): the walk did not reach all BLOBs")
+    }
+    let mut short_stamps: Map[u64, std.page.PagePtr] = map.new()
+    map.reserve(mut short_stamps, frame_total)
+    match (bound bytes 5120 {
+        pager.walk_cold_reachable(d, id, packs, next_stamp, 0, list.new(), deferred, mut short_stamps)
+    }) {
+        Ok(Error(Full(Allocation(_)))) => Ok(()),
+        _ => fail("L96 (f): a short walk budget must give a typed allocation refusal"),
+    }
+}
+
 // L96 (e) Tiered + last-conversion half (DESIGN-v2 §2.1, §2.2, §6, D-ZL-2):
 // - Tiered image R4 requires a funded Tiered plan (unfunded refuses Missing("cache_bytes")).
 // - Last-conversion store (zero-live listed class-3 pack P, no Tiered holder):

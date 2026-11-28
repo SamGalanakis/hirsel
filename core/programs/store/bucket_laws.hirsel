@@ -64,6 +64,14 @@ fn bucket_law_sim_plan(tasks: Tasks, real: Clock, seed: u64, cut: Option[std.sim
 }
 
 fn bucket_law_sim_holds(tasks: Tasks, real: Clock, seed: u64, cut: Option[std.sim.s3.Cut], take faults: List[std.sim.s3.Fault], take holds: List[std.sim.s3.Hold], take plan: std.sim.world.Plan) -> BucketSim {
+    let (world, time) = std.sim.world.new(seed, 0, 1369353600000)
+    let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let driver = task.spawn(tasks, bytes 65536, BucketSimClock(world: take world, stop: take stopping, real), bucket_law_clock)
+    let (endpoint, take server) = bucket_law_server(tasks, time, cut, take faults, take holds, take plan)
+    BucketSim(network: std.sim.s3.endpoint_network(endpoint), endpoint, time, server: take server, driver: take driver, stop: take stop)
+}
+
+fn bucket_law_server(tasks: Tasks, time: Clock, cut: Option[std.sim.s3.Cut], take faults: List[std.sim.s3.Fault], take holds: List[std.sim.s3.Hold], take plan: std.sim.world.Plan) -> (std.sim.s3.Endpoint, Task[std.sim.s3.Report]) {
     let address = Addr(ip: V4(2130706433), port: 8080)
     let mut net_model = std.sim.net.new(std.sim.net.defaults())
     let mut primary: List[Ip] = list.with_capacity(1)
@@ -76,11 +84,7 @@ fn bucket_law_sim_holds(tasks: Tasks, real: Clock, seed: u64, cut: Option[std.si
     let key = bucket_law_signing_key()
     let verify = result.unwrap(secret.narrow(key, "verify"))
     let config = std.sim.s3.Config(address, cut: cut, network: take net_model, after_resolve: None, credential: string.from("AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"), signing_key: take verify, faults: take faults, holds: take holds, exists_status: 412, fragment_bytes: 4096, max_body: 16777216)
-    let (world, time) = std.sim.world.new(seed, 0, 1369353600000)
-    let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let driver = task.spawn(tasks, bytes 65536, BucketSimClock(world: take world, stop: take stopping, real), bucket_law_clock)
-    let (endpoint, take server) = std.sim.s3.start_service(tasks, take config, take plan, time, 1048576, 33554432)
-    BucketSim(network: std.sim.s3.endpoint_network(endpoint), endpoint, time, server: take server, driver: take driver, stop: take stop)
+    std.sim.s3.start_service(tasks, take config, take plan, time, 1048576, 33554432)
 }
 
 fn bucket_law_place(host_name: String) -> std.object.Bucket {
@@ -512,12 +516,12 @@ fn bucket_m2_law_retained() -> Result[(), Error] {
     let twenty_four = pages.HistoryRef(seq: 24, epoch: 2, len: 189, digest: 24)
     let mut earlier: List[pages.HistoryRef] = list.with_capacity(1)
     list.push(mut earlier, ten)
-    let before = history.HistoryMark(activation: history.HistoryActivation(number: 0, binding:[0; 32]), manifest: twenty, floor: 10, retained: take earlier, depth: 0, locate_at: 0, locate_end: 0)
+    let before = history.HistoryMark(activation: history.HistoryActivation(number: 0, binding: [0; 32]), manifest: twenty, floor: 10, retained: take earlier, depth: 0, locate_at: 0, locate_end: 0)
     let cut = failure_result_from_rep(object_writer.history_retain(before, twenty, 24, 1))?
     if cut.floor != 24 || list.len(cut.earlier) != 0 {
         fail("retain 1 kept an older checkpoint")
     }
-    let short = history.HistoryMark(activation: history.HistoryActivation(number: 0, binding:[0; 32]), manifest: twenty_four, floor: 24, retained: list.new(), depth: 0, locate_at: 0, locate_end: 0)
+    let short = history.HistoryMark(activation: history.HistoryActivation(number: 0, binding: [0; 32]), manifest: twenty_four, floor: 24, retained: list.new(), depth: 0, locate_at: 0, locate_end: 0)
     let widened = failure_result_from_rep(object_writer.history_retain(short, twenty_four, 28, 3))?
     if widened.floor != 24 || list.len(widened.earlier) != 1 || widened.earlier[0].seq != 24 {
         fail("raising retain revived a checkpoint")
@@ -638,7 +642,7 @@ fn bucket_m2_upload_checkpoint(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(
     let mut raw_entry: Bytes = list.with_capacity(65536)
     let entry_ref = bucket_m2_pack_entry(mut raw_entry, id, base, refs)?
     failure_result_from_rep(history.history_create(mut client, history.history_key("e-", entry_ref), mut raw_entry, mut compare, due))?
-    let head = history.HistoryHead(authority_kind: 1, store: store_key_to_rep(id), pair: history.HistoryPair(epoch: 1, holder: types.StoreKey(hi: 17, lo: 18)), activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding:[0; 32], origin: None)
+    let head = history.HistoryHead(authority_kind: 1, store: store_key_to_rep(id), pair: history.HistoryPair(epoch: 1, holder: types.StoreKey(hi: 17, lo: 18)), activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding: [0; 32], origin: None)
     let source = history.history_reader(take client, due)
     Ok((take source, head))
 }

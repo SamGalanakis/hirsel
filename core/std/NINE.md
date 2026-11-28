@@ -1,7 +1,7 @@
 # The nine M1 workloads and the library operations they use
 
 The source is the corpus definitions, `core/corpus/m1/<workload>/SPEC.md`, with their
-`cases.json`, inputs and EXPECTED files, and `core/SPEC-COMPARISON.md`. For each workload, the
+`cases.json`, inputs and EXPECTED files. For each workload, the
 list names the operations a Hirsel version calls under spec round 4 (0d649bad), and what it
 uses in place of anything revision 3 deleted. Language forms are not listed: `for`, `while let`,
 `xs[i]`, `region`, `bound`, `?`, `==`, `<`, records, `match`, `replace` and resource `drop`.

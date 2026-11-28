@@ -20,4 +20,4 @@ a,alpha,a,lambda become a!,alpha!,a!,lambda!. The byte lengths are 2,6,2,3, tota
 
 ## Spec draft correspondence
 
-See `core/SPEC-COMPARISON.md` for this workload's differences from the spec lane's informative example. Runtime expected values come from this contract and the independent references, never from executing that example.
+Runtime expected values come from this contract and the independent references.

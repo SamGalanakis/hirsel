@@ -20,4 +20,4 @@ hello world plus newline is 12 bytes. hello sums to 532; space is 32; world sums
 
 ## Spec draft correspondence
 
-See `core/SPEC-COMPARISON.md` for this workload's differences from the spec lane's informative example. Runtime expected values come from this contract and the independent references, never from executing that example.
+Runtime expected values come from this contract and the independent references.

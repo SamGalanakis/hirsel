@@ -20,7 +20,7 @@ The small object has two items. Its second name decodes to b, newline, lambda. D
 
 ## Spec draft correspondence
 
-See `core/SPEC-COMPARISON.md` for this workload's differences from the spec lane's informative example. Runtime expected values come from this contract and the independent references, never from executing that example.
+Runtime expected values come from this contract and the independent references.
 
 ## Layout-specific reservation failure
 

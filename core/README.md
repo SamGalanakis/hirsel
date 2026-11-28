@@ -49,7 +49,7 @@ python3 core/tools/verify.py --target-dir /tmp/core-twins --profile release
 
 The CI workflow runs these output comparisons in both profiles and the named
 exact-reservation JSON test. It does not count empty Rust unit-test harnesses as evidence. `MEASURE.md` defines the ratio protocol and the
-committed Rust numbers. `SPEC-COMPARISON.md` lists the gaps in the spec draft.
+committed Rust numbers.
 
 To run the new-source acceptance gate once:
 

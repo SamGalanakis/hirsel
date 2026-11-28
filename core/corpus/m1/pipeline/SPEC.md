@@ -20,4 +20,4 @@ Rows a,bb,ccc,d become A,BB,CCC,D. Four rows contain 7 bytes with sum 65 + 2*66 
 
 ## Spec draft correspondence
 
-See `core/SPEC-COMPARISON.md` for this workload's differences from the spec lane's informative example. Runtime expected values come from this contract and the independent references, never from executing that example.
+Runtime expected values come from this contract and the independent references.

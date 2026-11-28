@@ -20,4 +20,4 @@ The frontier from 0 is 1,2, then 3,4, then 5. Vertex 3 first comes from 1; 5 fir
 
 ## Spec draft correspondence
 
-See `core/SPEC-COMPARISON.md` for this workload's differences from the spec lane's informative example. Runtime expected values come from this contract and the independent references, never from executing that example.
+Runtime expected values come from this contract and the independent references.

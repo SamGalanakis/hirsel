@@ -20,4 +20,4 @@ P a one, P b two, G a, P c three leaves order c,a,b. G absent changes nothing. T
 
 ## Spec draft correspondence
 
-See `core/SPEC-COMPARISON.md` for this workload's differences from the spec lane's informative example. Runtime expected values come from this contract and the independent references, never from executing that example.
+Runtime expected values come from this contract and the independent references.

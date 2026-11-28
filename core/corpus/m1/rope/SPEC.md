@@ -20,4 +20,4 @@ abcde with byte 2 replaced by XY becomes abXYde. Replacing bytes 1..3 with z giv
 
 ## Spec draft correspondence
 
-See `core/SPEC-COMPARISON.md` for this workload's differences from the spec lane's informative example. Runtime expected values come from this contract and the independent references, never from executing that example.
+Runtime expected values come from this contract and the independent references.

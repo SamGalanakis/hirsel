@@ -20,4 +20,4 @@ Keys 0..6 sum to 21. Updating 0 to 10 and 6 to 20 gives 45. The changed position
 
 ## Spec draft correspondence
 
-See `core/SPEC-COMPARISON.md` for this workload's differences from the spec lane's informative example. Runtime expected values come from this contract and the independent references, never from executing that example.
+Runtime expected values come from this contract and the independent references.

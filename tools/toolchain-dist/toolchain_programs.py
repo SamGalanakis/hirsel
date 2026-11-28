@@ -10,11 +10,14 @@ import tempfile
 import hcfg
 
 
-def place(compiler, source, destination):
+def place(compiler, source, destination, libraries=None):
     package = hcfg.read(source / 'hirsel.hcfg', 'pkg_v1.Package', compiler)
     shutil.copytree(source, destination, dirs_exist_ok=True)
     manifest = destination / 'hirsel.hcfg'
-    edited = subprocess.check_output([compiler, '--stage-toolchain-package', destination])
+    stage = [compiler, '--stage-toolchain-package', destination]
+    if libraries is not None:
+        stage.append(libraries)
+    edited = subprocess.check_output(stage)
     # A Buck action's staged source files can have read-only permissions.
     with tempfile.NamedTemporaryFile(dir=destination, delete=False) as output:
         output.write(edited)
@@ -61,10 +64,16 @@ def pack(compiler, sources, output, work, names):
         prefix = Path(directory)
         subprocess.run([compiler, 'std-product', '--install', prefix],
                        stdout=subprocess.DEVNULL, check=True)
+        libraries = prefix / 'libraries'
+        (libraries / 'programs').mkdir(parents=True)
+        for library in ('core', 'std'):
+            (libraries / library).symlink_to((sources.parent / library).resolve(), target_is_directory=True)
         for name in names:
-            bound, major = place(prefix / 'hirsel', sources / name, work / name)
+            staged = work / name
+            (libraries / 'programs' / name).symlink_to(staged.resolve(), target_is_directory=True)
+            bound, major = place(prefix / 'hirsel', sources / name, staged, libraries)
             archive = output / f"{bound}-{major}.hpkg"
-            subprocess.run([prefix / 'hirsel', 'pack', work / name, '--package-store', work / 'packages',
+            subprocess.run([prefix / 'hirsel', 'pack', staged, '--libraries', libraries, '--package-store', work / 'packages',
                             '--output', archive], stdout=subprocess.DEVNULL, check=True)
             shutil.copyfile(archive, prefix / 'core-packages' / archive.name)
 

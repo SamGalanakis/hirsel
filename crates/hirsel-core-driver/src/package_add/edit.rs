@@ -196,7 +196,10 @@ impl Editor {
 
 /// Rebind path edges only after checking the proposed installed graph against
 /// every original ceiling. The caller supplies an isolated copy of the package.
-pub(crate) fn stage(directory: &std::path::Path) -> Result<(), Failure> {
+pub(crate) fn stage(
+    directory: &std::path::Path,
+    libraries: Option<&std::path::Path>,
+) -> Result<(), Failure> {
     use crate::package_content::toolchain_major;
     use crate::package_dir::MANIFEST;
     use crate::package_files::open_directory;
@@ -280,7 +283,8 @@ pub(crate) fn stage(directory: &std::path::Path) -> Result<(), Failure> {
         member.ceilings = ceilings;
         let store = PackageStore::with_transport(None, Transport::offline());
         let resolution = Resolution::resolve(workspace, store, true)?;
-        let checked = crate::package_audit::check(&resolution, Some(&id))?;
+        let checked =
+            crate::package_audit::check_with_libraries(&resolution, Some(&id), libraries)?;
         if !checked.authority.is_empty() {
             return Err(checked.authority.join("\n").into());
         }

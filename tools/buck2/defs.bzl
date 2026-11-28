@@ -632,12 +632,15 @@ def _toolchain_packages_impl(ctx):
     # The toolchain packages other than std, each
     # packed alone from core/programs/<name> as <name>-<major>.hpkg with its dependencies bound
     # from the toolchain, by tools/toolchain-dist/toolchain_programs.py.
-    sources = _program_sources(ctx, "package-sources", ctx.attrs.sources)
+    sources = ctx.actions.symlinked_dir("library-sources", {
+        src.short_path.removeprefix("core/"): src
+        for src in ctx.attrs.sources
+    })
     packages = ctx.actions.declare_output("packages", dir = True)
     scratch = ctx.actions.declare_output("scratch", dir = True)
     ctx.actions.run(
         cmd_args("python3", ctx.attrs._programs, "pack", ctx.attrs.hirsel[DefaultInfo].default_outputs[0],
-                 sources, packages.as_output(), scratch.as_output(), ctx.attrs.packages,
+                 cmd_args(sources, format = "{}/programs"), packages.as_output(), scratch.as_output(), ctx.attrs.packages,
                  hidden = [ctx.attrs._hcfg] + ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
         env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1"},
         category = "toolchain_packages",
@@ -657,7 +660,7 @@ _toolchain_packages = rule(
 )
 
 def hirsel_toolchain_packages(name, hirsel, packages):
-    sources = []
+    sources = native.glob(["core/core/**/*.hirsel", "core/std/**/*.hirsel"], exclude = ["core/std/tests/**"])
     for package in packages:
         sources += native.glob(["core/programs/{}/**/*.hirsel".format(package)]) + ["core/programs/{}/hirsel.hcfg".format(package)]
     _toolchain_packages(name = name, hirsel = hirsel, packages = packages, sources = sources)

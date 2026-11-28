@@ -71,6 +71,14 @@ struct Authority {
 }
 
 pub(crate) fn check(resolved: &Resolution, selected: Option<&Id>) -> Result<Checked, Failure> {
+    check_with_libraries(resolved, selected, None)
+}
+
+pub(crate) fn check_with_libraries(
+    resolved: &Resolution,
+    selected: Option<&Id>,
+    libraries: Option<&Path>,
+) -> Result<Checked, Failure> {
     let mut checked = Checked::default();
     let mut driver = Driver {
         package_check: true,
@@ -93,7 +101,7 @@ pub(crate) fn check(resolved: &Resolution, selected: Option<&Id>) -> Result<Chec
         .filter(|id| selected.is_none_or(|selected| *id == selected))
     {
         let app = PackageDir::from_resolution(resolved, id, true)?;
-        let mut request = CheckRequest::from_app(app, None, &store)?;
+        let mut request = CheckRequest::from_app(app, libraries, &store)?;
         request.inputs.normalise(request.manifest.as_deref());
         let key = check_key(&request, &verified)?;
         if let Some(key) = key

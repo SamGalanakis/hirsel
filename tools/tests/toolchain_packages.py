@@ -14,6 +14,8 @@ class ToolchainPackages(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             sources = root / 'sources'
+            for library in ('core', 'std'):
+                (root / library).symlink_to((Path('core') / library).resolve(), target_is_directory=True)
             output = root / 'archives'
             work = root / 'work'
             store = sources / 'store'
@@ -28,10 +30,19 @@ class ToolchainPackages(unittest.TestCase):
                     f'pkg_v1.Package(name: "{package.name}", version: "1.0.0", charge: ChargeV1, '
                     f'sources: [("{package.name}.hirsel", "{package.name}")], dependencies: [{", ".join(deps)}])\n',
                     encoding='utf-8')
-            (store / 'store.hirsel').write_text('pub fn pack_fixture_value() -> u64 { 7u64 }\n')
-            (runner / 'runner.hirsel').write_text('pub fn load() -> u64 { store.pack_fixture_value() }\n')
+            (store / 'store.hirsel').write_text(
+                'fn encode_witness() -> u64 {\n'
+                '    let kept = log.samples(0)\n'
+                '    let _ = log.finish_samples(take kept)\n'
+                '    7u64\n}\n')
+            (runner / 'runner.hirsel').write_text('pub fn load() -> u64 { store.encode_witness() }\n')
 
             compiler = Path(os.environ['HIRSEL_PACK_COMPILER']).resolve()
+            untrusted = subprocess.run([compiler, 'pack', store, '--libraries', root, '--output',
+                                        root / 'untrusted.hpkg'], capture_output=True, text=True)
+            self.assertNotEqual(untrusted.returncode, 0)
+            self.assertIn('core@1/log/samples` is private', untrusted.stderr)
+            self.assertFalse((root / 'untrusted.hpkg').exists())
             programs = Path(os.environ['HIRSEL_PACK_PROGRAMS']).resolve()
             subprocess.run([sys.executable, programs, 'pack', compiler, sources, output, work,
                             'store', 'runner'], cwd=root, check=True)

@@ -63,7 +63,7 @@ pub(super) fn run(
                 let app = PackageDir::from_resolution(&resolution, member, true)?;
                 let invocation = Request {
                     command: check,
-                    options: Vec::new(),
+                    options: invocation.options.clone(),
                     positional: Some(manifest.parent().unwrap().to_str().unwrap().to_owned()),
                     arguments: Vec::new(),
                 };

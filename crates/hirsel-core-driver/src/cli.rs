@@ -149,7 +149,7 @@ commands! {
             PublishWorkspace, PublishKey, PublishWorkload, PublishTokenCommand, PublishGeneration, PublishEnroll,
             PublishDescription, PublishSourceCommit, PackageStore, Libraries, HELP;
     "pack", "pack [package-dir] -o FILE [options]", "Publish a library and its dependency closure to an archive.";
-        Compiler(CompilerOption), One: PackageStore, Locked, Frozen, HELP, Output;
+        Compiler(CompilerOption), One: PackageStore, Locked, Frozen, Libraries, HELP, Output;
     "build", "build [package-dir | --recipe HASH] [options]", "Build native output or publish a release recipe.";
         Compiler(CompilerOption), One:
             PackageStore, Locked, Frozen, Recipe, CodeStore, ReleaseManifest, PlaceTimeout, NPlace,

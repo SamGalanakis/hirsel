@@ -18,10 +18,11 @@ pub(super) fn run(mut args: Vec<String>) -> Result<Outcome, Box<dyn std::error::
     if let Some(worker) = compiler_worker(&args) {
         return conclude(Outcome::Exit(worker()));
     }
-    if let [worker, directory] = args.as_slice()
+    if let [worker, directory, libraries @ ..] = args.as_slice()
         && worker == "--stage-toolchain-package"
+        && libraries.len() <= 1
     {
-        crate::package_add::edit::stage(Path::new(directory))?;
+        crate::package_add::edit::stage(Path::new(directory), libraries.first().map(Path::new))?;
         return conclude(Outcome::Exit(0));
     }
     let json = args

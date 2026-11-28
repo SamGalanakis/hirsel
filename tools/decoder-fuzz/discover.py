@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Nightly decoder discovery (the board's "Decoder discovery" row).
 
-Two workers, one input per fresh child: the Rust libFuzzer host of the package
-archive reader and the covered native image of std's HTTP/1 head parser. Each
-run has its own raw coverage file, read against the map of the build that
-wrote it, and only decoder sites count. The driver saves the case before it
-starts a worker, saves a failure before it shrinks it, confirms the shrunk
-case in a fresh worker, and accounts search and reduction child CPU apart.
+Two workers: the Rust libFuzzer host of the package archive reader, one input
+per fresh child, and the covered native image of std's HTTP/1 head parser,
+which searches in one warm worker (native_worker.Warm). Each fresh run has its
+own raw coverage file, read against the map of the build that wrote it; a warm
+case reads back its target's flags. Only decoder sites count. The driver saves
+the case before it starts a worker or asks the warm one, replays a lost warm
+case in a fresh child, saves a failure before it shrinks it, shrinks and
+confirms it in fresh children, and accounts search and reduction child CPU
+apart.
 
     discover.py nightly --host H --compiler C --runtime R --out DIR --alert FILE
     discover.py qualify ...   # the same row, then its one-time qualification checks
@@ -57,7 +60,10 @@ def reviewed(bundle, target):
 
 
 class Native:
-    """std's HTTP/1 request-head parser: `hirsel test --coverage` with std as source."""
+    """std's HTTP/1 request-head parser: `hirsel test --coverage` with std as source.
+
+    Search cases run warm; a fault, shrinking and confirmation run fresh.
+    """
     name = "http1"
     accepted = ("complete",)
     limit = 512
@@ -67,6 +73,7 @@ class Native:
 
     def __init__(self, args):
         self.compiler, self.runtime = args.compiler, args.runtime
+        self.warm = args.worker == "warm"
 
     def cases(self):
         return {name: {"input": raw, "schedule": native_worker.partition(case["schedules"][0], len(raw))}
@@ -79,13 +86,13 @@ class Native:
         return native_worker.schedule(raw, seed)
 
     def prepare(self, work):
-        return native_worker.prepare(self.compiler, self.runtime, work)
+        return native_worker.prepare_warm(self.compiler, self.runtime, work, targets=(self.name,))[self.name]
 
     def sites(self, image):
-        return native_worker.site_map(Path(image["map"]))
+        return native_worker.warm_sites(image)
 
     def run(self, image, sites, case, payload, raw_file, **options):
-        return native_worker.run(image, sites, case, raw_file, **options)
+        return native_worker.fresh(image, sites, case, raw_file, **options)
 
     def replay(self, image, case, payload):
         environment = native_worker.case_environment(case["input"], case["schedule"], case.get("expect"))
@@ -99,6 +106,7 @@ class Host:
     limit = 1024
     tokens = (b"\x28\xb5\x2f\xfd", b"\x00", b"\xff", b"\x01\x00\x00", b"\x20", b"\x60", b"\xe0", b"\x80")
     mismatch = ("block-rle", "refused")
+    warm = False
     test = "package_content::archive::host_target::libfuzzer"
     source = "crates/hirsel-core-driver/src/package_content/archive.rs"
 
@@ -281,6 +289,17 @@ class Row:
         self.cpu = {"search": 0.0, "reduction": 0.0}
         self.reaches, self.queue, self.failures, self.incomplete, self.signatures = set(), [], [], [], set()
         self.runs = 0
+        self.worker, self.warm = None, target.warm
+        self.workers = {"started": 0, "lost": 0, "warm_cases": 0, "lost_cases": []}
+        # The case in flight, rewritten in place before each run and emptied after
+        # it. A stopped driver leaves it in the page cache; each board run has a new
+        # directory, so a host crash leaves no run to resume and it is not synced.
+        self.flight = os.open(out / "inflight.json", os.O_RDWR | os.O_CREAT, 0o644)
+        left = os.pread(self.flight, 1 << 20, 0)
+        try:
+            self.leftover = json.loads(left) if left else None
+        except ValueError:
+            self.leftover = {"unreadable": left[:200].decode(errors="replace")}
 
     def publish(self, data):
         path = self.out / "objects" / digest(data)
@@ -297,14 +316,23 @@ class Row:
         return {"target": self.target.name, "digest": digest(case["input"]), "bytes": len(case["input"]),
                 "schedule": case["schedule"], "expect": case.get("expect"), "provenance": case["provenance"]}
 
-    def execute(self, case, phase, fault=None):
-        """Publish the payload, save the in-flight case, then start one fresh worker for it."""
-        payload = self.publish(case["input"])
-        commit(self.out / "inflight.json", self.document(case) | {"phase": phase, "run": self.runs})
-        raw_file = self.out / "raw" / f"{self.runs:06d}-{payload.name[:12]}.raw"
+    def execute(self, case, phase, fault=None, fresh=False):
+        """Save the in-flight case, then run it: a search case warm when the target has
+        a warm worker, anything else or a lost warm case in one fresh worker, whose
+        payload is published first."""
+        document = self.document(case) | {"phase": phase, "run": self.runs, "input": case["input"].hex()}
+        data = json.dumps(document, sort_keys=True).encode()
+        os.pwrite(self.flight, data, 0)
+        os.ftruncate(self.flight, len(data))
+        raw_file = self.out / "raw" / f"{self.runs:06d}-{document['digest'][:12]}.raw"
         self.runs += 1
-        row = self.target.run(self.image, self.sites, case, payload, raw_file, cwd=self.out / "work",
-                              **({"fault": fault} if fault else {}))
+        row = None
+        if self.warm and phase == "search" and not fault and not fresh:
+            row = self.serve(case, raw_file.name)
+        if row is None:
+            payload = self.publish(case["input"])
+            row = self.target.run(self.image, self.sites, case, payload, raw_file, cwd=self.out / "work",
+                                  **({"fault": fault} if fault else {}))
         self.cpu[phase] += row["cpu"]
         self.counts["selected"] += 1
         for key, counted in (("started", "started"), ("entered", "body_entered"), ("completed", "completed"),
@@ -315,11 +343,60 @@ class Row:
         if row["reached"] is None:
             self.counts["unobserved"] += 1
         if row["incomplete"]:
-            self.incomplete.append(f"run {self.runs - 1} ({payload.name[:12]}): {row['incomplete']}")
+            self.incomplete.append(f"run {self.runs - 1} ({document['digest'][:12]}): {row['incomplete']}")
         if not row["failure"]:
             raw_file.unlink(missing_ok=True)
-        (self.out / "inflight.json").unlink()
+        os.ftruncate(self.flight, 0)
         return row
+
+    def serve(self, case, name):
+        """One case in the warm worker. None if the worker was lost before it answered."""
+        try:
+            if self.worker is None:
+                self.workers["started"] += 1
+                raw_file = self.out / "raw" / f"warm-{self.workers['started']:03d}.raw"
+                raw_file.unlink(missing_ok=True)  # a stopped run's worker: its flags are not this run's
+                self.worker = native_worker.Warm(self.image, self.sites, raw_file, cwd=self.out / "work")
+            row = self.worker.run(case)
+            row["cpu"] = self.worker.spent()
+            self.workers["warm_cases"] += 1
+            return row
+        except native_worker.WorkerLost as error:
+            self.workers["lost"] += 1
+            self.workers["lost_cases"] = (self.workers["lost_cases"] + [f"{name}: {error}"])[:20]
+            if self.worker is None:
+                # A worker that never greets: the row goes on in fresh workers.
+                self.warm = False
+                self.incomplete.append(f"warm worker did not start: {error}")
+            else:
+                self.cpu["search"] += self.worker.spent()
+                self.worker = None
+            return None
+
+    def recover(self):
+        """Replay the case a stopped run left in flight, under its own identity, in a fresh worker."""
+        document = self.leftover
+        if document is None:
+            return None
+        try:
+            data = bytes.fromhex(document["input"])
+            if document["target"] != self.target.name or digest(data) != document["digest"]:
+                raise ValueError("another target's case or a payload that is not its digest's")
+            case = {"input": data, "schedule": document["schedule"], "expect": document["expect"], "seed": 0,
+                    "provenance": document["provenance"] | {"interrupted": document["phase"]}}
+        except (KeyError, TypeError, ValueError) as error:
+            return document | {"replayed": None, "refused": str(error)}
+        row = self.execute(case, "search", fresh=True)
+        self.observe(case, row)
+        summary = {key: row[key] for key in ("completed", "status", "failure", "incomplete")}
+        return {key: value for key, value in document.items() if key != "input"} | {"replayed": summary}
+
+    def close(self):
+        """End the warm worker: its raw file then holds every case it completed."""
+        if self.worker is not None:
+            self.worker.finish()
+            self.cpu["search"] += self.worker.spent()
+            self.worker = None
 
     def reduce(self, case, signature, budget):
         """Bounded shrinking: drop ever smaller spans while a fresh worker shows the same failure."""
@@ -401,6 +478,7 @@ class Row:
             return 0
         novel = set(row["reached"]) - self.reaches
         if novel:
+            self.publish(case["input"])
             self.reaches |= novel
             self.counts["kept"] += 1
             self.queue.append(self.document(case) | {"novel_sites": len(novel)})
@@ -410,19 +488,22 @@ class Row:
         return len(novel)
 
     def parity(self, cases):
-        """A/B/A and B/A/B: equal target-only signals for one input, different ones for the two."""
+        """A/B/A and B/A/B: equal target-only signals for one input, different ones for the two.
+        A warm row also runs each control in a fresh worker: the signals must be the same."""
         names = self.target.controls()
         evidence, signals = [], {name: set() for name in names}
         for order in ((0, 1, 0), (1, 0, 1)):
             for index in order:
                 name = names[index]
                 case = dict(cases[name], seed=0, provenance={"control": name})
-                row = self.execute(case, "search")
-                signal = digest("\n".join(row["reached"]).encode())[:16] if row["reached"] is not None else None
-                signals[name].add((signal, row["observation"]))
-                evidence.append({"input": name, "sites": len(row["reached"] or ()), "signal": signal,
-                                 "observation": row["observation"], "failure": row["failure"]})
-                self.observe(case, row)
+                for fresh in (False, True) if self.warm else (False,):
+                    row = self.execute(case, "search", fresh=fresh)
+                    signal = digest("\n".join(row["reached"]).encode())[:16] if row["reached"] is not None else None
+                    signals[name].add((signal, row["observation"]))
+                    evidence.append({"input": name, "sites": len(row["reached"] or ()), "signal": signal,
+                                     "observation": row["observation"], "failure": row["failure"],
+                                     **({"worker": "fresh" if fresh else "warm"} if self.warm else {})})
+                    self.observe(case, row)
         a, b = (signals[name] for name in names)
         passed = len(a) == 1 and len(b) == 1 and a != b and next(iter(a))[0] and next(iter(b))[0] and (
             next(iter(a))[0] != next(iter(b))[0])
@@ -464,7 +545,8 @@ class Row:
                 "reached_sites": sorted(self.reaches), "decoder_sites": self.image["decoder_sites"],
                 "child_cpu_seconds": {key: round(value, 3) for key, value in self.cpu.items()},
                 "prepare_cpu_seconds": round(self.image["prepare_cpu"], 3), "build": self.image["build"],
-                "incomplete": self.incomplete[:20], "failures": self.failures, **extra}
+                "incomplete": self.incomplete[:20], "failures": self.failures,
+                **({"warm_workers": self.workers} if self.target.warm else {}), **extra}
 
 
 def spare_cpus(cpus, window):
@@ -550,6 +632,8 @@ def main():
     parser.add_argument("--search-cpu-seconds", type=float, default=60)
     parser.add_argument("--reduction-cpu-seconds", type=float, default=10)
     parser.add_argument("--capacity-window", type=float, default=2)
+    parser.add_argument("--worker", choices=("warm", "fresh"), default="warm",
+                        help="the native target's search worker (fresh: one child per case)")
     parser.add_argument("--max-runs", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--targets", default="archive,http1", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -580,18 +664,22 @@ def main():
         try:
             image = target.prepare(out / "image")
             row = Row(target, image, out, args, args.alert)
-            leftover = out / "inflight.json"
-            recovered = json.loads(leftover.read_text()) if leftover.is_file() else None
             cases = target.cases()
-            parity = row.parity(cases)
-            row.search(cases, rng)
-            report = row.report(parity=parity, interrupted_case=recovered)
-            if args.mode == "qualify":
-                report["qualification"] = qualify(target, image, out, args, row, cases)
-                report |= {"child_cpu_seconds": {key: round(value, 3) for key, value in row.cpu.items()},
-                           "seeded_confirmed": row.counts.get("seeded_confirmed", 0)}
-                if not report["qualification"]["passed"] and report["status"] == "green":
-                    report["status"] = "incomplete"
+            try:
+                recovered = row.recover()
+                parity = row.parity(cases)
+                row.search(cases, rng)
+                row.close()
+                report = row.report(parity=parity, interrupted_case=recovered)
+                if args.mode == "qualify":
+                    report["qualification"] = qualify(target, image, out, args, row, cases)
+                    row.close()
+                    report |= {"child_cpu_seconds": {key: round(value, 3) for key, value in row.cpu.items()},
+                               "seeded_confirmed": row.counts.get("seeded_confirmed", 0)}
+                    if not report["qualification"]["passed"] and report["status"] == "green":
+                        report["status"] = "incomplete"
+            finally:
+                row.close()
             used += sum(row.cpu.values())
         except (OSError, ValueError, subprocess.CalledProcessError) as error:
             report = {"status": "incomplete", "incomplete": [f"preparation: {error}"]}

@@ -51,15 +51,32 @@ pub unsafe extern "C" fn hirsel_core_coverage_open(start: *mut u8, length: u64) 
     let Some(path) = path else {
         return;
     };
+    // Read only beside a raw file: a run without one never looks.
+    let warm = std::env::var_os(warm::VARIABLE);
+    if warm.is_some() {
+        // SAFETY: as above, single-threaded process entry.
+        unsafe { std::env::remove_var(warm::VARIABLE) };
+    }
     // Read as given and left in place: the seed is not an effect of the program.
     let seed = std::env::var("HIRSEL_TEST_SIM_SEED")
         .ok()
         .and_then(|seed| seed.parse::<u64>().ok());
     let Ok(path) = std::ffi::CString::new(path.into_vec()) else {
+        if warm.is_some() {
+            warm::refuse(b"the raw file's path is not a C string");
+        }
         return;
     };
     // SAFETY: the caller's bounds are the section's, mapped and writable.
-    if let Some(fd) = unsafe { open(&path, start, length as usize, seed) } {
+    let opened = unsafe { open(&path, start, length as usize, seed) };
+    if let Some(warm) = warm {
+        let Some(fd) = opened else {
+            warm::refuse(b"the raw file did not open");
+        };
+        // SAFETY: the section is mapped over `fd`, and no thread has started.
+        unsafe { warm::serve(fd, start, length as usize, &warm) };
+    }
+    if let Some(fd) = opened {
         FILE.store(fd, Ordering::Relaxed);
         let outcome: extern "C" fn(u32) = hirsel_core_coverage_outcome;
         OUTCOME.store(outcome as usize, Ordering::Relaxed);
@@ -194,4 +211,303 @@ unsafe fn pwrite_all(fd: i32, mut bytes: &[u8], mut offset: i64) -> bool {
         offset += n as i64;
     }
     true
+}
+
+/// Warm per-input feedback, a test-only worker for fuzzing a serial law that
+/// does not wait, with an immutable input and no authority but its `Env`
+/// grant (`tools/decoder-fuzz/native_worker.py`). With `HIRSEL_COVERAGE_WARM=R,W`
+/// beside `HIRSEL_COVERAGE`, the entry maps the raw file as usual and then
+/// serves cases from descriptor `R`, replying on `W`, instead of running once.
+/// Each case sets the named environment variables, clears the flag bytes of
+/// the records the driver selected, calls the executable's own `main` again
+/// (whose open finds no raw file and returns), and replies with the exit
+/// status and those flag bytes. Every call builds a fresh run, so no case
+/// state carries over; the flags of other records accumulate as in an
+/// ordinary run, and the selected ones are merged back at the end, so the raw
+/// file reads as the cumulative coverage of every completed case, with outcome
+/// passed only when every case returned 0. A case that stops the process
+/// leaves no cumulative: the driver replays its saved case in a fresh child.
+///
+/// The worker writes `HIRSELWM`, `u32` version 1, `u32` record count, then per
+/// record its 32-byte identity, `u32` flag offset in the section and `u32`
+/// site count. The driver writes `u32` n and n `u32` record indexes, then
+/// requests, each a `u32` tag: 1 a case (`u32` length, then `NAME=VALUE` or
+/// `NAME` (unset) entries, each ending in a zero byte), answered by tag 1,
+/// `i32` status and the selected flag bytes in order; 2 a sample, answered by
+/// tag 2, `u32` count and that many `u64` process counters; 3 or end of input
+/// to finish. All integers are little-endian. Any malformed exchange ends the
+/// worker with status 70 and a line on standard error.
+mod warm {
+    pub(super) const VARIABLE: &str = "HIRSEL_COVERAGE_WARM";
+
+    /// End the worker before it serves: the driver sees no greeting.
+    pub(super) fn refuse(reason: &[u8]) -> ! {
+        let line = [b"hirsel warm coverage: ".as_slice(), reason, b"\n"].concat();
+        // SAFETY: a live buffer to the standard error descriptor; `_exit`
+        // ends the process without running the program's teardown.
+        unsafe {
+            libc::write(2, line.as_ptr().cast(), line.len());
+            libc::_exit(70)
+        }
+    }
+
+    use std::ffi::{CString, OsStr, c_char};
+    use std::os::unix::ffi::OsStrExt as _;
+
+    const GREETING: &[u8; 8] = b"HIRSELWM";
+    const VERSION: u32 = 1;
+    const RECORD_MAGIC: u32 = 0x5643_4948;
+    const CASE: u32 = 1;
+    const SAMPLE: u32 = 2;
+    const FINISH: u32 = 3;
+    /// A case's environment entries, at most.
+    const CASE_LIMIT: usize = 1 << 20;
+
+    type Main = unsafe extern "C" fn(i32, *const *const c_char) -> i32;
+
+    struct Record {
+        identity: [u8; 32],
+        flags: usize,
+        count: usize,
+    }
+
+    /// Serve cases until the driver finishes, then end the process.
+    ///
+    /// # Safety
+    /// `start..start + length` is the flag section, mapped over the raw
+    /// file `file`; no other thread runs.
+    pub(super) unsafe fn serve(file: i32, start: *mut u8, length: usize, descriptors: &OsStr) -> ! {
+        let Some((input, output)) = pair(descriptors) else {
+            refuse(b"HIRSEL_COVERAGE_WARM is not two descriptors R,W");
+        };
+        let Some(main) = crate::host::warm::main_entry() else {
+            refuse(b"this executable's `main` is not found on this host");
+        };
+        // SAFETY: the address of this executable's own `main`.
+        let main = unsafe { std::mem::transmute::<usize, Main>(main) };
+        // SAFETY: the caller's section is mapped and readable.
+        let Some(records) = (unsafe { records(start, length) }) else {
+            refuse(b"the flag section holds a malformed record");
+        };
+        let mut greeting = GREETING.to_vec();
+        greeting.extend(VERSION.to_le_bytes());
+        greeting.extend((records.len() as u32).to_le_bytes());
+        for record in &records {
+            greeting.extend(record.identity);
+            greeting.extend((record.flags as u32).to_le_bytes());
+            greeting.extend((record.count as u32).to_le_bytes());
+        }
+        if !write_all(output, &greeting) {
+            refuse(b"the reply descriptor refused the greeting");
+        }
+        let Some(n) = read_u32(input) else {
+            refuse(b"no record selection");
+        };
+        let mut spans = Vec::new();
+        for _ in 0..n {
+            match read_u32(input).and_then(|index| records.get(index as usize)) {
+                Some(record) => spans.push((record.flags, record.count)),
+                None => refuse(b"the selection names no record"),
+            }
+        }
+        let total: usize = spans.iter().map(|&(_, count)| count).sum();
+        let mut cumulative = vec![0u8; total];
+        let mut reply = Vec::with_capacity(8 + total);
+        let mut case = Vec::new();
+        let mut held = Vec::new();
+        // Outcome 1 while every completed case passed, as `outcome` records.
+        let mut outcome = 1u32;
+        let argv: [*const c_char; 2] = [c"hirsel-warm".as_ptr(), std::ptr::null()];
+        loop {
+            match read_u32(input) {
+                Some(CASE) => {
+                    let Some(len) = read_u32(input).map(|len| len as usize) else {
+                        refuse(b"a case without its length");
+                    };
+                    if len > CASE_LIMIT {
+                        refuse(b"a case over the entry limit");
+                    }
+                    case.resize(len, 0);
+                    if !read_exact(input, &mut case) {
+                        refuse(b"a case shorter than its length");
+                    }
+                    // SAFETY: single-threaded between calls (quiescence).
+                    if !unsafe { environment(&case, &mut held) } {
+                        refuse(b"a case entry is malformed or names a coverage variable");
+                    }
+                    for &(at, count) in &spans {
+                        // SAFETY: a selected record's flag bytes, inside
+                        // the mapped section; no run is active.
+                        unsafe { std::ptr::write_bytes(start.add(at), 0, count) };
+                    }
+                    // SAFETY: the executable's own entry; its coverage
+                    // open finds no raw file and returns, and the run it
+                    // starts ends before it returns.
+                    let status = unsafe { main(1, argv.as_ptr()) };
+                    if status != 0 {
+                        outcome = 2;
+                    }
+                    reply.clear();
+                    reply.extend(CASE.to_le_bytes());
+                    reply.extend(status.to_le_bytes());
+                    for &(at, count) in &spans {
+                        // SAFETY: as above; the run has ended.
+                        let flags = unsafe { std::slice::from_raw_parts(start.add(at), count) };
+                        reply.extend_from_slice(flags);
+                    }
+                    for (seen, &flag) in cumulative.iter_mut().zip(&reply[8..]) {
+                        *seen |= flag;
+                    }
+                    if !write_all(output, &reply) {
+                        break;
+                    }
+                }
+                Some(SAMPLE) => {
+                    let counters = crate::host::warm::counters();
+                    reply.clear();
+                    reply.extend(SAMPLE.to_le_bytes());
+                    reply.extend((counters.len() as u32).to_le_bytes());
+                    for counter in counters {
+                        reply.extend(counter.to_le_bytes());
+                    }
+                    if !write_all(output, &reply) {
+                        break;
+                    }
+                }
+                Some(FINISH) | None => break,
+                Some(_) => refuse(b"an unknown request"),
+            }
+        }
+        // The raw file reads as an ordinary run's: every case's flags.
+        let mut at_seen = 0;
+        for &(at, count) in &spans {
+            for (i, &seen) in cumulative[at_seen..at_seen + count].iter().enumerate() {
+                // SAFETY: as above.
+                unsafe { *start.add(at + i) |= seen };
+            }
+            at_seen += count;
+        }
+        // SAFETY: `file` is the raw file this process opened.
+        unsafe { super::pwrite_all(file, &outcome.to_le_bytes(), super::OUTCOME_OFFSET) };
+        // SAFETY: ends the process; the flags are already in the file.
+        unsafe { libc::_exit(0) }
+    }
+
+    fn pair(descriptors: &OsStr) -> Option<(i32, i32)> {
+        let text = std::str::from_utf8(descriptors.as_bytes()).ok()?;
+        let (input, output) = text.split_once(',')?;
+        Some((input.parse().ok()?, output.parse().ok()?))
+    }
+
+    /// The records of the flag section, as `docs/coverage.md` lays them out.
+    ///
+    /// # Safety
+    /// `start..start + length` is mapped and readable.
+    unsafe fn records(start: *const u8, length: usize) -> Option<Vec<Record>> {
+        // SAFETY: the caller's section.
+        let section = unsafe { std::slice::from_raw_parts(start, length) };
+        let word = |at: usize| u32::from_le_bytes(section[at..at + 4].try_into().unwrap());
+        let mut records = Vec::new();
+        let mut at = 0;
+        while at + 8 <= length {
+            let (magic, count) = (word(at), word(at + 4) as usize);
+            if magic == 0 && count == 0 {
+                at += 8;
+                continue;
+            }
+            if magic != RECORD_MAGIC || at + 40 + count > length {
+                return None;
+            }
+            let identity = section[at + 8..at + 40].try_into().unwrap();
+            records.push(Record {
+                identity,
+                flags: at + 40,
+                count,
+            });
+            at += (40 + count + 7) & !7;
+        }
+        Some(records)
+    }
+
+    /// Set and unset the case's variables. A set entry is `held`'s own
+    /// string, placed with `putenv`: `setenv` keeps every distinct value
+    /// it was given for the life of the process. The previous case's
+    /// entries leave the environment before their strings are dropped.
+    ///
+    /// # Safety
+    /// No other thread runs.
+    unsafe fn environment(case: &[u8], held: &mut Vec<CString>) -> bool {
+        for entry in held.drain(..) {
+            let bytes = entry.as_bytes();
+            let name = &bytes[..bytes
+                .iter()
+                .position(|&byte| byte == b'=')
+                .unwrap_or(bytes.len())];
+            // SAFETY: the caller's single thread; the entry is still alive.
+            unsafe { std::env::remove_var(OsStr::from_bytes(name)) };
+        }
+        let entries = match case.split_last() {
+            None => return true,
+            Some((0, entries)) => entries,
+            Some(_) => return false,
+        };
+        for entry in entries.split(|&byte| byte == 0) {
+            let name = &entry[..entry
+                .iter()
+                .position(|&byte| byte == b'=')
+                .unwrap_or(entry.len())];
+            if name.is_empty() || name.starts_with(b"HIRSEL_COVERAGE") {
+                return false;
+            }
+            // SAFETY: the caller's single thread.
+            unsafe { std::env::remove_var(OsStr::from_bytes(name)) };
+            if name.len() < entry.len() {
+                let Ok(entry) = CString::new(entry) else {
+                    return false;
+                };
+                // SAFETY: the caller's single thread; `held` keeps the
+                // string alive until the next case removes it.
+                if unsafe { libc::putenv(entry.as_ptr().cast_mut()) } != 0 {
+                    return false;
+                }
+                held.push(entry);
+            }
+        }
+        true
+    }
+
+    fn read_u32(fd: i32) -> Option<u32> {
+        let mut word = [0u8; 4];
+        read_exact(fd, &mut word).then(|| u32::from_le_bytes(word))
+    }
+
+    fn read_exact(fd: i32, mut bytes: &mut [u8]) -> bool {
+        while !bytes.is_empty() {
+            // SAFETY: a live buffer of its length.
+            let n = unsafe { libc::read(fd, bytes.as_mut_ptr().cast(), bytes.len()) };
+            if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            if n <= 0 {
+                return false;
+            }
+            bytes = &mut bytes[n as usize..];
+        }
+        true
+    }
+
+    fn write_all(fd: i32, mut bytes: &[u8]) -> bool {
+        while !bytes.is_empty() {
+            // SAFETY: a live buffer of its length.
+            let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+            if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            if n <= 0 {
+                return false;
+            }
+            bytes = &bytes[n as usize..];
+        }
+        true
+    }
 }

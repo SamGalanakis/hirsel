@@ -12,6 +12,7 @@ pub(crate) mod sync;
 pub(crate) mod sys;
 #[cfg(target_os = "macos")]
 pub(crate) mod unix;
+pub(crate) mod warm;
 
 #[cfg(test)]
 pub(crate) const HOST_TARGET: hirsel_core_layout::Target =

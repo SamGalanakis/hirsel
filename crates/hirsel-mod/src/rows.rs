@@ -225,7 +225,7 @@ macro_rules! rows {
             hirsel_core_resource_origin Metered,
             hirsel_core_resource_release Metered,
             hirsel_core_resource_stage Metered,
-            hirsel_core_root_limit Provider,
+            hirsel_core_root_limit Metered,
             hirsel_core_rsa_verify_pkcs1_sha256 Pure,
             hirsel_core_rsa_verify_pss_sha256 Pure,
             hirsel_core_schedule_application Provider,

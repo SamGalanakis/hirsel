@@ -150,6 +150,9 @@ In ABI revision 6, `hirsel_core_arc_decrement_for_replay` is a `metered` row.
 Compiled Arc cleanup transfers one live holder to the row, which decrements the
 count in replay order and returns whether the caller owns the final release.
 
+ABI revision 7 classifies `hirsel_core_root_limit` as `metered`. It reads the
+original byte limit of the task in the current execution.
+
 ### Fixups
 
 A fixup record is 16 bytes: `site: u32`, `kind: u8`, `bias: u8`, zero `u16`,

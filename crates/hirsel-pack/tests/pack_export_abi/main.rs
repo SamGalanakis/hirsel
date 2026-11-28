@@ -101,7 +101,7 @@ pub fn call_via_bind() -> Big {
     let c = code.bind(overlap_sum)
     let a = invoke(code.bind(word), 10u64)
     let b_word = invoke(code.bind(empty), ())
-    let b = arc.new(invoke(code.bind(keep), Big(a: a, b: b_word, c: 33, d: 44)))
+    let b = arc.new(invoke(code.bind(keep), Big(a: a, b: b_word, c: 33, d: runtime.root_limit())))
     c(b, b)
 }
 "#;
@@ -200,7 +200,7 @@ pub fn call_via_bind() -> Big {
             let mut bind_out = MaybeUninit::<[u64; 4]>::uninit();
             let st4 = unsafe { bind_fn(ctx, bind_out.as_mut_ptr()) };
             assert_eq!(st4, 0, "{backend:?}: call_via_bind failed");
-            assert_eq!(unsafe { bind_out.assume_init() }, [22, 44, 66, 88]);
+            assert_eq!(unsafe { bind_out.assume_init() }, [22, 44, 66, 2 << 20]);
             0
         });
         assert_eq!(status, Ok(0), "{backend:?}: worker exit");

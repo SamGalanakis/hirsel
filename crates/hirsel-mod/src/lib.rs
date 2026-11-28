@@ -90,8 +90,9 @@ pub fn rows_digest() -> ContentHash {
 /// Revision 4 introduced PACK-14/15 typed export adapters (distinct from the
 /// program-root ABI). Revision 5 introduced PACK-16 `Held` lowering, literal ownership
 /// by an image's `CauseData` and stop custody. Revision 6 admits ordered Arc release
-/// under the same metered class as the other Arc operations.
-pub const ABI: u32 = 6;
+/// under the same metered class as the other Arc operations. Revision 7 admits
+/// reading the current task's root byte limit under this class.
+pub const ABI: u32 = 7;
 
 /// The runtime ABI digest of this build: [`ABI`] and the row table.
 pub fn abi() -> ContentHash {

@@ -4,6 +4,8 @@
     "17eaf142e224af05226653bdaf60a6376daed4f0eabcf5842f3e95f1ffdeb3a1": "474554202f74776f20485454502f312e300d0a413a20620d0a583a",
     "3efb058b93b326c9f8dc7de777dc8cbfde75a71e57085ba0644e08cd3d29d364": "474554202f746872656520485454502f312e310d0a406578747261",
     "531e4c54dc7c173ca63c2627ae6934c8101651fd4f5660833fc811a10ba179e1": "474554202f6f6e6520485454502f312e310d0a486f73743a20780d0a0d0a626f6479",
+    "65c94548e92a69a3df7c7891bc05f8efbe6262ce985b8b31896ded77648469f8": "0d0a474554202f636f6e74726f6c20485454502f312e310d0a486f73743a206578616d706c652e746573740d0a0d0a",
+    "7c2d2b4a9546536aab93a7187df21a9f2a14b7104876a6d09b3924ddcff985e8": "474554202f636f6e74726f6c20485454502f312e310d0a486f73743a206578616d706c652e746573740d0a0d0a",
     "824e7f43eceeeec2a6369d7ae402f48f7b960de846ba93635d0de6c023850588": "474554202f666972737420485454502f312e310d0a583a206f6e650d0a583a2074776f0d0a0d0a474554202f6e65787420485454502f312e310d0a0d0a"
   },
   "cases": [
@@ -50,6 +52,86 @@
         {
           "seed": 3393,
           "max_chunk": 6
+        }
+      ]
+    },
+    {
+      "id": "control-get",
+      "target": "http1",
+      "law": "reviewed_fragmentation",
+      "input_kind": "request-head",
+      "generator_version": 1,
+      "digest": "7c2d2b4a9546536aab93a7187df21a9f2a14b7104876a6d09b3924ddcff985e8",
+      "limits": {
+        "head_bytes": 32768
+      },
+      "setup": {
+        "parser": "request"
+      },
+      "oracle": {
+        "name": "http1-request-head",
+        "version": 1
+      },
+      "expected": {
+        "status": "Complete",
+        "consumed": 45,
+        "end": 45,
+        "method": "GET",
+        "target": "/control",
+        "version": 1,
+        "fields": [
+          [
+            "Host",
+            "example.test"
+          ]
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            1,
+            45
+          ]
+        }
+      ]
+    },
+    {
+      "id": "control-get-leading-crlf",
+      "target": "http1",
+      "law": "reviewed_fragmentation",
+      "input_kind": "request-head",
+      "generator_version": 1,
+      "digest": "65c94548e92a69a3df7c7891bc05f8efbe6262ce985b8b31896ded77648469f8",
+      "limits": {
+        "head_bytes": 32768
+      },
+      "setup": {
+        "parser": "request"
+      },
+      "oracle": {
+        "name": "http1-request-head",
+        "version": 1
+      },
+      "expected": {
+        "status": "Complete",
+        "consumed": 47,
+        "end": 47,
+        "method": "GET",
+        "target": "/control",
+        "version": 1,
+        "fields": [
+          [
+            "Host",
+            "example.test"
+          ]
+        ]
+      },
+      "schedules": [
+        {
+          "ends": [
+            1,
+            47
+          ]
         }
       ]
     },

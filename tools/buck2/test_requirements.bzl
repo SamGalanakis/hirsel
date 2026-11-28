@@ -65,6 +65,7 @@ NATIVE_EXEC_TEST_CASES = [
 DEV_TEST_CASES = ["native::tests::dev_laws::" + case for case in [
     "package_dev_public_identity_vectors",
     "package_dev_releases_held_runs",
+    "package_dev_s1_excludes_conflicting_store_supervisors",
     "package_dev_s1_persistence_and_fencing",
     "package_dev_s1_recovers_after_store_install",
     "package_dev_s1_recovers_before_state_publication_and_after_refused_edits",

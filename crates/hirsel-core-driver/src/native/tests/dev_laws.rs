@@ -611,7 +611,7 @@ fn package_dev_public_identity_vectors() {
 }
 
 #[test]
-fn package_dev_s1_store_ownership() {
+fn package_dev_s1_excludes_conflicting_store_supervisors() {
     let fixture = Fixture::new();
     let supplied = fixture.law.path("supplied");
     fs::create_dir(&supplied).unwrap();
@@ -634,6 +634,19 @@ fn package_dev_s1_store_ownership() {
     assert_eq!(conflict.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&conflict.stderr).contains("already supervising store"));
     external.stop();
+    assert_eq!(
+        fs::read(Path::new(supplied).join("original")).unwrap(),
+        b"user file"
+    );
+}
+
+#[test]
+fn package_dev_s1_store_ownership() {
+    let fixture = Fixture::new();
+    let supplied = fixture.law.path("supplied");
+    fs::create_dir(&supplied).unwrap();
+    fs::write(supplied.join("original"), b"user file").unwrap();
+    let supplied = supplied.to_str().unwrap();
 
     let mut original = fixture.dev("original", &[]);
     original.wait_for("hirsel dev listening on ");

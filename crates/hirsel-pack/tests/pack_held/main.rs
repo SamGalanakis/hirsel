@@ -256,7 +256,13 @@ pub fn restore_frozen(take h: Held) -> FrozenBytes {
     let r: Result[FrozenBytes, (code.TakeError, Held)] = code.take_as(take h)
     match take r { Ok(take f) => f, Error(_) => fail("wrong frozen") }
 }
-pub fn consume_frozen(take f: FrozenBytes) -> u64 { list.len(bytebuf.as_bytes(f)) }
+pub fn consume_frozen(take f: FrozenBytes) -> u64 {
+    let copied: Result[u64, Capacity] = bound bytes 0 {
+        let shared: FrozenBytes = clone(f)
+        list.len(bytebuf.as_bytes(shared))
+    }
+    match copied { Ok(n) => n, Error(_) => 0u64 }
+}
 "#,
         &[
             "restore",
@@ -287,6 +293,7 @@ pub fn consume_frozen(take f: FrozenBytes) -> u64 { list.len(bytebuf.as_bytes(f)
     type Restore = unsafe extern "C" fn(*mut Context, *mut [usize; 3], *mut usize) -> u8;
     type Consume = unsafe extern "C" fn(*mut Context, *mut u64, *mut [usize; 3]) -> u8;
     let mut preserved = [false; 2];
+    let mut literal_capacity = 0;
     let mut a_unloaded = false;
     let mut values = [0u64; 3];
     let mut fail_msg = String::new();
@@ -345,6 +352,7 @@ pub fn consume_frozen(take f: FrozenBytes) -> u64 { list.len(bytebuf.as_bytes(f)
             return st;
         }
         let (lo, hi) = loader.data_band();
+        literal_capacity = r1[2];
         preserved[0] = !(lo..hi).contains(&r1[0]);
         preserved[1] = !(lo..hi).contains(&rf[0]);
         let st = finish(ctx, &mut values[0], &mut r1);
@@ -388,7 +396,11 @@ pub fn consume_frozen(take f: FrozenBytes) -> u64 { list.len(bytebuf.as_bytes(f)
         preserved[1],
         "{backend:?}: extracted FrozenBytes literal points into reclaimable data band"
     );
-    assert_eq!(values, [14, 15, 19], "{backend:?}");
+    assert_eq!(
+        (values, literal_capacity & 1),
+        ([14, 15, 19], 1),
+        "{backend:?}"
+    );
     assert!(
         fail_msg.contains("foreign origin"),
         "{backend:?}: {fail_msg}"

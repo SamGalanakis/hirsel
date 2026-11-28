@@ -6,13 +6,15 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+/// A doubling alias chain is laid out once per alias: T14, the longest within the
+/// checker's expansion limit (`type_limits`), has 14 rows, not 2^15 - 1.
 #[test]
 fn repeated_tuple_alias_layout() {
     let mut source = String::from("type T0 = u64\n");
-    for n in 1..=40 {
+    for n in 1..=14 {
         writeln!(source, "type T{n} = (T{prev}, T{prev})", prev = n - 1).unwrap();
     }
-    source.push_str("const SIZE: u64 = bytes[T40]\npub fn size() -> u64 { bytes[T40] }\n");
+    source.push_str("const SIZE: u64 = bytes[T14]\npub fn size() -> u64 { bytes[T14] }\n");
     let (index, modules) = crate::tests::program_inputs(&source);
     let mut p = Program::declare(&index, &modules);
     assert!(
@@ -23,7 +25,7 @@ fn repeated_tuple_alias_layout() {
     );
 
     // Each pair doubles the byte extent and keeps the alignment of u64.
-    let expected_size = 8u64 << 40;
+    let expected_size = 8u64 << 14;
     let value = p
         .constants
         .iter()
@@ -43,9 +45,9 @@ fn repeated_tuple_alias_layout() {
         "{check:?}"
     );
 
-    let decl = p.decls.iter().find(|d| d.path.0.name == "T40").unwrap();
+    let decl = p.decls.iter().find(|d| d.path.0.name == "T14").unwrap();
     let DeclBody::Alias(ty) = decl.body else {
-        panic!("T40 is an alias");
+        panic!("T14 is an alias");
     };
     let mut shapes = vec![];
     let row = temporary_shapes(
@@ -56,10 +58,10 @@ fn repeated_tuple_alias_layout() {
     )
     .shape(ty)
     .unwrap();
-    assert_eq!(shapes.len(), 40);
+    assert_eq!(shapes.len(), 14);
     let recipes = compute(&shapes).unwrap();
     let hirsel_core_layout::Layout::Fixed(fixed) = &recipes[row.index()].layout else {
-        panic!("T40 has fixed layout");
+        panic!("T14 has fixed layout");
     };
     assert_eq!((fixed.size, fixed.align), (expected_size, 8));
 }

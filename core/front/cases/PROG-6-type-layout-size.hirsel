@@ -1,0 +1,11 @@
+// PROG-6 (programs.md): a declared type larger than FAIL-17's single-frame ceiling of
+// 7,864,320 bytes is the implementation's resource refusal, which names no rule: no
+// function's frame could hold one of its values. S256K, 262,144 bytes, is accepted;
+// S8M, 32 of them, is 8,388,608 bytes. Pair holds S8M and is not refused again.
+// expect: size S256K 262144
+// expect: resource at 10:6
+type S256 { a: Inline[u64, 32] }
+type S8K { a: Inline[S256, 32] }
+type S256K { a: Inline[S8K, 32] }
+type S8M { a: Inline[S256K, 32] }
+type Pair { a: S8M, b: S8M }

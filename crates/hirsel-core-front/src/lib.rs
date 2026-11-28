@@ -29,6 +29,8 @@ mod library;
 pub use library::{Library, Rows};
 mod own;
 mod test_functions;
+mod type_limits;
+pub use type_limits::{LAYOUT_BYTES, TYPE_DEPTH, TYPE_NODES};
 mod types;
 
 pub use body::flow::Facts as FlowFacts;
@@ -645,10 +647,14 @@ impl<'a> Program<'a> {
         p.check_foreign_signatures();
         p.check_recursive_instances();
         p.register_constants();
-        p.summarize();
-        p.evaluate_constants();
-        p.decide_constant_branches();
-        test_functions::check(&mut p);
+        // PROG-6: a request whose types expand past the checker's limits is refused
+        // before any pass walks a field, so none of them walks the expansion.
+        if !p.type_expansion_limits() {
+            p.summarize();
+            p.evaluate_constants();
+            p.decide_constant_branches();
+            test_functions::check(&mut p);
+        }
 
         for f in p.fns.base_len()..p.fns.len() {
             let toolchain = p.index.supplied_by_toolchain(&p.fns[f].path.0.package);

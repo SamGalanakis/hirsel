@@ -930,6 +930,7 @@ pub(crate) fn recipes(p: &mut Program) {
     }
     match compute(s.shapes) {
         Ok(recipes) => {
+            p.layout_size_limit(roots.iter().map(|&(d, r)| (d, &recipes[r.index()].layout)));
             for (d, r) in roots {
                 p.decls[d].summary.recipe = Some(Recipe::clone(&recipes[r.index()]));
             }

@@ -946,7 +946,7 @@ impl Driver {
                     .filter(|path| !seen.insert(*path))
                     .collect()
             };
-            for f in p.fns.base_len()..p.fns.len() {
+            for f in p.checked_bodies() {
                 let fd = &p.fns[f];
                 if fd.body.is_none() {
                     continue;

@@ -114,7 +114,7 @@ fn review(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
     for opt in req.options {
         match opt {
             O::Json => (),
-            O::Deep if !deep => deep = true,
+            O::Deep => deep = true,
             O::KeepFrom(n) if cutoff.is_none() => cutoff = Some(("base", n)),
             O::ArchiveAt(n) if cutoff.is_none() => cutoff = Some(("at", n)),
             _ => {

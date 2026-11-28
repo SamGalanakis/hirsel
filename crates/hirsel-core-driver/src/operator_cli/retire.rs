@@ -21,11 +21,7 @@ pub(crate) fn run(req: Request<O>) -> i32 {
 }
 fn propose(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
     let (mut context, mut name, mut request) = (None, None, None);
-    let mut seen = std::collections::HashSet::new();
     for o in req.options {
-        if !seen.insert(std::mem::discriminant(&o)) {
-            return Err(Failure::input("arguments", "duplicate option"));
-        }
         match o {
             O::Json | O::Plan => (),
             O::Context(v) => context = Some(v),

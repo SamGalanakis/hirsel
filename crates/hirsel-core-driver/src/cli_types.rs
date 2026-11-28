@@ -89,20 +89,55 @@ pub(super) struct Switch(pub Flag);
 pub(super) struct Value(pub Flag, pub &'static str);
 
 impl Switch {
-    pub const fn bind<T>(self, option: T) -> Argument<T> {
+    pub const fn bind<T>(self, option: T, multiplicity: Multiplicity) -> Argument<T> {
         Argument {
             flag: self.0,
             kind: Kind::Switch(option),
+            multiplicity,
         }
     }
 }
 
 impl Value {
-    pub const fn bind<T>(self, parse: fn(String) -> T) -> Argument<T> {
+    pub const fn bind<T>(self, parse: fn(String) -> T, multiplicity: Multiplicity) -> Argument<T> {
         Argument {
             flag: self.0,
             kind: Kind::Value(self.1, parse),
+            multiplicity,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Multiplicity {
+    Once,
+    Repeatable,
+    LastWins,
+}
+
+#[derive(Debug)]
+pub(crate) enum ParseError {
+    Arguments(String),
+    Duplicate {
+        option: &'static str,
+        positional: Option<String>,
+        wait: bool,
+    },
+}
+
+impl ParseError {
+    pub(crate) fn into_detail(self) -> String {
+        match self {
+            Self::Arguments(detail) => detail,
+            Self::Duplicate { option, .. } => format!("{option} given twice"),
+        }
+    }
+}
+
+impl From<String> for ParseError {
+    fn from(detail: String) -> Self {
+        Self::Arguments(detail)
     }
 }
 
@@ -110,6 +145,7 @@ impl Value {
 pub(super) struct Argument<T> {
     pub flag: Flag,
     pub kind: Kind<T>,
+    pub multiplicity: Multiplicity,
 }
 
 #[derive(Debug)]
@@ -140,7 +176,7 @@ pub(super) trait CommandSchema: std::fmt::Debug + Sync {
         &self,
         command: &'static CommandSpec,
         arguments: &mut dyn Iterator<Item = String>,
-    ) -> Result<Action, String>;
+    ) -> Result<Action, ParseError>;
 
     fn positionals(&self) -> Positionals;
 

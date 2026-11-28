@@ -35,10 +35,11 @@ pub(super) fn run(mut args: Vec<String>) -> Result<Outcome, Box<dyn std::error::
             .unwrap_or(args.len());
         args[..end].rotate_left(1);
     }
-    let parsed = crate::cli::parse(args.iter().cloned());
+    let parsed = crate::cli::parse_detailed(args.iter().cloned());
     let action = match parsed {
         Ok(action) => action,
-        Err(detail) => {
+        Err(error) => {
+            use crate::cli::ParseError;
             let name = crate::cli::command_path(&args);
             if matches!(name, "add" | "update") {
                 let plan = args
@@ -47,14 +48,44 @@ pub(super) fn run(mut args: Vec<String>) -> Result<Outcome, Box<dyn std::error::
                     .take_while(|arg| *arg != "--")
                     .any(|arg| arg == "--plan");
                 return conclude(Outcome::Exit(operator_cli::package::invalid(
-                    name, plan, json, detail,
+                    name,
+                    plan,
+                    json,
+                    error.into_detail(),
                 )));
             }
             if name == "logs" {
-                return conclude(Outcome::Exit(operator_cli::observe::invalid_logs()));
+                let duplicate = matches!(error, ParseError::Duplicate { .. });
+                return conclude(Outcome::Exit(operator_cli::observe::invalid_logs(
+                    duplicate,
+                )));
             }
-            return conclude(Outcome::Exit(operator_cli::finite::invalid(
-                name, detail, json,
+            if let ParseError::Duplicate {
+                option, positional, ..
+            } = &error
+            {
+                if name == "op decide" && positional.as_deref().is_some_and(|s| s.starts_with('@'))
+                {
+                    return conclude(Outcome::Exit(operator_cli::package::invalid(
+                        name,
+                        false,
+                        json,
+                        "package decisions accept one --decision and --json".into(),
+                    )));
+                }
+                if name.starts_with("lean ") {
+                    let label = match *option {
+                        "--inputs" => "Inputs",
+                        "--store" => "Store",
+                        "-o" => "Output",
+                        "--target" => "Target",
+                        _ => return Err(format!("invalid option for {name}").into()),
+                    };
+                    return Err(format!("option {label} must be given only once").into());
+                }
+            }
+            return conclude(Outcome::Exit(operator_cli::finite::invalid_parse(
+                name, error, json,
             )));
         }
     };

@@ -12,7 +12,6 @@ use crate::{
 use hirsel_core_ids::{ContentHash, hex};
 use serde_json::{Value, json};
 use std::{
-    collections::HashSet,
     io::{self, Write},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -141,12 +140,14 @@ pub(crate) fn run(req: Request<O>) -> i32 {
     env.render(json)
 }
 
-pub(crate) fn invalid_logs() -> i32 {
+pub(crate) fn invalid_logs(duplicate: bool) -> i32 {
     let mut env = Envelope::read("logs");
-    env.fail(Failure::input(
-        "arguments",
-        "invalid lifecycle command arguments",
-    ));
+    let failure = if duplicate {
+        Failure::input("arguments", "duplicate option").without_detail()
+    } else {
+        Failure::input("arguments", "invalid lifecycle command arguments")
+    };
+    env.fail(failure);
     let mut stdout = io::stdout().lock();
     let mut stream = Stream {
         output: &mut stdout,
@@ -165,11 +166,7 @@ fn observe(
 ) -> Result<(), Failure> {
     let (mut context, mut group, mut after) = (None, None, None);
     let (mut ready, mut follow) = (false, false);
-    let mut seen = HashSet::new();
     for option in req.options {
-        if !seen.insert(std::mem::discriminant(&option)) {
-            return Err(Failure::input("arguments", "duplicate option"));
-        }
         match option {
             O::Context(value) => context = Some(value),
             O::GroupName(value) => group = Some(value),

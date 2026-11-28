@@ -281,3 +281,176 @@ fn hirsel_version_and_env_report_full_version_and_docs_url() {
     assert_eq!(report["version"], "0.2.0-pre");
     assert_eq!(report["docs"], "https://hirsel.ai");
 }
+
+#[test]
+fn operator_scalar_cli_preserves_values_and_typed_errors() {
+    use serde_json::json;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let compiler = root.join("hirsel");
+    fs::copy(hirsel_bin(), &compiler).unwrap();
+    let run = |args: &[&str], exit: i32| {
+        let output = Command::new(&compiler)
+            .current_dir(&root)
+            .env("XDG_STATE_HOME", root.join("state"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(exit),
+            "{args:?}: {}\n{}",
+            stderr(&output),
+            stdout(&output)
+        );
+        assert_eq!(output.stdout.split_inclusive(|&b| b == b'\n').count(), 1);
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["v"], 1);
+        value
+    };
+    let authority = "0123456789abcdef0123456789abcdef";
+    let id = format!("host/{authority}/{}", "ab".repeat(16));
+    for (first, second) in [("--wait", "--wait=1s"), ("--wait=1s", "--wait")] {
+        let result = run(&["op", "get", &id, first, second, "--json"], 2);
+        assert_eq!(result["command"], "op get");
+        assert_eq!(result["contract"], "wait");
+        assert_eq!(result["exit"], 2);
+        assert_eq!(result["outcome"], json!({"kind":"Invalid","effect":"none"}));
+        assert_eq!(
+            result["error"],
+            json!({
+                "code":"InvalidInput", "field":"wait", "detail":"--wait given twice", "retry":"none",
+            })
+        );
+    }
+
+    for duration in ["18446744073709551616ms", "18446744073709552s"] {
+        let result = run(
+            &["op", "get", &id, &format!("--wait={duration}"), "--json"],
+            2,
+        );
+        assert_eq!(result["exit"], 2);
+        assert_eq!(
+            result["error"],
+            json!({
+                "code":"InvalidInput", "field":"arguments", "detail":"wait duration too large", "retry":"none",
+            })
+        );
+    }
+
+    for selector in [
+        "boundary:a",
+        "version:4294967296,0",
+        "at:main,18446744073709551616",
+    ] {
+        let result = run(&["store", "restore", "--target", selector, "--json"], 2);
+        assert_eq!(result["command"], "store restore");
+        assert_eq!(result["exit"], 2);
+        assert_eq!(
+            result["error"],
+            json!({
+                "code":"InvalidInput", "field":"target", "retry":"none",
+                "detail":"expected latest, version:BRANCH,V, at:BRANCH,MS or boundary:TOKEN",
+            })
+        );
+    }
+
+    let invalid = run(&["logs", "--after", "a", "--after", "b", "--json"], 2);
+    assert_eq!(invalid["kind"], "end");
+    assert_eq!(invalid["payload"]["exit"], 2);
+    assert_eq!(
+        invalid["payload"]["error"],
+        json!({
+            "code":"InvalidInput", "field":"arguments",
+            "detail":"lifecycle observation did not complete", "retry":"none",
+        })
+    );
+
+    let schema = run(&["op", "get", "--help", "--json"], 0);
+    assert!(
+        schema["result"]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| {
+                option["names"] == json!(["--wait"]) && option["multiplicity"] == "once"
+            })
+    );
+
+    fs::write(
+        root.join("hirsel-core-toolchain.json"),
+        br#"{
+        "version": 7, "products": {}, "runtimes": [], "exec_helpers": {}, "links": {}
+    }"#,
+    )
+    .unwrap();
+    let helper = root.join("libexec/hirsel/store_tool");
+    fs::create_dir_all(helper.parent().unwrap()).unwrap();
+    fs::write(&helper, r#"#!/bin/sh
+set -eu
+if [ "$#" -ne 4 ] || [ "$1" != plan-backup ] || [ "$2" != version ] ||
+    [ "$3" != 2 ] || [ "$4" != 3 ]; then
+    printf 'unexpected selector: %s\n' "$*" >&2
+    exit 2
+fi
+cat <<'JSON'
+{"parent":"parent","boundary":"aabb","branch":"2","version":"3","at_ms":"4","main_version":"5","main_at_ms":"6","base":"7","unit":"8","frame_end":"9","activation":"10","release_binding":"release"}
+JSON
+"#).unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::create_dir(root.join("source")).unwrap();
+    let plan = run(
+        &[
+            "store",
+            "restore",
+            "--from",
+            "source",
+            "--to",
+            "destination",
+            "--target",
+            "version:+0002,+0003",
+            "--plan",
+            "--json",
+        ],
+        0,
+    );
+    assert_eq!(plan["contract"], "plan");
+    assert_eq!(plan["exit"], 0);
+    assert_eq!(plan["result"]["point"]["branch"], "2");
+    assert_eq!(plan["result"]["point"]["version"], "3");
+
+    let operation = plan["operation"]["id"].as_str().unwrap();
+    let zero = run(&["op", "get", operation, "--wait=000ms", "--json"], 75);
+    assert_eq!(zero["contract"], "wait");
+    assert_eq!(zero["exit"], 75);
+    assert_eq!(
+        zero["outcome"],
+        json!({"kind":"AwaitDecision","effect":"none"})
+    );
+    assert_eq!(zero["error"], Value::Null);
+}
+
+#[test]
+fn compiler_cli_uses_the_last_emit_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = run_in(
+        dir.path(),
+        &[
+            "build",
+            "--emit",
+            "recipe",
+            "--emit",
+            "exe",
+            "--target",
+            "aarch64-apple-ios",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        "hirsel: aarch64-apple-ios: iOS executables require an Xcode-signed app bundle (docs/spec/embed.md)\n",
+    );
+}

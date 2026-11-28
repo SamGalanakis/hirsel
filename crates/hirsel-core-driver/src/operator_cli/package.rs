@@ -246,7 +246,7 @@ fn resume(
     for option in req.options {
         match option {
             DecideOption::Json => {}
-            DecideOption::DecisionFile(path) if file.is_none() => file = Some(path),
+            DecideOption::DecisionFile(path) => file = Some(path),
             _ => {
                 return Err(Failure::input(
                     "arguments",

@@ -1,6 +1,6 @@
 //! Finite operator reads share one envelope and one exit fold in both renderers.
 use super::{class_name, context::Target, operation_id, state_json};
-use crate::cli::{self, HelpOption, OpGetOption, Request};
+use crate::cli::{self, HelpOption, OpGetOption, ParseError, Request};
 use crate::operator::{Answer, Ask, Class, Phase};
 use hirsel_core_ids::hex;
 use serde::Serialize;
@@ -219,6 +219,45 @@ pub(crate) fn invalid(name: &str, detail: String, json: bool) -> i32 {
     envelope.render(json)
 }
 
+pub(crate) fn invalid_parse(name: &str, error: ParseError, json: bool) -> i32 {
+    let mut env = Envelope::read(name);
+    let failure = match error {
+        ParseError::Arguments(detail) => Failure::input("arguments", detail),
+        ParseError::Duplicate {
+            option,
+            positional,
+            wait,
+        } => {
+            let store = positional.is_some_and(|s| s.starts_with("store/"));
+            env.contract = match name {
+                "op get" | "op decide" if wait => "wait",
+                "deploy" | "rollback" | "op decide" => "submit",
+                "host retire" => "plan",
+                _ => "read",
+            };
+            match name {
+                "op get" if store => {
+                    Failure::input("options", "a store operation takes --json or --wait")
+                }
+                "op get" => Failure::input(
+                    option.trim_start_matches('-'),
+                    format!("{option} given twice"),
+                ),
+                "op decide" if store => {
+                    Failure::input("options", "unexpected or duplicate store decision option")
+                }
+                "store restore" => Failure::input("arguments", "duplicate or unrelated option"),
+                "store archive verify" | "store archive expire" => {
+                    Failure::input("options", "duplicate or unrelated archive option")
+                }
+                _ => Failure::input("arguments", "duplicate option"),
+            }
+        }
+    };
+    env.fail(failure);
+    env.render(json)
+}
+
 pub(crate) fn help(request: Request<HelpOption>) -> i32 {
     let path = request
         .positional
@@ -278,22 +317,15 @@ fn observe(request: Request<OpGetOption>, envelope: &mut Envelope<'_>) -> Result
     let (authority, id) =
         operation_id(request.positional.as_deref()).map_err(|e| Failure::input("operation", e))?;
     let mut context = None;
-    for option in &request.options {
-        if let OpGetOption::Context(name) = option
-            && context.replace(name.as_str()).is_some()
-        {
-            return Err(Failure::context("--context given twice"));
+    let mut wait = None;
+    for option in request.options {
+        match option {
+            OpGetOption::Context(name) => context = Some(name),
+            OpGetOption::Wait(limit) => wait = Some(super::wait::Wait::start(limit)?),
+            OpGetOption::Json => {}
         }
     }
-    let mut waits = request.options.iter().filter_map(|o| match o {
-        OpGetOption::Wait(limit) => Some(*limit),
-        _ => None,
-    });
-    let wait = waits.next().map(super::wait::Wait::start).transpose()?;
-    if waits.next().is_some() {
-        return Err(Failure::input("wait", "--wait given twice"));
-    }
-    let target = Target::resolve(context)?;
+    let target = Target::resolve(context.as_deref())?;
     envelope.target = json!(target);
     let qualified = format!("host/{authority:032x}/{}", hex::encode(&id));
     envelope.operation = json!({"kind":"host","authority":format!("{authority:032x}"),"request_id":hex::encode(&id),"id":qualified,"evidence":"authority_catalog"});

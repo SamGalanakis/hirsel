@@ -104,11 +104,7 @@ fn propose(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
     let (mut spec, mut context, mut request, mut wait, mut assembly) =
         (None, None, None, None, None);
     let mut plan = false;
-    let mut seen = std::collections::HashSet::new();
     for opt in req.options {
-        if !seen.insert(std::mem::discriminant(&opt)) {
-            return Err(Failure::input("arguments", "duplicate option"));
-        }
         match opt {
             O::AdoptSpec(v) => spec = Some(v),
             O::Context(v) => context = Some(v),

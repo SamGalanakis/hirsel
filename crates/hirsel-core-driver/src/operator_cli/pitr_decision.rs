@@ -159,8 +159,8 @@ pub(super) fn get(req: Request<OpGetOption>, env: &mut Envelope<'_>) -> Result<(
     for o in req.options {
         match o {
             OpGetOption::Json => (),
-            OpGetOption::Wait(w) if wait.is_none() => wait = Some(Wait::start(w)?),
-            _ => {
+            OpGetOption::Wait(w) => wait = Some(Wait::start(w)?),
+            OpGetOption::Context(_) => {
                 return Err(Failure::input(
                     "options",
                     "a store operation takes --json or --wait",
@@ -224,13 +224,13 @@ pub(super) fn decide(req: Request<DecideOption>, env: &mut Envelope<'_>) -> Resu
     let mut wait = None;
     for o in req.options {
         match o {
-            DecideOption::DecisionFile(f) if file.is_none() => file = Some(f),
+            DecideOption::DecisionFile(f) => file = Some(f),
             DecideOption::Json => (),
-            DecideOption::Wait(w) if wait.is_none() => {
+            DecideOption::Wait(w) => {
                 wait = Some(Wait::start(w)?);
                 env.contract = "wait"
             }
-            _ => {
+            DecideOption::Context(_) => {
                 return Err(Failure::input(
                     "options",
                     "unexpected or duplicate store decision option",

@@ -187,14 +187,13 @@ fn apply(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
     let (mut context, mut file, mut wait) = (None, None, None);
     for o in req.options {
         match o {
-            O::Context(v) if context.is_none() => context = Some(v),
-            O::DecisionFile(v) if file.is_none() => file = Some(v),
-            O::Wait(w) if wait.is_none() => {
+            O::Context(v) => context = Some(v),
+            O::DecisionFile(v) => file = Some(v),
+            O::Wait(w) => {
                 wait = Some(Wait::start(w)?);
                 env.contract = "wait";
             }
             O::Json => (),
-            _ => return Err(Failure::input("arguments", "duplicate option")),
         }
     }
     let target = Target::resolve(context.as_deref())?;

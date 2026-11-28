@@ -6,7 +6,9 @@ mod requests;
 pub use requests::*;
 #[path = "cli_types.rs"]
 mod types;
-use types::{Argument, CommandSchema, Flag, Kind, NoOption, Positionals, Schema, Switch, Value};
+use types::{
+    Argument, CommandSchema, Flag, Kind, Multiplicity, NoOption, Positionals, Schema, Switch, Value,
+};
 pub use types::{CommandSpec, Invocation, Request};
 
 macro_rules! flags {
@@ -30,32 +32,36 @@ macro_rules! flags {
 mod flags;
 
 macro_rules! argument {
-    ($ty:ident, HELP) => {
+    ($ty:ident, HELP, $multiplicity:expr) => {
         Argument {
             flag: HELP,
             kind: Kind::Help,
+            multiplicity: $multiplicity,
         }
     };
-    ($ty:ident, REFUSE_MEM) => {
+    ($ty:ident, REFUSE_MEM, $multiplicity:expr) => {
         Argument {
             flag: flags::ProfMem.0,
             kind: Kind::RefuseMem,
+            multiplicity: $multiplicity,
         }
     };
-    ($ty:ident, Wait) => {
+    ($ty:ident, Wait, $multiplicity:expr) => {
         Argument {
             flag: flags::Wait.0,
             kind: Kind::OptionalWait($ty::Wait),
+            multiplicity: $multiplicity,
         }
     };
-    ($ty:ident, ProfMem) => {
+    ($ty:ident, ProfMem, $multiplicity:expr) => {
         Argument {
             flag: flags::ProfMem.0,
             kind: Kind::OptionalMem(flags::ProfMem.1, $ty::ProfMem),
+            multiplicity: $multiplicity,
         }
     };
-    ($ty:ident, $flag:ident) => {
-        flags::$flag.bind($ty::$flag)
+    ($ty:ident, $flag:ident, $multiplicity:expr) => {
+        flags::$flag.bind($ty::$flag, $multiplicity)
     };
 }
 
@@ -64,9 +70,21 @@ const HELP: Flag = Flag {
     description: "Show this help.",
 };
 
+macro_rules! multiplicity {
+    ($flag:ident, $rule:ident) => {
+        Multiplicity::$rule
+    };
+    (HELP) => {
+        Multiplicity::Repeatable
+    };
+    ($flag:ident) => {
+        Multiplicity::LastWins
+    };
+}
+
 macro_rules! commands {
     ($($name:literal, $usage:literal, $description:literal;
-        $([$contract:ident])? $request:ident($ty:ident), $positionals:ident: $($option:ident),*;)*) => {
+        $([$contract:ident])? $request:ident($ty:ident), $positionals:ident: $($option:ident $(as $rule:ident)?),*;)*) => {
         pub static COMMANDS: &[CommandSpec] = &[$(CommandSpec {
             name: $name,
             usage: $usage,
@@ -74,7 +92,7 @@ macro_rules! commands {
             contract: commands!(@contract $($contract)?),
             schema: &Schema::<$ty> {
                 positionals: Positionals::$positionals,
-                options: &[$(argument!($ty, $option)),*],
+                options: &[$(argument!($ty, $option, multiplicity!($option $(, $rule)?))),*],
                 wrap: Invocation::$request,
             },
         }),*];
@@ -89,7 +107,7 @@ commands! {
     "op", "op <get|decide>", "Inspect an operator request.";
         Simple(NoOption), Namespace: HELP;
     "op get", "op get OP [--wait[=DURATION]] [--context NAME|/ABSOLUTE/FILE] [--json]", "Read a pinned host or Store operation.";
-        [Operation] OpGet(OpGetOption), Operation: HELP, Context, Wait, Json;
+        [Operation] OpGet(OpGetOption), Operation: HELP, Context as Once, Wait as Once, Json;
     "config", "config <export>", "Read a typed configuration document.";
         Simple(NoOption), Namespace: HELP;
     "config export", "config export FILE --json", "Export a checked configuration as versioned JSON.";
@@ -105,11 +123,11 @@ commands! {
     "lean", "lean <extract|status|probe>", "Extract checked functions for optional Lean proofs.";
         Simple(NoOption), Namespace: HELP;
     "lean extract", "lean extract MODULE [--coreir] --inputs MANIFEST --store DIRECTORY -o FILE -- FUNCTION...", "Generate Lean definitions or export a checked CoreIR closure.";
-        Lean(LeanOption), Tail: HELP, Target, CoreIr, Output, Store, Inputs;
+        Lean(LeanOption), Tail: HELP, Target as Once, CoreIr as Once, Output as Once, Store as Once, Inputs as Once;
     "lean status", "lean status MODULE --inputs MANIFEST --store DIRECTORY -o FILE -- FUNCTION...", "Report whether a saved extraction is stale.";
-        Lean(LeanOption), Tail: HELP, Output, Store, Inputs;
+        Lean(LeanOption), Tail: HELP, Output as Once, Store as Once, Inputs as Once;
     "lean probe", "lean probe DEFINITION --inputs MANIFEST --store DIRECTORY", "Report instructions the Lean extractor excludes.";
-        Lean(LeanOption), One: HELP, Store, Inputs;
+        Lean(LeanOption), One: HELP, Store as Once, Inputs as Once;
     "laws", "laws <check|write> [package-dir] [options]", "Check or refresh the generated law lock.";
         Simple(NoOption), Namespace: HELP;
     "laws check", "laws check [package-dir] [options]", "Check the static columns of the law lock without running tests.";
@@ -135,7 +153,7 @@ commands! {
     "build", "build [package-dir | --recipe HASH] [options]", "Build native output or publish a release recipe.";
         Compiler(CompilerOption), One:
             PackageStore, Locked, Frozen, Recipe, CodeStore, ReleaseManifest, PlaceTimeout, NPlace,
-            Recording, HELP, Resident, Json, SourceCore, SourceStd, CoreProduct, Dir, Grant, Release,
+            Recording, HELP, Resident, Json, SourceCore, SourceStd, CoreProduct, Dir as Repeatable, Grant as Repeatable, Release,
             DebugLines, Backend, Runtime, LogicalChargeReport, Cc, Target, Limit, Output, Entry, Libraries,
             Store, Inputs, Metrics, ProfileFront, Image, Emit;
     "manifest", "manifest <show>", "Read a release manifest.";
@@ -145,27 +163,27 @@ commands! {
     "host", "host --state DIR --admission FILE --max-places N --lifecycle managed|leader [--idle-ms MS]", "Run the launcher and the installed platform host on STATE.";
         Host(HostOption), One: HostState, HELP, Admission, MaxPlaces, IdleMs, Lifecycle;
     "host adopt", "host adopt @RESTORE.json --as GROUP.hcfg [--assembly HEX] [--plan] [--wait] [--context NAME|/FILE] [--json]", "Admit a verified restored child as a new group.";
-        [Deploy] Adopt(AdoptOption), One: HELP, AdoptSpec, AdoptAssembly, Plan, Wait, Context, RequestId, Json;
+        [Deploy] Adopt(AdoptOption), One: HELP, AdoptSpec as Once, AdoptAssembly as Once, Plan as Once, Wait as Once, Context as Once, RequestId as Once, Json as Once;
     "host retire", "host retire --group NAME@INCARNATION [--plan] [--context NAME|/FILE] [--json]", "Propose retiring this exact incarnation and keeping its workdir.";
-        [Retirement] Retire(RetireOption), None: HELP, GroupName, Plan, Context, RequestId, Json;
+        [Retirement] Retire(RetireOption), None: HELP, GroupName as Once, Plan as Once, Context as Once, RequestId as Once, Json as Once;
     "launcher", "launcher --control SOCKET --state DIR --lifecycle managed|leader [--operator-listen SOCKET --admission FILE --max-places N [--platform-host FILE] [--idle-ms MS]]", "Hold the groups' listeners and start their children for the platform host.";
         Launcher(LauncherOption), One:
             Control, HostState, OperatorListen, PlatformHost, HELP, Admission, MaxPlaces, IdleMs, Lifecycle;
     "deploy", "deploy [DIR [--source ROOT] | --recipe R] [--create SPEC] [--plan] [--wait[=DURATION]] [--request-id D]", "Submit a release to a pinned group, or propose its creation.";
-        [Deploy] Deploy(DeployOption), One: HELP, Recipe, SourceDir, CodeStore, Create, Plan, Wait, RequestId, Context, GroupName, Json;
+        [Deploy] Deploy(DeployOption), One: HELP, Recipe as Once, SourceDir as Once, CodeStore as Once, Create as Once, Plan as Once, Wait as Once, RequestId as Once, Context as Once, GroupName as Once, Json as Once;
     "rollback", "rollback ACTIVATION --group NAME[@INCARNATION] [--context NAME|/FILE] [--plan] [--wait[=DURATION]] [--request-id D] [--json]", "Deploy a retained release to its current group.";
-        [Deploy] Deploy(DeployOption), One: HELP, Plan, Wait, RequestId, Context, GroupName, Json;
+        [Deploy] Deploy(DeployOption), One: HELP, Plan as Once, Wait as Once, RequestId as Once, Context as Once, GroupName as Once, Json as Once;
     "ps", "ps [--context NAME|/FILE] [--group NAME[@INCARNATION]] [--after NAME] [--json]", "List observed workloads without starting them.";
-        [Workloads] Observe(ObserveOption), None: HELP, Context, GroupName, After, Json;
+        [Workloads] Observe(ObserveOption), None: HELP, Context as Once, GroupName as Once, After as Once, Json as Once;
     "status", "status [DIR] [--context NAME|/FILE|dev] [--group NAME[@INCARNATION]] [--ready] [--json]", "Read the selected workload's serving evidence.";
-        [Workload] Observe(ObserveOption), One: HELP, Context, GroupName, Ready, Json;
+        [Workload] Observe(ObserveOption), One: HELP, Context as Once, GroupName as Once, Ready as Once, Json as Once;
     "logs", "logs [--context NAME|/FILE] [--group NAME[@INCARNATION]] [--follow] [--after CURSOR] [--json]", "Read the selected workload's redacted lifecycle events.";
-        [Lifecycle] Observe(ObserveOption), None: HELP, Context, GroupName, Follow, After, Json;
+        [Lifecycle] Observe(ObserveOption), None: HELP, Context as Once, GroupName as Once, Follow as Once, After as Once, Json as Once;
     "op decide", "op decide OP|@RECEIPT.json [--decision FILE] [--wait[=DURATION]] [--context NAME|/FILE] [--json]", "Approve or refuse an exact operator plan.";
-        [Decision] Decide(DecideOption), DecisionOperation: HELP, DecisionFile, Wait, Context, Json;
+        [Decision] Decide(DecideOption), DecisionOperation: HELP, DecisionFile as Once, Wait as Once, Context as Once, Json;
     "dev", "dev [DIR] [--listen ADDR] [--json] [options] [-- arguments...]", "Rebuild a local place and restore its open subscriptions.";
         [DevStream] Dev(DevOption), Tail:
-            NPlace, HELP, SourceCore, SourceStd, Dir, Grant, Backend, Runtime, Limit, Libraries, Fresh,
+            NPlace, HELP, SourceCore, SourceStd, Dir as Repeatable, Grant as Repeatable, Backend, Runtime, Limit, Libraries, Fresh,
             Store, Listen, Json;
     "dev wait", "dev wait [DIR] [--json]", "Wait for the edit present at invocation to finish.";
         [DevWait] DevControl(DevControlOption), One: HELP, Json;
@@ -190,11 +208,11 @@ commands! {
     "store archive describe", "store archive describe ARCHIVE [--json]", "Read the archive binding, retained intervals, gap and floor.";
         [Archive] Store(StoreOption), One: HELP, Json;
     "store archive verify", "store archive verify ARCHIVE [--deep] [--json]", "Read every retained interval and check the referenced storage.";
-        [Archive] Store(StoreOption), One: HELP, Deep, Json;
+        [Archive] Store(StoreOption), One: HELP, Deep as Once, Json;
     "store archive expire", "store archive expire ARCHIVE (--keep-from BASE | --at MS) [--json]", "Review the retention floor and authorize expiry with op decide.";
-        [Expiry] Store(StoreOption), One: HELP, KeepFrom, ArchiveAt, Json;
+        [Expiry] Store(StoreOption), One: HELP, KeepFrom as Once, ArchiveAt as Once, Json;
     "store restore", "store restore --from SOURCE --target SELECTOR --to DEST [--plan] [--json]", "Select an exact boundary for a fresh child. Approve publication with op decide.";
-        [Restore] Store(StoreOption), None: RestoreFrom, RestoreTarget, RestoreTo, Plan, Json, HELP;
+        [Restore] Store(StoreOption), None: RestoreFrom as Once, RestoreTarget as Once, RestoreTo as Once, Plan as Once, Json, HELP;
     "fleet", "fleet <sim>", "Run deterministic Fleet and Directory[K] simulations.";
         Simple(NoOption), Namespace: HELP;
     "fleet sim", "fleet sim [package-dir] [--hosts N] [--seed S] [--rounds R] [--places P] [--partitions K] [--json] [options]", "Drive the hirsel.ai/fleet@1 move kernel and Directory[K] in std.sim with seeded faults and check invariants and SM1 traces.";
@@ -204,7 +222,7 @@ commands! {
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
         [Execute] Compiler(CompilerOption), Tail:
             PackageStore, Locked, Frozen, Record, HELP, Resident, Json, SourceCore, SourceStd, CoreProduct,
-            Dir, Grant, Release, DebugLines, Backend, Runtime, LogicalChargeReport, Cc, Target, Emulator,
+            Dir as Repeatable, Grant as Repeatable, Release, DebugLines, Backend, Runtime, LogicalChargeReport, Cc, Target, Emulator,
             Sysroot, Limit, Output, Entry, Libraries, Store, Inputs, Metrics, ProfileFront, Image, Emit;
     "serve", "serve [--max-memory BYTES] [--stop]", "Serve this toolchain's build, run and test requests from every directory.";
         Serve(ServeOption), One: HELP, MaxMemory, Stop;
@@ -213,13 +231,13 @@ commands! {
     "prof run", "prof run [package-dir] [build-opts] [--tasks] [--mem[=sampled]] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]", "Build and sample a native executable from exec until exit.";
         [Execute] Compiler(CompilerOption), Tail:
             PackageStore, Locked, Frozen, Record, HELP, Resident, ProfTasks, ProfMem, ProfOut, ProfFrequency,
-            ProfPmu, ProfStackBytes, Json, SourceCore, SourceStd, CoreProduct, Dir, Grant, Release,
+            ProfPmu, ProfStackBytes, Json, SourceCore, SourceStd, CoreProduct, Dir as Repeatable, Grant as Repeatable, Release,
             DebugLines, Backend, Runtime, LogicalChargeReport, Cc, Target, Emulator, Sysroot, Limit, Entry,
             Libraries, Store, Inputs, Metrics, ProfileFront, Image, Emit;
     "prof replay", "prof replay [package-dir | --inputs MANIFEST] --tape TAPE [--entry DEFINITION] [--tasks] [--mem[=exact|sampled]] [--out FILE.hprof]", "Profile serial replay through the recording and profiling runtime.";
         Compiler(CompilerOption), One:
             PackageStore, Locked, Frozen, Tape, ReplayUnit, HELP, ProfTasks, ProfMem, ProfOut, SourceCore,
-            SourceStd, CoreProduct, Dir, Grant, Release, DebugLines, Backend, Runtime, LogicalChargeReport,
+            SourceStd, CoreProduct, Dir as Repeatable, Grant as Repeatable, Release, DebugLines, Backend, Runtime, LogicalChargeReport,
             Cc, Target, Limit, Output, Entry, Libraries, Store, Inputs, Metrics, Image, Emit;
     "prof attach", "prof attach <PID> [--duration SECS] [--freq 997] [--pmu LIST] [--debug PATH] [--out FILE.hprof]", "Snapshot mappings, then sample a running Linux process without stopping it.";
         Attach(AttachOption), One: HELP, ProfOut, ProfFrequency, ProfPmu, ProfDuration, ProfDebug, REFUSE_MEM;
@@ -248,13 +266,13 @@ commands! {
     "coverage", "coverage <merge|diff>", "Merge, report and diff saved coverage profiles without running anything.";
         Simple(NoOption), Namespace: HELP;
     "coverage merge", "coverage merge FILE|DIR|@LIST... [--map FILE]... [--base FILE] [--targets FILE] [--json] [-o FILE]", "Merge coverage profiles, and raw files read against their site maps, then report.";
-        Coverage(CoverageOption), Many: HELP, Json, Output, CoverageMap, MergeBase, MergeTargets;
+        Coverage(CoverageOption), Many: HELP, Json, Output, CoverageMap as Repeatable, MergeBase, MergeTargets;
     "coverage diff", "coverage diff BASE NEW [--json] | coverage diff PROFILE --test DEFINITION [--json]", "Report the sites one coverage profile reached and the other did not, or one test and the rest of its profile.";
         Coverage(CoverageOption), Pair: HELP, Json, CoverageTest;
     "tape replay", "tape replay PACKAGE --tape TAPE [--diagnose] [--outputs DIR] [options]", "Replay a recorded program with no host grants.";
         [Execute] Compiler(CompilerOption), One:
             PackageStore, Locked, Frozen, HostState, Tape, ReplayUnit, ReplayOutputs, Diagnose, HELP, Json, SourceCore,
-            SourceStd, CoreProduct, Dir, Grant, Release, DebugLines, Backend, Runtime, LogicalChargeReport,
+            SourceStd, CoreProduct, Dir as Repeatable, Grant as Repeatable, Release, DebugLines, Backend, Runtime, LogicalChargeReport,
             Cc, Target, Emulator, Sysroot, Limit, Output, Entry, Libraries, Store, Inputs, Metrics, Image, Emit;
     "tape", "tape <check|export|replay>", "Check, export or replay recordings.";
         Simple(NoOption), Namespace: HELP;
@@ -265,7 +283,7 @@ commands! {
     "test", "test [package-dir] [options]", "Run each discovered @test in an independent process. When hirsel.hcfg declares tests, set limit, dirs and grants there.";
         Compiler(CompilerOption), One:
             PackageStore, Locked, Frozen, Replay, ExpectVerdict, Laws, WriteLaws, LawsBaseline, HELP,
-            Resident, Json, SourceCore, SourceStd, CoreProduct, Dir, Grant, Filter, TestExact, TestJobs,
+            Resident, Json, SourceCore, SourceStd, CoreProduct, Dir as Repeatable, Grant as Repeatable, Filter, TestExact as Repeatable, TestJobs,
             LinkOnly, TestTimeout, Rerun, TestCache, PropertyCorpus, Sim, SimSeeds, SimSeed, Release,
             DebugLines, Backend, Runtime, LogicalChargeReport, Cc, Target, Emulator, Sysroot, Limit, Output,
             Libraries, Store, Inputs, Metrics, Image, Coverage, CoverageOut, CoverageBase, CoverageTargets,
@@ -316,7 +334,8 @@ commands! {
 mod help_text;
 pub use help_text::help;
 pub(crate) use help_text::{describe, named};
-pub(crate) use parsing::command_path;
+pub(crate) use parsing::{command_path, parse_detailed};
+pub(crate) use types::ParseError;
 #[path = "cli_parse.rs"]
 mod parsing;
 pub use parsing::{Action, parse};

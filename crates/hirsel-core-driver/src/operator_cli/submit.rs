@@ -110,11 +110,7 @@ fn submit(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
         code: None,
     };
     let mut plan = false;
-    let mut seen = std::collections::HashSet::new();
     for o in req.options {
-        if !seen.insert(std::mem::discriminant(&o)) {
-            return Err(Failure::input("arguments", "duplicate option"));
-        }
         let abs = |v: String| std::path::absolute(v).map_err(Failure::io);
         match o {
             O::Json => (),

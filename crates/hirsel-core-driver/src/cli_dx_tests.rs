@@ -255,8 +255,45 @@ fn slice3_rejects_retired_commands_and_declares_their_replacements() {
 
 #[test]
 fn released_command_schema_covers_parser() {
-    use crate::cli::{Action, COMMANDS, describe};
+    use crate::cli::{Action, COMMANDS, CompilerOption, Invocation, describe};
     use std::collections::BTreeSet;
+
+    for (first, second) in [("-o", "--output"), ("--output", "-o")] {
+        assert!(
+            parse(["lean", "extract", first, "a", second, "b"].map(str::to_owned)).is_err(),
+            "accepted duplicate output through {first} and {second}"
+        );
+    }
+    let Action::Invoke(Invocation::Compiler(test)) =
+        parse(["test", "--exact", "app@1/main/a", "--exact", "app@1/main/b"].map(str::to_owned))
+            .unwrap()
+    else {
+        panic!("expected test request");
+    };
+    assert_eq!(
+        test.options,
+        [
+            CompilerOption::TestExact("app@1/main/a".into()),
+            CompilerOption::TestExact("app@1/main/b".into()),
+        ],
+    );
+    let Action::Invoke(Invocation::Compiler(run)) = parse(
+        [
+            "run", "-o", "a", "--output", "b", "--", "--output", "c", "--json",
+        ]
+        .map(str::to_owned),
+    )
+    .unwrap() else {
+        panic!("expected run request");
+    };
+    assert_eq!(
+        run.options,
+        [
+            CompilerOption::Output("a".into()),
+            CompilerOption::Output("b".into())
+        ],
+    );
+    assert_eq!(run.arguments, ["--output", "c", "--json"]);
 
     let mut paths = BTreeSet::new();
     for command in COMMANDS {
@@ -297,12 +334,30 @@ fn released_command_schema_covers_parser() {
         );
         let mut aliases = BTreeSet::new();
         for option in schema["options"].as_array().unwrap() {
-            for name in option["names"].as_array().unwrap() {
+            let multiplicity = option["multiplicity"].as_str().unwrap_or_else(|| {
+                panic!(
+                    "{} has no multiplicity for {}",
+                    command.name, option["names"]
+                )
+            });
+            assert!(matches!(multiplicity, "once" | "repeatable" | "last_wins"));
+            let names = option["names"].as_array().unwrap();
+            let canonical = names[0].as_str().unwrap();
+            match (command.name, canonical) {
+                ("op get", "--wait" | "--context") | ("lean extract", "-o") => {
+                    assert_eq!(multiplicity, "once");
+                }
+                ("test", "--exact") => assert_eq!(multiplicity, "repeatable"),
+                ("run", "-o") => assert_eq!(multiplicity, "last_wins"),
+                _ => {}
+            }
+            for name in names {
                 let name = name.as_str().unwrap();
                 assert!(aliases.insert(name), "duplicate {name} in {}", command.name);
                 if ["-h", "--help"].contains(&name) {
                     continue;
                 }
+                let assigned;
                 let mut args = Vec::new();
                 if schema["operands"].as_str().unwrap().starts_with("host/") {
                     args.push(
@@ -321,10 +376,9 @@ fn released_command_schema_covers_parser() {
                     }
                     "optional_equals" => {
                         assert!(matches!(parse_command(&args), Ok(Action::Invoke(_))));
-                        let assigned = format!("{name}=1s");
+                        assigned = format!("{name}=1s");
                         *args.last_mut().unwrap() = &assigned;
                         assert!(matches!(parse_command(&args), Ok(Action::Invoke(_))));
-                        continue;
                     }
                     "optional_value" => args.push("sampled"),
                     "switch" => {}
@@ -332,6 +386,18 @@ fn released_command_schema_covers_parser() {
                 }
                 assert!(
                     matches!(parse_command(&args), Ok(Action::Invoke(_))),
+                    "{} {args:?}",
+                    command.name
+                );
+                args.push(canonical);
+                match option["syntax"].as_str().unwrap() {
+                    "value" => args.push("another"),
+                    "optional_value" => args.push("exact"),
+                    _ => {}
+                }
+                assert_eq!(
+                    parse_command(&args).is_err(),
+                    multiplicity == "once",
                     "{} {args:?}",
                     command.name
                 );

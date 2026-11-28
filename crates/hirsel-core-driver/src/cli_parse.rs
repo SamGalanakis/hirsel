@@ -1,5 +1,8 @@
-use super::help_text::{children, is_help, named};
-use super::{Argument, CommandSchema, CommandSpec, Invocation, Kind, Positionals, Request, Schema};
+use super::help_text::{children, describe_options, is_help, named};
+use super::{
+    Argument, CommandSchema, CommandSpec, Invocation, Kind, Multiplicity, ParseError, Positionals,
+    Request, Schema,
+};
 use std::fmt::Write;
 
 pub enum Action {
@@ -13,7 +16,7 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
         &self,
         command: &'static CommandSpec,
         arguments: &mut dyn Iterator<Item = String>,
-    ) -> Result<Action, String> {
+    ) -> Result<Action, ParseError> {
         let name = command.name;
         let mut request = Request {
             command,
@@ -22,6 +25,9 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
             arguments: Vec::new(),
         };
         let mut arguments = arguments.peekable();
+        let mut once_seen = std::collections::HashSet::new();
+        let mut duplicate = None;
+        let mut saw_wait = false;
         while let Some(argument) = arguments.next() {
             if argument == "--" && matches!(self.positionals, Positionals::Tail) {
                 request.arguments.extend(arguments);
@@ -69,10 +75,10 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
                     }
                     Kind::Help => return Ok(Action::Help(Some(command))),
                     Kind::RefuseMem => {
-                        return Err(
+                        return Err(ParseError::Arguments(
                             "attach cannot see earlier allocations; use 'hirsel prof run --mem'"
                                 .into(),
-                        );
+                        ));
                     }
                     Kind::OptionalMem(_, parse) => {
                         let value = if let Some((_, value)) = argument.split_once('=') {
@@ -88,10 +94,24 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
                         parse(match value.as_str() {
                             "exact" => hirsel_prof::MemMode::Exact,
                             "sampled" => hirsel_prof::MemMode::Sampled,
-                            _ => return Err("--mem requires exact or sampled".into()),
+                            _ => {
+                                return Err(ParseError::Arguments(
+                                    "--mem requires exact or sampled".into(),
+                                ));
+                            }
                         })
                     }
                 };
+                let canonical = option.flag.names[0];
+                saw_wait |= matches!(option.kind, Kind::OptionalWait(_));
+                if option.multiplicity == Multiplicity::Once
+                    && !once_seen.insert(canonical)
+                    && (duplicate.is_none() || name == "op get" && canonical == "--context")
+                {
+                    duplicate = Some((canonical, saw_wait));
+                }
+                // Consumers fold last-value options in order, which also validates
+                // overridden values and preserves precedence across related flags.
                 request.options.push(value);
             } else if request.positional.is_none()
                 && !matches!(self.positionals, Positionals::None | Positionals::Namespace)
@@ -103,30 +123,37 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
             {
                 request.arguments.push(argument);
             } else {
-                return Err(format!("unexpected argument `{argument}` for {name}"));
+                return Err(format!("unexpected argument `{argument}` for {name}").into());
             }
         }
         if matches!(
             self.positionals,
             Positionals::Operation | Positionals::DecisionOperation
         ) {
-            if matches!(self.positionals, Positionals::DecisionOperation)
-                && request
-                    .positional
-                    .as_deref()
-                    .is_some_and(|op| op.starts_with('@') && op.len() > 1)
-            {
-                return Ok(Action::Invoke((self.wrap)(request)));
+            let positional = request.positional.as_deref();
+            match positional {
+                Some(op) if op.starts_with("store/") => {
+                    crate::operator_cli::pitr_decision::request_id(op)?;
+                }
+                Some(op)
+                    if matches!(self.positionals, Positionals::DecisionOperation)
+                        && op.starts_with('@')
+                        && op.len() > 1 => {}
+                _ => {
+                    crate::operator_cli::operation_id(positional)?;
+                }
             }
-            if let Some(op) = request
-                .positional
-                .as_deref()
-                .filter(|s| s.starts_with("store/"))
-            {
-                crate::operator_cli::pitr_decision::request_id(op)?;
-            } else {
-                crate::operator_cli::operation_id(request.positional.as_deref())?;
-            }
+        }
+        if let Some((option, wait_before_duplicate)) = duplicate {
+            return Err(ParseError::Duplicate {
+                option,
+                positional: request.positional,
+                wait: if name == "op get" {
+                    saw_wait
+                } else {
+                    wait_before_duplicate
+                },
+            });
         }
         Ok(Action::Invoke((self.wrap)(request)))
     }
@@ -137,20 +164,6 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
 
     fn describe(&self) -> serde_json::Value {
         use serde_json::json;
-        let flags: Vec<_> = self
-            .options
-            .iter()
-            .filter_map(|a| {
-                let (value, syntax) = match a.kind {
-                    Kind::OptionalWait(_) => (Some("[=DURATION]"), "optional_equals"),
-                    Kind::RefuseMem => return None,
-                    Kind::OptionalMem(m, _) => (Some(m), "optional_value"),
-                    Kind::Value(m, _) => (Some(m), "value"),
-                    _ => (None, "switch"),
-                };
-                Some(json!({"names":a.flag.names,"value":value,"syntax":syntax,"description":a.flag.description}))
-            })
-            .collect();
         let operands = match self.positionals {
             Positionals::Namespace => "namespace",
             Positionals::Operation => "host/CATALOG/REQUEST or store/ATTEMPT",
@@ -164,11 +177,11 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
             Positionals::Sql => "sql",
             Positionals::Tail => "guest_tail",
         };
-        json!({"options": flags, "operands": operands})
+        json!({"options": describe_options(self.options), "operands": operands})
     }
 
     fn write_help(&self, out: &mut String) {
-        for Argument { flag, kind } in self.options {
+        for Argument { flag, kind, .. } in self.options {
             let metavar = match kind {
                 Kind::OptionalWait(_) => "[=DURATION]".to_owned(),
                 Kind::RefuseMem => continue,
@@ -181,6 +194,12 @@ impl<T: Clone + std::fmt::Debug + Sync> CommandSchema for Schema<T> {
     }
 }
 pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, String> {
+    parse_detailed(arguments).map_err(ParseError::into_detail)
+}
+
+pub(crate) fn parse_detailed(
+    arguments: impl IntoIterator<Item = String>,
+) -> Result<Action, ParseError> {
     let mut arguments = arguments.into_iter().peekable();
     let Some(name) = arguments.next() else {
         return Ok(Action::Help(None));
@@ -192,7 +211,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
         return if arguments.next().is_none() {
             Ok(Action::Version)
         } else {
-            Err("--version takes no arguments".into())
+            Err(ParseError::Arguments("--version takes no arguments".into()))
         };
     }
     let command = select(named(&name)?, &mut arguments);

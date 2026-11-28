@@ -897,21 +897,13 @@ pub(crate) fn run(invocation: Request<Opt>) -> R<()> {
     let mut target = None;
     let mut coreir = false;
     for option in invocation.options {
-        let (slot, value, label) = match option {
-            Opt::Inputs(value) => (&mut inputs, value, "Inputs"),
-            Opt::Store(value) => (&mut store, value, "Store"),
-            Opt::Output(value) => (&mut output, value, "Output"),
-            Opt::Target(value) => (&mut target, value, "Target"),
-            Opt::CoreIr if !coreir => {
-                coreir = true;
-                continue;
-            }
-            _ => bail!("invalid option for {}", invocation.command.name),
-        };
-        if slot.is_some() {
-            bail!("option {label} must be given only once");
+        match option {
+            Opt::Inputs(value) => inputs = Some(value),
+            Opt::Store(value) => store = Some(value),
+            Opt::Output(value) => output = Some(value),
+            Opt::Target(value) => target = Some(value),
+            Opt::CoreIr => coreir = true,
         }
-        *slot = Some(value);
     }
     let inputs = inputs.as_deref().ok_or("--inputs is required")?;
     let store = store.as_deref().ok_or("--store is required")?;

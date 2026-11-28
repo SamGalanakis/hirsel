@@ -78,7 +78,7 @@ pub(super) fn source_handle(path: &Path, archive: bool) -> Result<File, Failure>
         directory(path).map_err(Failure::io)
     }
 }
-fn selector(text: &str) -> Result<Vec<String>, Failure> {
+pub(super) fn selector(text: &str) -> Result<Vec<String>, Failure> {
     fn invalid() -> Failure {
         Failure::input(
             "target",
@@ -171,10 +171,10 @@ fn plan(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
     let (mut src, mut dst, mut selected, mut explicit) = (None, None, None, false);
     for o in req.options {
         match o {
-            O::RestoreFrom(v) if src.is_none() => src = Some(v),
-            O::RestoreTo(v) if dst.is_none() => dst = Some(v),
-            O::RestoreTarget(v) if selected.is_none() => selected = Some(selector(&v)?),
-            O::Plan if !explicit => explicit = true,
+            O::RestoreFrom(v) => src = Some(v),
+            O::RestoreTo(v) => dst = Some(v),
+            O::RestoreTarget(v) => selected = Some(selector(&v)?),
+            O::Plan => explicit = true,
             O::Json => (),
             _ => return Err(Failure::input("arguments", "duplicate or unrelated option")),
         }

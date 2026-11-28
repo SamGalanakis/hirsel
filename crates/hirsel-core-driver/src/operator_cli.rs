@@ -45,6 +45,8 @@ mod laws;
 mod preview;
 mod pump;
 #[cfg(test)]
+mod scalar_law;
+#[cfg(test)]
 mod slice2_law;
 mod source;
 pub(crate) mod wait;

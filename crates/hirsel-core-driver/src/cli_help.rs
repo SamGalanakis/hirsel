@@ -45,6 +45,30 @@ pub fn help(command: Option<&CommandSpec>) -> String {
     }
 }
 
+pub(super) fn describe_options<T>(options: &[super::Argument<T>]) -> Vec<serde_json::Value> {
+    use super::Kind;
+    use serde_json::json;
+    options
+        .iter()
+        .filter_map(|a| {
+            let (value, syntax) = match a.kind {
+                Kind::OptionalWait(_) => (Some("[=DURATION]"), "optional_equals"),
+                Kind::RefuseMem => return None,
+                Kind::OptionalMem(m, _) => (Some(m), "optional_value"),
+                Kind::Value(m, _) => (Some(m), "value"),
+                _ => (None, "switch"),
+            };
+            Some(json!({
+                "names": a.flag.names,
+                "value": value,
+                "syntax": syntax,
+                "description": a.flag.description,
+                "multiplicity": a.multiplicity,
+            }))
+        })
+        .collect()
+}
+
 pub(crate) fn describe(command: &CommandSpec) -> serde_json::Value {
     use super::types::ReadContract;
     use serde_json::json;

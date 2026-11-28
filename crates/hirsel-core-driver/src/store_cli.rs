@@ -160,6 +160,9 @@ fn online_backup(state: &Path, group_name: &str, to: &Path) -> Result<i32, Error
 }
 
 pub(in crate::request) fn run(invocation: Request<Opt>) -> Result<i32, Error> {
+    if invocation.command.name.starts_with("store archive ") {
+        return Ok(crate::operator_cli::archive::run(invocation));
+    }
     if invocation.command.name == "store restore" {
         return Ok(crate::operator_cli::pitr::restore(invocation));
     }

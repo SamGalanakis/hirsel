@@ -58,6 +58,18 @@ pub(crate) fn describe(command: &CommandSpec) -> serde_json::Value {
                 "input owned, decision required, or terminal outcome",
                 true,
             ),
+            ReadContract::Archive => (
+                "archive",
+                "read credential",
+                "retained archive observed",
+                false,
+            ),
+            ReadContract::Expiry => (
+                "archive",
+                "expiry credential",
+                "retention floor planned",
+                true,
+            ),
             ReadContract::Restore => (
                 "store",
                 "directory grants",
@@ -102,6 +114,7 @@ pub(crate) fn describe(command: &CommandSpec) -> serde_json::Value {
             | ReadContract::Rehearsal
             | ReadContract::TapeCheck => "execute",
             ReadContract::DevWait | ReadContract::DevStop => "wait",
+            ReadContract::Expiry => "plan",
             _ => "read",
         };
         let excludes: &[&[&str]] = if command.name == "deploy" {

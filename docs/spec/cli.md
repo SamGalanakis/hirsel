@@ -308,14 +308,15 @@ the current predecessor and store.
 
 ## Store commands
 
-`hirsel store` commands operate on the directory of a log@1 store. They run in the
-installation's `libexec/hirsel/store_tool`, which is granted only the two directories the driver
-passes it. [STORE-SPEC §15](../../core/programs/store/STORE-SPEC.md) has the full contract.
+Directory Store commands grant the installed `store_tool` the source and destination directories. Archive commands grant the installed `archive_tool` a work directory and credentials for the requested operation. [STORE-SPEC §15](../../core/programs/store/STORE-SPEC.md) has the full contract.
 
 | Form | Does |
 |---|---|
 | `hirsel store backup DIR TARGET` | locks the offline store at `DIR`, checks it and copies its recovered head into the empty directory `TARGET`, which it creates if absent. Prints `backup <store id> head <H>` |
-| `hirsel store restore --from BACKUP --target SELECTOR --to DIR [--plan] [--json]` | checks the stamped backup at the selected boundary and records the plan outside the store. With `--plan` it exits 0. Submit the exact digest with `op decide` to publish a fresh child at the reviewed destination. |
+| `hirsel store restore --from SOURCE --target SELECTOR --to DIR [--plan] [--json]` | checks a stamped backup or an archive (`@descriptor.json`) at the selected boundary and records the plan outside the store. With `--plan` it exits 0. Submit the exact digest with `op decide` to publish a fresh child at the reviewed destination. |
+| `hirsel store archive describe ARCHIVE [--json]` | reads the binding, holder, intervals, gap and floor from the archive head and index. |
+| `hirsel store archive verify ARCHIVE [--deep] [--json]` | checks retained objects and journal history. Deep verification also walks page graphs. |
+| `hirsel store archive expire ARCHIVE (--keep-from BASE or --at MS) [--json]` | returns the proposed floor and reviewed head. An approved typed decision uses the expiry credential to advance that floor and reclaim unreachable objects. |
 | `hirsel store inspect DIR` | captures the store beside a live writer and prints its identity and head, then each table and index with its state, revision and exact row count |
 | `hirsel store stats DIR` | the `inspect` lines with each collection's charged bytes, plus the journal's segments and bytes, the account at the cut, pins and pack rows |
 | `hirsel store rehearse DIR --release EXE [--json]` | Runs the candidate migration on a private copy of the offline store. |

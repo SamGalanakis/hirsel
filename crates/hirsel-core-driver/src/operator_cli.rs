@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+pub(crate) mod archive;
+mod archive_decision;
 mod config;
 mod context;
 mod decision;

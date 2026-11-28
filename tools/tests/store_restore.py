@@ -20,10 +20,12 @@ def contents(directory):
 def drill(hirsel, work):
     env = dict(os.environ, XDG_STATE_HOME=str(work / "state"), TMPDIR=str(work))
 
-    def run(*args, code=0, stdin=None):
+    def run(*args, code=0, stdin=None, fault=None):
         p = subprocess.run([hirsel, *args], cwd=work, env=env, text=True,
                            input=stdin, capture_output=True, check=False)
         assert p.returncode == code, (args, p.returncode, p.stdout, p.stderr)
+        if fault:
+            assert fault in p.stderr or fault in p.stdout, (args, p.stdout, p.stderr)
         if "--json" in args:
             reply = json.loads(p.stdout)
             assert (reply["v"], reply["exit"]) == (1, code), reply
@@ -36,6 +38,38 @@ def drill(hirsel, work):
     shutil.copytree(CORPUS, source)
     (source / "LOCK").touch()
     original = contents(source)
+    # The frozen writer acknowledged main version 4. Its j-5 END covers bytes
+    # [0, 654), with one transaction following the 72-byte segment header.
+    for case, code, fault in [
+        ("covered-truncation", 1, "Truncated"), ("covered-flip", 1, "Checksum"),
+        ("torn-tail", 0, None), ("missing-end", 0, None), ("invalid-end", 0, None),
+        ("lost-acknowledged-commit", 0, None),
+    ]:
+        damaged = work / case
+        shutil.copytree(source, damaged)
+        journal = damaged / "j-5"
+        end = damaged / "j-5.end"
+        if case == "covered-truncation":
+            journal.write_bytes(journal.read_bytes()[:100])
+        elif case == "covered-flip":
+            body = bytearray(journal.read_bytes())
+            body[200] ^= 1
+            journal.write_bytes(body)
+        elif case == "torn-tail":
+            journal.write_bytes(journal.read_bytes()[:654] + b"torn")
+        elif case == "invalid-end":
+            body = bytearray(end.read_bytes())
+            body[-1] ^= 1
+            end.write_bytes(body)
+        else:
+            end.unlink()
+            if case == "lost-acknowledged-commit":
+                journal.write_bytes(journal.read_bytes()[:72])
+        evidence = contents(damaged)
+        run("store", "verify", damaged, code=code, fault=fault)
+        if case == "lost-acknowledged-commit":
+            assert run("store", "inspect", damaged).splitlines()[0].endswith(" head 3")
+        assert contents(damaged) == evidence
     with (source / "LOCK").open("rb") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         run("store", "backup", source, "held", code=75)

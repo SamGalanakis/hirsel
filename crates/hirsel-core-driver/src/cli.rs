@@ -88,7 +88,7 @@ commands! {
         [Help] Help(HelpOption), Many: HELP, Json;
     "op", "op <get|decide>", "Inspect an operator request.";
         Simple(NoOption), None: HELP;
-    "op get", "op get OP [--wait[=DURATION]] [--context NAME|/ABSOLUTE/FILE] [--json]", "Read a request from its pinned host catalog.";
+    "op get", "op get OP [--wait[=DURATION]] [--context NAME|/ABSOLUTE/FILE] [--json]", "Read a pinned host or Store operation.";
         [Operation] OpGet(OpGetOption), Operation: HELP, Context, Wait, Json;
     "check", "check [package-dir] [options]", "Check a package or an explicit input manifest.";
         Compiler(CompilerOption), One:
@@ -163,7 +163,7 @@ commands! {
         [DevStop] DevControl(DevControlOption), One: HELP, Json;
     "store rehearse", "store rehearse DIR --release EXE [-- arguments...]", "Preview a candidate’s migration against a store.";
         [Rehearsal] Store(StoreOption), Tail: HELP, StoreRelease, Json;
-    "store", "store <inspect|stats|verify|repair|backup|restore|rehearse>", "Inspect, verify, repair, back up or restore a store.";
+    "store", "store <inspect|stats|verify|repair|backup|restore|rehearse|archive>", "Inspect, verify, repair, back up or restore a store.";
         Simple(NoOption), One: HELP;
     "store inspect", "store inspect DIR", "List the store's tables, indexes (kind, state, revision), cells and logs, beside a live writer.";
         Store(StoreOption), One: HELP;
@@ -175,6 +175,14 @@ commands! {
         Store(StoreOption), One: HELP, StoreRelease;
     "store backup", "store backup DIR TARGET | store backup --state DIR --group NAME TARGET", "Copy a stopped store at DIR, or a served group's store through its running host, into the empty or new directory TARGET.";
         Store(StoreOption), Pair: HostState, GroupName, HELP;
+    "store archive", "store archive <describe|verify|expire>", "Inspect and manage archived Store history.";
+        Simple(NoOption), One: HELP;
+    "store archive describe", "store archive describe ARCHIVE [--json]", "Read the archive binding, retained intervals, gap and floor.";
+        [Archive] Store(StoreOption), One: HELP, Json;
+    "store archive verify", "store archive verify ARCHIVE [--deep] [--json]", "Read every retained interval and check the referenced storage.";
+        [Archive] Store(StoreOption), One: HELP, Deep, Json;
+    "store archive expire", "store archive expire ARCHIVE (--keep-from BASE | --at MS) [--json]", "Review the retention floor and authorize expiry with op decide.";
+        [Expiry] Store(StoreOption), One: HELP, KeepFrom, ArchiveAt, Json;
     "store restore", "store restore --from SOURCE --target SELECTOR --to DEST [--plan] [--json]", "Select an exact boundary for a fresh child. Approve publication with op decide.";
         [Restore] Store(StoreOption), None: RestoreFrom, RestoreTarget, RestoreTo, Plan, Json, HELP;
     "fleet", "fleet <sim>", "Run deterministic Fleet and Directory[K] simulations.";

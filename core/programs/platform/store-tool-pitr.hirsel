@@ -134,9 +134,14 @@ fn backup_pitr(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdou
         return Error(usage())
     }
     let attempt = attempt_arg(argv, 4)?
-    match store.restore(tasks, from, to, c, r, options, target, attempt) {
+    let res = store.restore(tasks, from, to, c, r, options, target, attempt)
+    published_point(take res, to, tasks, c, r, options, out, err)
+}
+
+fn published_point(take answer: Result[store.Restored, store.DeployError], to: Dir, tasks: Tasks, c: Clock, r: Random, options: store.Options, out: Stdout, err: Stderr) -> Result[(), Exit] waits {
+    match take answer {
         Ok(take receipt) => {
-            let mut inspect_opts = options
+            let mut inspect_opts: store.Options = clone(options)
             inspect_opts.create = false
             inspect_opts.expect = Some(receipt.child)
             let checked = match store.open(tasks, to, c, r, inspect_opts) {

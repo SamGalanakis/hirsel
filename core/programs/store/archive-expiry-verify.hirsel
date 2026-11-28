@@ -6,7 +6,7 @@ fn expiry_hold(mut held: Map[String, ()], name: String) -> Result[(), Error] {
     Ok(())
 }
 
-fn expiry_object_mark(mut src: std.object.Client, parent: StoreId, ref: pages.HistoryRef, scratch: Dir, mut held: Map[String, ()], deadline: u64) -> Result[List[pages.HistoryRef], Error] waits {
+fn expiry_object_mark(mut src: std.object.Client, parent: StoreId, ref: pages.HistoryRef, scratch: Dir, mut held: Map[String, ()], deep: bool, deadline: u64) -> Result[List[pages.HistoryRef], Error] waits {
     let id = store_key_to_rep(parent)
     let key = failure_result_from_rep(history.history_read_key("e-", ref))?
     let raw = restore_archive_bytes(mut src, format.archive_key(id, key), ref, deadline)?
@@ -28,14 +28,16 @@ fn expiry_object_mark(mut src: std.object.Client, parent: StoreId, ref: pages.Hi
         restore_copy_pack(mut src, mark_dir, parent, pack_ref, true, deadline)?
         expiry_hold(mut held, failure_result_from_rep(history.history_read_key("p-", pack_ref))?)?
     }
-    let _ = validate_export_manifest(mark_dir, parent, take m, true, true)?
+    if deep {
+        let _ = validate_export_manifest(mark_dir, parent, take m, true, true)?
+    }
     failure_result_from_rep(manifest.disk_io(host.remove_tree(scratch, path)))?
     expiry_hold(mut held, key)?
     expiry_hold(mut held, mkey)?
     Ok(clone(mark.retained))
 }
 
-fn expiry_base_work(mut src: std.object.Client, head: format.ArchiveHeadRep, idx: history.RestoreIndex, parent: StoreId, row: format.ArchiveBaseRowRep, work: Dir, mut held: Map[String, ()], deadline: u64) -> Result[(), Error] waits {
+fn expiry_base_work(mut src: std.object.Client, head: format.ArchiveHeadRep, idx: history.RestoreIndex, parent: StoreId, row: format.ArchiveBaseRowRep, work: Dir, mut held: Map[String, ()], deep: bool, deadline: u64) -> Result[(), Error] waits {
     let objects = head.source_kind == format.ARCHIVE_SOURCE_OBJECTS
     let (take m, _) = restore_archive_manifest(mut src, parent, head.source_kind, row, deadline)?
     let mut listed: Map[u64, ()] = map.new()
@@ -79,11 +81,13 @@ fn expiry_base_work(mut src: std.object.Client, head: format.ArchiveHeadRep, idx
     if list.len(refs) != map.len(listed) {
         return Error(Lost)
     }
-    let _ = validate_export_manifest(work, parent, take m, true, true)?
+    if deep {
+        let _ = validate_export_manifest(work, parent, take m, true, true)?
+    }
     if objects {
-        let earlier = expiry_object_mark(mut src, parent, restore_base_ref(row), work, mut held, deadline)?
+        let earlier = expiry_object_mark(mut src, parent, restore_base_ref(row), work, mut held, deep, deadline)?
         for retained in earlier {
-            let _ = expiry_object_mark(mut src, parent, retained, work, mut held, deadline)?
+            let _ = expiry_object_mark(mut src, parent, retained, work, mut held, deep, deadline)?
         }
     } else {
         expiry_hold(mut held, format.archive_log_manifest_rel(row.base_ordinal, row.digest))?
@@ -92,6 +96,10 @@ fn expiry_base_work(mut src: std.object.Client, head: format.ArchiveHeadRep, idx
 }
 
 fn expiry_verify_survivors(mut src: std.object.Client, head: format.ArchiveHeadRep, parent: StoreId, scratch: Dir, deadline: u64) -> Result[Map[String, ()], Error] waits {
+    verify_archive_bases(mut src, head, parent, scratch, true, deadline)
+}
+
+fn verify_archive_bases(mut src: std.object.Client, head: format.ArchiveHeadRep, parent: StoreId, scratch: Dir, deep: bool, deadline: u64) -> Result[Map[String, ()], Error] waits {
     let _ = restore_archive_scan(mut src, head, Latest, deadline)?
     let idx = failure_result_from_rep(history.archive_restore_index(mut src, head, deadline))?
     let rows = restore_base_rows(mut src, head, idx, deadline)?
@@ -100,7 +108,7 @@ fn expiry_verify_survivors(mut src: std.object.Client, head: format.ArchiveHeadR
         let mut name = string.with_capacity(64)
         string.push(mut name, "expiry-")
         let dir = failure_result_from_rep(manifest.disk_io(host.mkdtemp(scratch, mut name)))?
-        let checked = expiry_base_work(mut src, head, idx, parent, row, dir, mut held, deadline)
+        let checked = expiry_base_work(mut src, head, idx, parent, row, dir, mut held, deep, deadline)
         failure_result_from_rep(manifest.disk_io(host.remove_tree(scratch, name)))?
         checked?
     }

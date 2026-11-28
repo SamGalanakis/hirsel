@@ -1,0 +1,13 @@
+fn archive_setting(vars: Env, key: String) -> Result[String, Exit] {
+    let Ok(Some(s)) = env.get(vars, key) else {
+        return Error(Exit(status: 2u8))
+    }
+    Ok(string.from(s))
+}
+
+pub fn main(work: Dir, net: Net, tasks: Tasks, c: Clock, r: Random, out: Stdout, err: Stderr, key: Secret, vars: Env, argv: Args) -> Result[(), Exit] waits {
+    let parent = archive_setting(vars, "HIRSEL_ARCHIVE_PARENT")?
+    let bucket = std.object.Bucket(endpoint: archive_setting(vars, "HIRSEL_ARCHIVE_ENDPOINT")?, aws_region: archive_setting(vars, "HIRSEL_ARCHIVE_REGION")?, bucket: archive_setting(vars, "HIRSEL_ARCHIVE_BUCKET")?, prefix: archive_setting(vars, "HIRSEL_ARCHIVE_PREFIX")?, style: Path)
+    let creds = std.cred.from_secret(archive_setting(vars, "HIRSEL_ARCHIVE_ACCESS")?, secret.share(key), archive_setting(vars, "HIRSEL_ARCHIVE_TOKEN")?)
+    platform.store_tool.archive_command(work, net, tasks, c, r, out, err, take bucket, take creds, parent, argv)
+}

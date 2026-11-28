@@ -202,6 +202,12 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
         name.push(' ');
         name.push_str(&verb);
     }
+    if name == "store archive" {
+        match arguments.next() {
+            Some(sub) if !is_help(&sub) => name.push_str(&format!(" {sub}")),
+            _ => return Ok(Action::Help(Some(named(&name)?))),
+        }
+    }
     let command = named(&name)?;
     if name == "manifest" {
         match arguments.next().as_deref() {

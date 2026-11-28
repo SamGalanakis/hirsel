@@ -2,6 +2,8 @@ use super::*;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ReadContract {
+    Archive,
+    Expiry,
     Restore,
     Help,
     Deploy,

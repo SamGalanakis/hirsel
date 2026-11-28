@@ -11,6 +11,7 @@ std = { major = 1 }
 "archive-restore-release.hirsel" = "store"
 "archive-restore-bucket.hirsel" = "store"
 "archive-restore-bucket-run.hirsel" = "store"
+"archive-review.hirsel" = "store"
 "archive-expiry.hirsel" = "store"
 "archive-expiry-verify.hirsel" = "store"
 "transfer-builder.hirsel" = "transfer"

@@ -10,7 +10,7 @@ use super::{
 use crate::cli::{DecideOption, OpGetOption, Request};
 use hirsel_config_schema::host_v1::{Decision, Verdict};
 use hirsel_core_ids::hex;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use std::{
     fs::{File, OpenOptions},
@@ -21,6 +21,38 @@ use std::{
 
 pub(super) use super::receipt::operations_dir;
 
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub(super) enum StorePlan {
+    Restore(RestorePlan),
+    Expiry(super::archive_decision::Expiry),
+}
+impl StorePlan {
+    fn attempt(&self) -> &str {
+        match self {
+            Self::Restore(p) => &p.attempt,
+            Self::Expiry(p) => &p.attempt,
+        }
+    }
+    fn digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(&Sha256::digest(
+            serde_json::to_vec(self).expect("serializable store decision"),
+        ))
+    }
+    pub(super) fn held(&self, env: &mut Envelope<'_>) {
+        match self {
+            Self::Restore(p) => p.held(&self.digest(), env),
+            Self::Expiry(p) => p.held(&self.digest(), env),
+        }
+    }
+    fn publish(&self, path: &Path) -> Result<serde_json::Value, Failure> {
+        match self {
+            Self::Restore(p) => p.publish(path),
+            Self::Expiry(p) => p.apply(),
+        }
+    }
+}
 pub(crate) fn request_id(op: &str) -> Result<&str, String> {
     op.strip_prefix("store/")
         .filter(|s| {
@@ -33,8 +65,8 @@ pub(crate) fn request_id(op: &str) -> Result<&str, String> {
 fn path(id: &str) -> Result<PathBuf, Failure> {
     Ok(operations_dir()?.join(format!("store-{id}.json")))
 }
-pub(super) fn save_plan(plan: &RestorePlan) -> Result<(), Failure> {
-    receipt::persist(&path(&plan.attempt)?, plan).map_err(Failure::io)
+pub(super) fn save_plan(plan: &StorePlan) -> Result<(), Failure> {
+    receipt::persist(&path(plan.attempt())?, plan).map_err(Failure::io)
 }
 pub(super) fn read<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, Failure> {
     let f = match OpenOptions::new()
@@ -54,12 +86,12 @@ pub(super) fn read<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, Failur
         .map(Some)
         .map_err(Failure::damaged)
 }
-fn load(op: &str) -> Result<(PathBuf, RestorePlan), Failure> {
+fn load(op: &str) -> Result<(PathBuf, StorePlan), Failure> {
     let id = request_id(op).map_err(|e| Failure::input("operation", e))?;
     let path = path(id)?;
-    let p: RestorePlan =
+    let p: StorePlan =
         read(&path)?.ok_or_else(|| Failure::input("operation", "unknown store operation"))?;
-    if p.attempt != id {
+    if p.attempt() != id {
         return Err(Failure::damaged("receipt names another attempt"));
     }
     Ok((path, p))
@@ -80,13 +112,19 @@ pub(super) fn once<T: Serialize + DeserializeOwned + PartialEq>(
         Err(e) => Err(Failure::io(e)),
     }
 }
-fn observe(path: &Path, plan: &RestorePlan, env: &mut Envelope<'_>) -> Result<bool, Failure> {
+fn observe(path: &Path, plan: &StorePlan, env: &mut Envelope<'_>) -> Result<bool, Failure> {
     plan.held(env);
     if let Some(approved) = read::<bool>(&path.with_extension("decision.json"))? {
         if approved {
             env.outcome = json!({"kind":"Undecided","effect":"unknown"});
             let previous = read::<serde_json::Value>(&path.with_extension("published.json"))?;
-            let live = plan.observe(&path.with_extension("directory.json"))?;
+            let (live, effect) = match plan {
+                StorePlan::Restore(p) => (
+                    p.observe(&path.with_extension("directory.json"))?,
+                    "published",
+                ),
+                StorePlan::Expiry(_) => (previous.clone(), "expired"),
+            };
             if previous.is_some() && previous != live {
                 return Err(Failure::damaged(
                     "published child no longer matches the destination",
@@ -94,7 +132,7 @@ fn observe(path: &Path, plan: &RestorePlan, env: &mut Envelope<'_>) -> Result<bo
             }
             if let Some(done) = live {
                 env.result = done;
-                env.outcome = json!({"kind":"Completed","effect":"published"});
+                env.outcome = json!({"kind":"Completed","effect":effect});
                 env.next.clear();
                 return Ok(true);
             }
@@ -142,7 +180,7 @@ pub(super) fn get(req: Request<OpGetOption>, env: &mut Envelope<'_>) -> Result<(
 }
 fn read_decision(
     file: Option<String>,
-    p: &RestorePlan,
+    p: &StorePlan,
     env: &Envelope<'_>,
 ) -> Result<Decision, Failure> {
     match file.as_deref() {

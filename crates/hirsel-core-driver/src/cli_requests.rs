@@ -187,6 +187,9 @@ pub enum DevControlOption {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreOption {
+    Deep,
+    KeepFrom(String),
+    ArchiveAt(String),
     RestoreFrom(String),
     RestoreTarget(String),
     RestoreTo(String),

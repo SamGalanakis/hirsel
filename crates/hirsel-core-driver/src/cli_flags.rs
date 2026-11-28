@@ -138,6 +138,9 @@ flags! {
     Libraries ["--libraries"] "ROOT" => "Select a root containing core/ and std/.";
     Fresh ["--fresh"] => "Start a new dev-owned store generation.";
     Store ["--store"] "DIRECTORY" => "Select the database for dry-run, or the request or product store.";
+    Deep ["--deep"] => "Walk every reachable page graph.";
+    KeepFrom ["--keep-from"] "BASE" => "Keep the selected base and its successors.";
+    ArchiveAt ["--at"] "MS" => "Select a retention floor by time.";
     RestoreFrom ["--from"] "SOURCE" => "Restore from this stamped backup or archive.";
     RestoreTarget ["--target"] "SELECTOR" => "Select latest, version:BRANCH,V, at:BRANCH,MS, or boundary:TOKEN.";
     RestoreTo ["--to"] "DEST" => "Publish under a fresh identity at this destination.";

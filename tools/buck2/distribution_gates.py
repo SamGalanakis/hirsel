@@ -67,10 +67,13 @@ def distribution_gates(out, call, Raw, reads, slots):
                             embed_runtime="//:hirsel-core-rt-ios-embed-archives",
                             exec_helpers="//:hirsel-exec-helpers",
                             toolchain_packages="//:toolchain-packages",
-                            platform_sources=Raw('glob(["core/programs/platform/*.hirsel"]) + ["core/programs/platform/hirsel.toml"]'),
+                            platform_sources=Raw('glob(["core/programs/platform/*.hirsel", "core/programs/store-archive-tool/*.hirsel"]) + ["core/programs/platform/hirsel.toml", "core/programs/store-archive-tool/hirsel.toml"]'),
                             visibility=["PUBLIC"]))
     out.append("\n" + call("hirsel_script_test", name="store-restore-directory", script="tools/tests/store_restore.py",
                             data=Raw('glob(["core/programs/store/corpus/format-14/directory/*"])'),
+                            files_env={"HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain"}))
+    out.append("\n" + call("hirsel_script_test", name="store-archive-recovery", script="tools/tests/store_archive.py",
+                            data=["tools/tests/store_archive_server.py", "tools/tests/fixtures/store-archive-format14.json"],
                             files_env={"HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain"}))
     out.append("\n" + call("hirsel_script_test", name="check-installer", script="//tools/toolchain-dist:check-installer",
                             data=["//tools/toolchain-dist:install.sh.in", "//tools/toolchain-dist:product.py",

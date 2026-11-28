@@ -62,12 +62,16 @@ def pack(compiler, sources, output, work, names):
 def helpers(product, root, source, work, host_image):
     cwd, fd = ('.', '/dev/fd') if platform.system() == 'Darwin' else ('/proc/self/cwd', '/proc/self/fd')
     values = dict(product['sockets'], cwd=cwd, fd=fd)
-    staged = work / source.name
-    package = place(source, staged)
-    identity = f"{package['name']}@{package['major']}"
+    staged_packages = {}
     directory = root / 'libexec/hirsel'
     directory.mkdir(parents=True, exist_ok=True)
     for name, helper in product['helpers'].items():
+        package_name = helper.get('package', source.name)
+        if package_name not in staged_packages:
+            staged = work / package_name
+            package = place(source.parent / package_name, staged)
+            staged_packages[package_name] = staged, f"{package['name']}@{package['major']}"
+        staged, identity = staged_packages[package_name]
         grants = [word for grant in helper['grants'] for word in ('--grant', grant.format_map(values))]
         dirs = [word for path in helper['dirs'] for word in ('--dir', path.format_map(values))]
         image = host_image if helper.get('embedded') else directory / name

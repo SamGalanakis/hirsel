@@ -1,0 +1,192 @@
+const ARCHIVE_OP_MS: u64 = 30000
+
+fn archive_parent(s: String) -> Result[store.StoreId, Exit] {
+    let raw = string.as_bytes(s)
+    if list.len(raw) != 32 {
+        return Error(usage())
+    }
+    let Some(a) = std.hex.decode(list.slice(raw, 0, 16)) else {
+        return Error(usage())
+    }
+    let Some(b) = std.hex.decode(list.slice(raw, 16, 32)) else {
+        return Error(usage())
+    }
+    let mut hi = 0u64
+    let mut lo = 0u64
+    for i in 0u64 .. 8 {
+        hi = (hi << 8u64) | int.widen(a[i])
+        lo = (lo << 8u64) | int.widen(b[i])
+    }
+    Ok(store.StoreId(hi, lo))
+}
+
+fn archive_busy(err: Stderr) -> Result[(), Exit] waits {
+    let _ = stderr.write(err, "archive observation unavailable\n")
+    Error(Exit(status: 75u8))
+}
+
+fn archive_failure(err: Stderr, e: store.Error) -> Result[(), Exit] waits {
+    match e {
+        Held => archive_busy(err),
+        Undecided => archive_busy(err),
+        Remote(Uncertain(_)) => archive_busy(err),
+        Remote(Retriable(_)) => archive_busy(err),
+        Lost => refused(err, "Lost"),
+        Remote(NotFound) => refused(err, "Lost"),
+        Conflict(detail) => refused(err, detail),
+        Foreign => refused(err, "Foreign"),
+        _ => refused(err, store_refusal(e)),
+    }
+}
+
+fn review_text(v: store.ArchiveReview) -> String {
+    let mut text = string.new()
+    std.json.write(mut text, false, scoped fn(w: std.json.Writer) {
+        std.json.object(w, 0, scoped fn(obj: std.json.Writer, mut fields: std.json.Items) {
+            text_field(obj, mut fields, "parent", id_hex(v.head.store.hi, v.head.store.lo))
+            text_field(obj, mut fields, "etag", std.hex.encode(std.object.tag_value(v.tag)))
+            counter_field(obj, mut fields, "revision", v.head.rev)
+            counter_field(obj, mut fields, "binding_id", v.head.binding_id)
+            counter_field(obj, mut fields, "holder_epoch", v.head.holder_epoch)
+            std.json.write_member(obj, mut fields, "open_gap")
+            std.json.write_bool(obj, v.head.open_gap)
+            if let Some(floor) = view v.head.floor_base {
+                counter_field(obj, mut fields, "floor_base", floor.base_ordinal)
+            }
+            std.json.write_member(obj, mut fields, "intervals")
+            std.json.array(obj, 1, scoped fn(a: std.json.Writer, mut items: std.json.Items) {
+                for iv in v.intervals {
+                    std.json.element(a, mut items)
+                    std.json.object(a, 2, scoped fn(row: std.json.Writer, mut f: std.json.Items) {
+                        counter_field(row, mut f, "first_base", iv.first_base.base_ordinal)
+                        counter_field(row, mut f, "first_version", iv.first_base.main_version)
+                        counter_field(row, mut f, "first_ms", iv.first_base.main_at)
+                        counter_field(row, mut f, "through_base", iv.through.gen)
+                        counter_field(row, mut f, "through_unit", iv.through.ordinal)
+                        counter_field(row, mut f, "through_offset", iv.through.sub)
+                        counter_field(row, mut f, "through_version", iv.through.main_version)
+                        counter_field(row, mut f, "through_ms", iv.through.main_at)
+                        std.json.write_member(row, mut f, "closed_by_gap")
+                        std.json.write_bool(row, iv.closed_by_gap)
+                    })
+                }
+            })
+        })
+    })
+    take text
+}
+
+fn archive_review(mut src: std.object.Client, parent: store.StoreId, work: Dir, out: Stdout, err: Stderr, check: store.ArchiveCheck) -> Result[(), Exit] waits {
+    match store.review_archive(mut src, parent, check, work, ARCHIVE_OP_MS) {
+        Ok(take v) => say(out, review_text(v)),
+        Error(e) => archive_failure(err, e),
+    }
+}
+
+pub fn archive_command(work: Dir, net: Net, tasks: Tasks, c: Clock, r: Random, out: Stdout, err: Stderr, take bucket: std.object.Bucket, take creds: std.cred.Credentials, parent_text: String, argv: Args) -> Result[(), Exit] waits {
+    let parent = archive_parent(parent_text)?
+    let due = std.clock.deadline_after_ms(host.mono_ns(c), ARCHIVE_OP_MS)
+    let Ok(take started) = std.object.start(net, tasks, take bucket, take creds, None, System, c, r, std.object.LaneConfig(requested_lanes: 2, lane_bytes: 83886080), due) else {
+        return refused(err, "ArchiveConnection")
+    }
+    let mut src = take started
+    let verb = operand(argv, 0)?
+    if verb == "plan-archive" || verb == "publish-archive" {
+        let target = selector(argv)?
+        let options = store.sized(Directory, 2147483648u64) ?=> |_| Exit(status: 1u8)
+        if verb == "publish-archive" {
+            let BranchBoundary(_, _) = target else {
+                return Error(usage())
+            }
+            let answer = store.restore_from_archive(tasks, take src, parent, work, c, r, options, target, attempt_arg(argv, 4)?, ARCHIVE_OP_MS)
+            return published_point(take answer, work, tasks, c, r, options, out, err)
+        }
+        let result = match target {
+            At(branch_id, ms) => store.resolve_at(mut src, parent, branch_id, ms, ARCHIVE_OP_MS),
+            _ => store.plan_archive_restore(mut src, parent, target, ARCHIVE_OP_MS),
+        }
+        let resolution = match take result {
+            Ok(take found) => take found,
+            Error(e) => return archive_failure(err, e),
+        }
+        let RestorePresent(point) = resolution else {
+            return selected_point(resolution, err, out)
+        }
+        let mut source: store.RestoreSource = ArchivedStore(take src, parent, ARCHIVE_OP_MS)
+        return match store.verify_restore_point(mut source, work, c, options, point, runner.restored_release) {
+            Ok(checked) => say(out, point_text(checked, None)?),
+            Error(Store(e)) => archive_failure(err, e),
+            Error(e) => refused(err, deploy_refusal(e)),
+        }
+    }
+    if verb == "describe" {
+        return archive_review(mut src, parent, work, out, err, DescribeArchive)
+    }
+    if verb == "verify" || verb == "deep" {
+        return archive_review(mut src, parent, work, out, err, if verb == "deep" {
+            VerifyGraphs
+        } else {
+            VerifyReferences
+        })
+    }
+    if verb == "plan-expiry" || verb == "apply-expiry" {
+        return expiry_command(mut src, parent, work, out, err, argv, verb == "apply-expiry")
+    }
+    Error(usage())
+}
+
+fn approved_expiry(argv: Args) -> Result[store.ExpiryPlan, Exit] {
+    let Some(bytes_in) = std.hex.decode(string.as_bytes(operand(argv, 3)?)) else {
+        return Error(usage())
+    }
+    if list.len(bytes_in) == 0 || list.len(bytes_in) > 64 {
+        return Error(usage())
+    }
+    let mut octets: Inline[u8, 64] =[0; 64]
+    for i in 0u64 .. list.len(bytes_in) {
+        octets[i] = bytes_in[i]
+    }
+    let tag = std.object.ETag(octets, len: list.len(bytes_in))
+    if !std.object.strong_match(tag, bytes_in) {
+        return Error(usage())
+    }
+    let Some(floor) = store.decode_restore_token(operand(argv, 4)?) else {
+        return Error(usage())
+    }
+    let Some(previous) = store.decode_restore_token(operand(argv, 5)?) else {
+        return Error(usage())
+    }
+    Ok(store.ExpiryPlan(head: tag, floor, previous))
+}
+
+fn expiry_command(mut src: std.object.Client, parent: store.StoreId, work: Dir, out: Stdout, err: Stderr, argv: Args, apply: bool) -> Result[(), Exit] waits {
+    let number = count_arg(argv, 2)?
+    let cutoff: store.ExpiryCutoff = if operand(argv, 1)? == "at" {
+        KeepFromTime(number)
+    } else {
+        KeepFromBase(number)
+    }
+    let approved = if apply {
+        Some(approved_expiry(argv)?)
+    } else {
+        None
+    }
+    let answer = match store.archive_expire(mut src, parent, cutoff, None, approved, work, ARCHIVE_OP_MS) {
+        Ok(take result) => take result,
+        Error(e) => return archive_failure(err, e),
+    }
+    let floor = store.encode_restore_token(answer.plan.floor) ?=> |_| Exit(status: 1u8)
+    let previous = store.encode_restore_token(answer.plan.previous) ?=> |_| Exit(status: 1u8)
+    let mut text = string.new()
+    std.json.write(mut text, false, scoped fn(w: std.json.Writer) {
+        std.json.object(w, 0, scoped fn(obj: std.json.Writer, mut fields: std.json.Items) {
+            text_field(obj, mut fields, "etag", std.hex.encode(std.object.tag_value(answer.plan.head)))
+            text_field(obj, mut fields, "previous", previous)
+            text_field(obj, mut fields, "floor", floor)
+            counter_field(obj, mut fields, "previous_base", answer.plan.previous.boundary.base_ordinal)
+            counter_field(obj, mut fields, "proposed_base", answer.plan.floor.boundary.base_ordinal)
+            counter_field(obj, mut fields, "deleted", answer.deleted)
+        })
+    })
+    say(out, text)
+}

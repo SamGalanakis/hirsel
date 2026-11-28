@@ -8,7 +8,6 @@ use crate::cli::{Request, StoreOption as O};
 use hirsel_core_ids::hex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read},
@@ -21,6 +20,8 @@ pub(super) struct RestorePlan {
     source: PathBuf,
     destination: PathBuf,
     source_dir: DirectoryId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    archive: Option<super::archive::Archive>,
     destination_parent: DirectoryId,
     existing_destination: Option<DirectoryId>,
     pub(super) attempt: String,
@@ -66,6 +67,17 @@ fn directory(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
+fn source_handle(path: &Path, archive: bool) -> Result<File, Failure> {
+    if archive {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(Failure::io)
+    } else {
+        directory(path).map_err(Failure::io)
+    }
+}
 fn selector(text: &str) -> Result<Vec<String>, Failure> {
     fn invalid() -> Failure {
         Failure::input(
@@ -111,9 +123,17 @@ fn invoke(from: &File, to: &File, verb: &str, args: &[String]) -> Result<Vec<u8>
     Ok(output.stdout)
 }
 
-fn plan_at(source: &File, args: &[String]) -> Result<Point, Failure> {
+fn plan_at(
+    source: &File,
+    archive: Option<&super::archive::Archive>,
+    args: &[String],
+) -> Result<Point, Failure> {
     let scratch = tempfile::tempdir().map_err(Failure::io)?;
     let dir = directory(scratch.path()).map_err(Failure::io)?;
+    if let Some(profile) = archive {
+        return serde_json::from_value(profile.invoke(&dir, "plan-archive", args, false)?)
+            .map_err(Failure::damaged);
+    }
     serde_json::from_slice(&invoke(source, &dir, "plan-backup", args)?).map_err(Failure::damaged)
 }
 
@@ -140,6 +160,13 @@ fn check_evidence_paths(source: &Path, destination: &Path) -> Result<(), Failure
     }
     Ok(())
 }
+pub(super) fn attempt() -> Result<String, Failure> {
+    let mut nonce = [0; 16];
+    File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut nonce))
+        .map_err(Failure::io)?;
+    Ok(hex::encode(&nonce))
+}
 fn plan(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
     let (mut src, mut dst, mut selected, mut explicit) = (None, None, None, false);
     for o in req.options {
@@ -152,8 +179,12 @@ fn plan(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
             _ => return Err(Failure::input("arguments", "duplicate or unrelated option")),
         }
     }
-    let source = fs::canonicalize(src.ok_or_else(|| Failure::input("from", "required"))?)
-        .map_err(Failure::io)?;
+    let input = src.ok_or_else(|| Failure::input("from", "required"))?;
+    let archive_path = input.strip_prefix('@');
+    let source = fs::canonicalize(archive_path.unwrap_or(&input)).map_err(Failure::io)?;
+    let archive = archive_path
+        .map(|_| super::archive::Archive::read(&source))
+        .transpose()?;
     let destination = PathBuf::from(dst.ok_or_else(|| Failure::input("to", "required"))?);
     let name = destination
         .file_name()
@@ -169,7 +200,7 @@ fn plan(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
         return Err(Failure::input("to", "source and destination overlap"));
     }
     check_evidence_paths(&source, &destination)?;
-    let from = directory(&source).map_err(Failure::io)?;
+    let from = source_handle(&source, archive.is_some())?;
     let par = directory(&parent).map_err(Failure::io)?;
     let existing_destination = match directory(&destination) {
         Ok(d) => {
@@ -187,22 +218,21 @@ fn plan(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
     };
     let point = plan_at(
         &from,
+        archive.as_ref(),
         &selected.ok_or_else(|| Failure::input("target", "required"))?,
     )?;
-    let mut nonce = [0; 16];
-    File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut nonce))
-        .map_err(Failure::io)?;
     let plan = RestorePlan {
         source,
         destination,
         source_dir: DirectoryId::read(&from)?,
+        archive,
         destination_parent: DirectoryId::read(&par)?,
         existing_destination,
-        attempt: hex::encode(&nonce),
+        attempt: attempt()?,
         point,
     };
     env.contract = if explicit { "plan" } else { "submit" };
+    let plan = super::pitr_decision::StorePlan::Restore(plan);
     super::pitr_decision::save_plan(&plan)?;
     plan.held(env);
     if !explicit {
@@ -221,16 +251,11 @@ pub(crate) fn restore(req: Request<O>) -> i32 {
 }
 
 impl RestorePlan {
-    pub(super) fn digest(&self) -> String {
-        hex::encode(&Sha256::digest(
-            serde_json::to_vec(self).expect("serializable restore plan"),
-        ))
-    }
-    pub(super) fn held(&self, env: &mut Envelope<'_>) {
+    pub(super) fn held(&self, digest: &str, env: &mut Envelope<'_>) {
         let id = format!("store/{}", self.attempt);
         env.target = json!({"kind":"directory","destination":self.destination});
         env.operation = json!({"kind":"store","id":id,"request_id":self.attempt});
-        env.result = json!({"plan_digest":self.digest(),"source":self.source,"destination":self.destination,"attempt":self.attempt,"point":self.point});
+        env.result = json!({"plan_digest":digest,"source":self.source,"destination":self.destination,"attempt":self.attempt,"point":self.point});
         env.next = vec![json!({"method":"op decide","operation":id})];
         env.outcome = json!({"kind":"AwaitDecision","effect":"none"});
     }
@@ -326,13 +351,18 @@ impl RestorePlan {
     }
 
     pub(super) fn publish(&self, path: &Path) -> Result<Value, Failure> {
-        let from = directory(&self.source).map_err(Failure::io)?;
+        let from = source_handle(&self.source, self.archive.is_some())?;
+        if let Some(expected) = &self.archive {
+            if expected != &super::archive::Archive::read(&self.source)? {
+                return Err(Failure::input("from", "archive descriptor changed"));
+            }
+        }
         if self.source_dir != DirectoryId::read(&from)? {
             return Err(Failure::input("from", "source directory changed"));
         }
         check_evidence_paths(&self.source, &self.destination)?;
         let mut args = self.pinned();
-        if plan_at(&from, &args)? != self.point {
+        if plan_at(&from, self.archive.as_ref(), &args)? != self.point {
             return Err(Failure::input(
                 "plan_digest",
                 "selected boundary or release changed",
@@ -343,9 +373,13 @@ impl RestorePlan {
             .ok_or_else(|| Failure::damaged("missing destination"))?;
         super::pitr_decision::once(path, &DirectoryId::read(&to)?)?;
         args.push(self.attempt.clone());
-        let mut applied: Point =
+        let mut applied: Point = if let Some(archive) = &self.archive {
+            serde_json::from_value(archive.invoke(&to, "publish-archive", &args, false)?)
+                .map_err(Failure::damaged)?
+        } else {
             serde_json::from_slice(&invoke(&from, &to, "publish-backup", &args)?)
-                .map_err(Failure::damaged)?;
+                .map_err(Failure::damaged)?
+        };
         let child = applied
             .child
             .take()

@@ -1,0 +1,48 @@
+// Reference verification checks every retained interval. Deep verification
+// additionally walks the decoded page graphs at every base and retained MARK.
+pub type ArchiveReview: send {
+    head: format.ArchiveHeadRep,
+    intervals: List[format.ArchiveIntervalRep],
+    tag: std.object.ETag
+}
+
+pub type ArchiveCheck = DescribeArchive | VerifyReferences | VerifyGraphs
+
+pub fn review_archive(mut src: std.object.Client, parent: StoreId, check: ArchiveCheck, scratch: Dir, op_ms: u64) -> Result[ArchiveReview, Error] waits {
+    let due = std.object.deadline_after_ms(src, op_ms)
+    let key = store_key_to_rep(parent)
+    let Some((take head, tag)) = failure_result_from_rep(history.archive_head_fetch(mut src, key, due))? else {
+        return Error(NotFound)
+    }
+    let result = review_archive_head(mut src, parent, head, check, scratch, due)
+    match take result {
+        Ok(take intervals) => Ok(ArchiveReview(head: take head, intervals: take intervals, tag)),
+        Error(Remote(NotFound)) => {
+            let Some((take latest_head, latest_tag)) = failure_result_from_rep(history.archive_head_fetch(mut src, key, due))? else {
+                return Error(Lost)
+            }
+            if latest_head.binding_id != head.binding_id {
+                return Error(Foreign)
+            }
+            if latest_tag != tag {
+                return Error(Undecided)
+            }
+            Error(Lost)
+        },
+        Error(take problem) => Error(take problem),
+    }
+}
+
+fn review_archive_head(mut src: std.object.Client, parent: StoreId, head: format.ArchiveHeadRep, check: ArchiveCheck, scratch: Dir, deadline: u64) -> Result[List[format.ArchiveIntervalRep], Error] waits {
+    let idx = failure_result_from_rep(history.archive_restore_index(mut src, head, deadline))?
+    match check {
+        DescribeArchive => (),
+        VerifyReferences => {
+            let _ = verify_archive_bases(mut src, head, parent, scratch, false, deadline)?
+        },
+        VerifyGraphs => {
+            let _ = verify_archive_bases(mut src, head, parent, scratch, true, deadline)?
+        },
+    }
+    Ok(clone(idx.intervals))
+}

@@ -76,3 +76,9 @@ dirs = ["{cwd}/catalog"]
 entry = "store_tool/main"
 grants = ["Clock", "Random", "Tasks", "Stdout", "Stderr"]
 dirs = ["{fd}/3", "{fd}/4"]
+
+[helpers.archive_tool]
+package = "store-archive-tool"
+entry = "main/main"
+grants = ["Clock", "Random", "Tasks", "Stdout", "Stderr", "Secret:key=env:HIRSEL_ARCHIVE_SECRET kdf", "Env=HIRSEL_ARCHIVE_ENDPOINT,HIRSEL_ARCHIVE_REGION,HIRSEL_ARCHIVE_BUCKET,HIRSEL_ARCHIVE_PREFIX,HIRSEL_ARCHIVE_PARENT,HIRSEL_ARCHIVE_ACCESS,HIRSEL_ARCHIVE_TOKEN", "Net=Resolve *;Connect 0.0.0.0/0 443-443;Connect ::/0 443-443;Connect 127.0.0.1/32 1-65535;Tls * 443-443 System"]
+dirs = ["{fd}/4"]

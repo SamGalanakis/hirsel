@@ -233,7 +233,7 @@ pub(super) fn resolve_identify_read() {
             .unwrap()
             .contains(&spec)
     );
-    assert_eq!(spec["operands"], "host/CATALOG/REQUEST");
+    assert_eq!(spec["operands"], "host/CATALOG/REQUEST or store/ATTEMPT");
     assert_eq!(spec["result"]["target_kind"], "host");
     assert_eq!(spec["result"]["credential_bearing"], false);
     let names: Vec<_> = spec["options"]

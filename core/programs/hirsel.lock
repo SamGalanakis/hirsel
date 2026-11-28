@@ -134,6 +134,12 @@ source = "member:sqlite"
 edges = []
 
 [[package]]
+id = "hirsel.ai/store_archive_tool@1"
+version = "1.0.0"
+source = "member:store-archive-tool"
+edges = ["platform@1", "std@1"]
+
+[[package]]
 id = "hirsel.ai/store_crash@1"
 version = "1.0.0"
 source = "member:store-crash"

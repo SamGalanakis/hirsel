@@ -667,7 +667,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 if evaluating:
                     law_started = time.monotonic()
                     result = resident.evaluate(inputs, entry, instructions=case.evaluator_instructions, progress=progress,
-                                               compiler_worker=compiler_worker)
+                                               root_limit=case.root_limit, compiler_worker=compiler_worker)
                     row['ran'], row['cause'] = evaluator_observation(case, result)
                     try:
                         row['revision'] = json.loads(result.stdout).get('revision')

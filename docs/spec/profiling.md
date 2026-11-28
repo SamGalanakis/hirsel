@@ -115,7 +115,7 @@ above the SQLite signed integer range use exact decimal text. Timestamps
 and run times are in nanoseconds and use 20 digits for that text, including
 leading zeroes, so comparisons and ordering stay exact. Use
 `u64_elapsed(end_ns, start_ns)` in `prof sql` for exact subtraction.
-An unresolved sample has no function for its leaf frame.
+An unresolved sample has no named function for its leaf frame.
 
 A callsite identifies a frame in its caller chain. A self total counts the
 event periods attributed to the leaf frame. An inclusive total counts each
@@ -176,6 +176,10 @@ otherwise. The sample keeps its original event and period.
 `symtab_only` for ELF symbols, or `offsets_only` if only mapping-relative
 addresses are available. A function's `module_kind` is `hirsel`, `runtime`,
 `foreign`, `kernel` or `unknown`.
+On Linux, the profiler uses a shared library's build ID to find debug data
+under `/usr/lib/debug/.build-id`. It also looks for its GNU debuglink file
+next to the library, under its `.debug` directory, or under the mirrored
+directory in `/usr/lib/debug`. The build ID or debuglink CRC must match.
 
 `hirsel prof attach` enables mapping, command and task records before it
 reads the target's thread list or mappings. It snapshots the vDSO build ID

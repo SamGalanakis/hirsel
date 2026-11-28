@@ -97,6 +97,9 @@ fn text_symbols(file: &object::File<'_>) -> Vec<Symbol> {
         let Ok(name) = symbol.name() else {
             continue;
         };
+        if name.is_empty() {
+            continue;
+        }
         let end = if macho {
             symbol
                 .section_index()
@@ -191,26 +194,32 @@ impl Image {
             file.section_by_name(".text").map_or(0, |s| s.address()),
             file.section_by_name(".got").map_or(0, |s| s.address()),
         );
+        let mut symbols = if matches!(source, SymbolSource::OffsetsOnly) {
+            Vec::new()
+        } else {
+            text_symbols(&file)
+        };
+        if matches!(source, SymbolSource::DetachedDwarf(_))
+            && let Some(debug) = &debug_file
+        {
+            symbols.extend(text_symbols(debug));
+            symbols.sort_by_key(|symbol| (symbol.start, symbol.end));
+        }
         let dwarf = debug_file
             .map(|debug| {
                 let dwarf = gimli::Dwarf::load(|id| -> object::Result<Reader> {
                     let bytes = debug
                         .section_by_name(id.name())
-                        .map(|s| s.data())
+                        .map(|s| s.uncompressed_data())
                         .transpose()?;
                     Ok(EndianArcSlice::new(
-                        Arc::from(bytes.unwrap_or_default()),
+                        Arc::from(bytes.unwrap_or_default().as_ref()),
                         LittleEndian,
                     ))
                 })?;
                 Ok::<_, Box<dyn std::error::Error>>(addr2line::Context::from_dwarf(dwarf)?)
             })
             .transpose()?;
-        let symbols = if matches!(source, SymbolSource::OffsetsOnly) {
-            Vec::new()
-        } else {
-            text_symbols(&file)
-        };
         let segments = file
             .segments()
             .filter_map(|segment| {
@@ -296,16 +305,36 @@ impl Image {
                     .function
                     .as_ref()
                     .map(|func| func.raw_name())
-                    .transpose()?;
+                    .transpose()?
+                    .filter(|name| !name.is_empty());
                 let def_name = match (unit, frame.dw_die_offset) {
-                    (Some(unit), Some(offset)) => definition_name(unit, offset)?,
+                    (Some(unit), Some(offset)) => dwarf_name(unit, offset, &[gimli::DW_AT_name])?,
                     _ => None,
                 };
                 let loc = frame.location;
-                let function = raw.map(|raw| {
-                    let name = def_name.as_deref().or(visible.as_deref()).unwrap_or(&raw);
-                    function(&raw, name, def_name.as_deref(), hirsel_unit)
-                });
+                let linkage = match (raw.as_ref(), unit, frame.dw_die_offset) {
+                    (None, Some(unit), Some(offset)) => dwarf_name(
+                        unit,
+                        offset,
+                        &[gimli::DW_AT_linkage_name, gimli::DW_AT_MIPS_linkage_name],
+                    )?,
+                    _ => None,
+                };
+                let function = raw
+                    .as_deref()
+                    .or(linkage.as_deref())
+                    .or(def_name.as_deref())
+                    .map(|raw| {
+                        let visible = visible
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or_else(|| addr2line::demangle_auto(Cow::Borrowed(raw), None));
+                        function(
+                            raw,
+                            def_name.as_deref().unwrap_or(&visible),
+                            def_name.as_deref(),
+                            hirsel_unit,
+                        )
+                    });
                 frames.push(Symbolized {
                     function,
                     file: loc.as_ref().and_then(|loc| loc.file.map(str::to_owned)),
@@ -377,25 +406,48 @@ fn is_hirsel_unit(unit: UnitRef<'_, Reader>) -> Result<bool> {
     Ok(unit.attr_string(producer)?.to_string_lossy()? == "Hirsel")
 }
 
-fn definition_name(unit: UnitRef<'_, Reader>, offset: UnitOffset<usize>) -> Result<Option<String>> {
-    let mut offset = offset;
+fn dwarf_name(
+    original: UnitRef<'_, Reader>,
+    mut offset: UnitOffset<usize>,
+    attributes: &[gimli::DwAt],
+) -> Result<Option<String>> {
+    use gimli::Reader as _;
     let mut visited = HashSet::new();
+    let mut other = None;
     loop {
-        if !visited.insert(offset) {
+        let unit = other.as_ref().map_or(original, |u: &gimli::Unit<Reader>| {
+            u.unit_ref(original.dwarf)
+        });
+        if !visited.insert(offset.to_unit_section_offset(&unit.header)) {
             return Err("DWARF definition origin contains a cycle".into());
         }
         let entry = unit.entry(offset)?;
-        if let Some(name) = entry.attr_value(gimli::DW_AT_name) {
-            use gimli::Reader as _;
-            return Ok(Some(
-                unit.attr_string(name)?.to_string_lossy()?.into_owned(),
-            ));
+        for &attribute in attributes {
+            if let Some(name) = entry.attr_value(attribute) {
+                let name = unit.attr_string(name)?.to_string_lossy()?.into_owned();
+                if !name.is_empty() {
+                    return Ok(Some(name));
+                }
+            }
         }
         match entry
             .attr_value(gimli::DW_AT_abstract_origin)
             .or_else(|| entry.attr_value(gimli::DW_AT_specification))
         {
             Some(AttributeValue::UnitRef(next)) => offset = next,
+            Some(AttributeValue::DebugInfoRef(next)) => {
+                let mut headers = unit.dwarf.units();
+                loop {
+                    let Some(header) = headers.next()? else {
+                        return Ok(None);
+                    };
+                    if let Some(next_offset) = next.to_unit_offset(&header) {
+                        other = Some(unit.dwarf.unit(header)?);
+                        offset = next_offset;
+                        break;
+                    }
+                }
+            }
             _ => return Ok(None),
         }
     }
@@ -418,5 +470,36 @@ pub(crate) fn source_path(root: &Path, name: &str) -> std::path::PathBuf {
         path.to_owned()
     } else {
         root.join(path)
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn llvm_inline_names_and_instances_come_from_the_abstract_origin() {
+        let debug = include_bytes!("../testdata/llvm-inline.debug");
+        let image = Image::parse(debug, SymbolSource::EmbeddedDwarf, true).unwrap();
+        for (pc, path, instance) in [
+            (
+                0xe8460,
+                "local/profile_fixture@1/main/hot",
+                "h07301edc14ac8801a90e79a09a70a42597e6ecfbd426bf05c48d66cbe0b1db54",
+            ),
+            (
+                0xe8504,
+                "local/profile_fixture@1/main/cold",
+                "heee59e3450756e1cb1ae2599e6df172589f23f3ee0703d71894c20e849376ff6",
+            ),
+        ] {
+            let frames = image.frames(pc).unwrap();
+            let leaf = &frames[0];
+            assert!(leaf.inlined);
+            let function = leaf.function.as_ref().unwrap();
+            assert_eq!(function.name, path);
+            assert_eq!(function.def_path.as_deref(), Some(path));
+            assert_eq!(function.instance, instance);
+        }
     }
 }

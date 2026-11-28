@@ -18,6 +18,6 @@ use linux as provider;
 use macos as provider;
 
 pub(crate) use provider::{
-    CLOCK, KernelSymbols, TARGET, kernel_address, mapped_file, monotonic_ns, vdso,
+    CLOCK, KernelSymbols, TARGET, kernel_address, mapped_debug, mapped_file, monotonic_ns, vdso,
 };
 pub use provider::{attach, run};

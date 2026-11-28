@@ -189,7 +189,9 @@ impl ProfileWriter {
              INSERT INTO run_meta SELECT 'kernel_samples', count(*) FROM cpu_sample WHERE stack_root = 'kernel';
              INSERT INTO run_meta SELECT 'unresolved_samples', count(*)
                  FROM cpu_sample s JOIN callsite c ON c.id = s.callsite_id
-                 JOIN frame f ON f.id = c.frame_id WHERE f.function_id IS NULL;
+                 JOIN frame f ON f.id = c.frame_id
+                 LEFT JOIN function fn ON fn.id = f.function_id
+                 WHERE coalesce(fn.name, '') = '';
              COMMIT;",
         )?;
         self.db.close().map_err(|(_, error)| error)?;

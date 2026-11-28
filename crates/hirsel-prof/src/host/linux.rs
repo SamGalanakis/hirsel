@@ -7,7 +7,7 @@ mod procfs;
 pub use attach::attach;
 pub use capture::run;
 pub(crate) use perf::monotonic_ns;
-pub(crate) use procfs::{KernelSymbols, mapped_file, vdso};
+pub(crate) use procfs::{KernelSymbols, mapped_debug, mapped_file, vdso};
 
 #[cfg(target_arch = "x86_64")]
 pub(crate) const TARGET: &str = "x86_64-unknown-linux-gnu";

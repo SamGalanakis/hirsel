@@ -358,7 +358,14 @@ impl<'a> Import<'a> {
         }
         let mut bytes = Vec::new();
         fd.read_to_end(&mut bytes).ok()?;
-        let image = Rc::new(Image::parse(&bytes, image::local_symbols(&bytes), false).ok()?);
+        let local = image::local_symbols(&bytes);
+        let detached = if matches!(local, image::SymbolSource::EmbeddedDwarf) {
+            None
+        } else {
+            host::mapped_debug(self.pid, &mapping.path, &bytes)
+                .and_then(|debug| Image::parse(&bytes, debug, false).ok())
+        };
+        let image = Rc::new(detached.or_else(|| Image::parse(&bytes, local, false).ok())?);
         self.images.insert(identity, image.clone());
         Some(image)
     }

@@ -170,6 +170,10 @@ impl KernelSymbols {
 }
 
 /// The file a mapping names, refused when it is no longer the mapped image.
+pub(crate) fn mapped_debug(_pid: u32, _path: &Path, _image: &[u8]) -> Option<SymbolSource> {
+    None
+}
+
 pub(crate) fn mapped_file(_pid: u32, mapping: &Mapping) -> Result<File> {
     if !mapping.path.is_absolute() {
         return Err("mapping has no file".into());

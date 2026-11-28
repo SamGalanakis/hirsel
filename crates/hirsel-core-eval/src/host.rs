@@ -464,7 +464,17 @@ impl Machine<'_> {
                 let mode = a[2] as u8;
                 let file = match (w.nodes.get(&key), mode) {
                     (Some(Node::Dir(_)), _) => return Ok(error(DENIED)),
-                    (None, 0) => return Ok(error(NOT_FOUND)),
+                    (None, 0 | hirsel_core_ids::host_op::MODE_READ_DEVICE) => {
+                        return Ok(error(NOT_FOUND));
+                    }
+                    (_, hirsel_core_ids::host_op::MODE_READ_DEVICE) => {
+                        return Ok(vec![
+                            0,
+                            OTHER,
+                            hirsel_core_ids::host_op::DEVICE_READ_UNAVAILABLE as u64,
+                            0,
+                        ]);
+                    }
                     (Some(_), 3) => return Ok(error(EXISTS)),
                     (Some(Node::File(file)), _) => Arc::clone(file),
                     (None, _) => {
@@ -606,7 +616,7 @@ impl Machine<'_> {
                     let aligned = |value: u64| value.is_multiple_of(DIRECT_ALIGNMENT);
                     if !aligned(a[1])
                         || !aligned(bytes.len() as u64)
-                        || !self.direct_buffer_aligned(data)
+                        || !self.direct_buffer_aligned(data, 0, DIRECT_ALIGNMENT)
                     {
                         return Ok(vec![0, 5, 22, 0]); // Other(EINVAL)
                     }

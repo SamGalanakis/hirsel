@@ -337,6 +337,21 @@ unsafe fn admit<const RETURNABLE: bool>(
                 });
             }
         }
+        if (*request).mode == MODE_READ_DEVICE && matches!(operation, READ | READ_AT) {
+            let r = &*request;
+            let b = &r.buffer;
+            let align = DEVICE_READ_EXTENT as usize;
+            if operation != READ_AT
+                || !r.offset().is_multiple_of(u64::from(DEVICE_READ_EXTENT))
+                || !b.data.wrapping_add(b.len).addr().is_multiple_of(align)
+                || !b.capacity.saturating_sub(b.len).is_multiple_of(align)
+            {
+                return Some(Outcome {
+                    error: IoError::from_errno(libc::EINVAL),
+                    ..Outcome::default()
+                });
+            }
+        }
         if operation == WRITE_AT && (*request).mode == MODE_DIRECT {
             let request = &*request;
             let aligned = |n: u64| n.is_multiple_of(DIRECT_ALIGNMENT);
@@ -350,7 +365,7 @@ unsafe fn admit<const RETURNABLE: bool>(
                 });
             }
         }
-        if (operation == READ_AT && !matches!((*request).mode, 0 | 4))
+        if (operation == READ_AT && !matches!((*request).mode, 0 | 4 | MODE_READ_DEVICE))
             || (operation == WRITE_AT
                 && !matches!((*request).mode, 1 | 3 | 4 | MODE_DURABLE | MODE_DIRECT))
         {

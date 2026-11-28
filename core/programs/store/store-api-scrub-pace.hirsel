@@ -189,7 +189,11 @@ fn scrub_estimated_bytes(tour: Scrub) -> u64 {
 // The replay input is the tour start time. Draw a byte uniformly from the
 // captured files, then begin at the file containing that byte.
 pub fn begin_maintenance_scrub(mut db: Db, started_ms: u64) -> Result[Scrub, Error] {
-    let mut tour = begin_scrub(mut db)?
+    begin_maintenance_scrub_with_mode(mut db, started_ms, Device)
+}
+
+pub fn begin_maintenance_scrub_with_mode(mut db: Db, started_ms: u64, mode: ScrubMode) -> Result[Scrub, Error] {
+    let mut tour = begin_scrub_with_mode(mut db, mode)?
     let total = scrub_estimated_bytes(tour)
     if total > 0 {
         let mut rng = std.rand.new(started_ms, tour.generation)
@@ -282,7 +286,7 @@ pub fn scrub_pacer_step(mut pacer: ScrubPacer, mut db: Db, now_ms: u64) -> Resul
             take started
         },
     }
-    let ScrubReport(generation: report_gen, checked: report_checked, next: report_next, faults: take report_faults) = match scrub_step(mut tour, pacer.config.slice_bytes) {
+    let ScrubReport(generation: report_gen, checked: report_checked, next: report_next, faults: take report_faults, ..) = match scrub_step(mut tour, pacer.config.slice_bytes) {
         Ok(take r) => take r,
         Error(take problem) => {
             pacer.tour = Some(take tour)

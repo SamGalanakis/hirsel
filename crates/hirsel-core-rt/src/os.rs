@@ -176,7 +176,7 @@ impl OsProvider {
         match request.operation {
             OPEN => {
                 let flags = match request.mode {
-                    0 => libc::O_RDONLY,
+                    0 | MODE_READ_DEVICE => libc::O_RDONLY,
                     1 => libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
                     2 => libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
                     3 => libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
@@ -189,6 +189,10 @@ impl OsProvider {
                 let fd = beneath(self.directory(request.handle), path, flags)?;
                 if request.mode == MODE_DIRECT {
                     host::sync::enable_direct(fd.as_fd(), flags)?;
+                } else if request.mode == MODE_READ_DEVICE
+                    && !host::sync::enable_device_read(fd.as_fd())?
+                {
+                    return Err(io::Error::from_raw_os_error(DEVICE_READ_UNAVAILABLE));
                 }
                 out.value = self.insert_file(fd);
             }
@@ -259,7 +263,15 @@ impl OsProvider {
                 if b.capacity > b.len {
                     // SAFETY: spare capacity is writable; fd is held by this provider.
                     let data = unsafe { b.data.add(b.len) };
-                    let spare = b.capacity - b.len;
+                    let mut spare = b.capacity - b.len;
+                    if request.mode == MODE_READ_DEVICE {
+                        // A large buffer may accept a prefix. Keep the ring's u32
+                        // transfer limit from splitting the last aligned extent.
+                        spare = spare.min(
+                            (i32::MAX as usize / DEVICE_READ_EXTENT as usize)
+                                * DEVICE_READ_EXTENT as usize,
+                        );
+                    }
                     let n = match offset {
                         Some(at) if at > i64::MAX as u64 => 0,
                         // SAFETY: spare capacity is writable; the issuing unit stays

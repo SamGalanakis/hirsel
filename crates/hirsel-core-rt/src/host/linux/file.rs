@@ -162,8 +162,7 @@ pub(crate) fn close(fd: RawFd) -> io::Result<()> {
 }
 
 /// Read a prefix of `len` bytes into `data` at `offset` (the file position
-/// when `None`). `ring` issues one buffered ring READ (§3.3b), which completes
-/// from the page cache or through task_work.
+/// when `None`). Both ring READ and pread use the descriptor's cache policy.
 ///
 /// # Safety
 /// `data` is writable for `len` bytes, and the caller holds `fd` and `data`

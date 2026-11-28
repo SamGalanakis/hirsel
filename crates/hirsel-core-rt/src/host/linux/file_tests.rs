@@ -232,3 +232,88 @@ fn batched_slots() {
     file.read_exact_at(&mut got, 0).unwrap();
     assert_eq!(got, bytes);
 }
+
+#[test]
+fn device_reader_reports_support_and_reads_unaligned_eof() {
+    use crate::provider::{
+        DEVICE_READ_EXTENT, DEVICE_READ_UNAVAILABLE, MODE_READ_DEVICE, OPEN, READ_AT,
+    };
+    use std::os::fd::FromRawFd;
+
+    crate::openat2_required::require();
+    let mut f = Fixture::new();
+    let dir = f.dir;
+    assert!(!crate::provider::needs_writable_dir(OPEN, MODE_READ_DEVICE));
+    let absent = f.simple(OPEN, dir, b"missing", MODE_READ_DEVICE);
+    assert_eq!(absent.error, IoError::from_errno(libc::ENOENT));
+    // A memfd is shmem even on kernels where F_SETFL(O_DIRECT) succeeds.
+    let raw = unsafe { libc::memfd_create(c"device-read".as_ptr(), libc::MFD_CLOEXEC) };
+    assert!(raw >= 0);
+    let ram = unsafe { fs::File::from_raw_fd(raw) };
+    assert!(!crate::host::sync::enable_device_read(ram.as_fd()).unwrap());
+
+    const LEN: usize = DEVICE_READ_EXTENT as usize;
+    let mut data = vec![0x5a; LEN + 3];
+    data[LEN..].copy_from_slice(b"end");
+    let path = f.root.path().join("pack");
+    fs::write(&path, &data).unwrap();
+    let opened = f.simple(OPEN, dir, b"pack", MODE_READ_DEVICE);
+    let fs_type = {
+        let file = fs::File::open(path).unwrap();
+        let mut stat = std::mem::MaybeUninit::uninit();
+        assert_eq!(
+            unsafe { libc::fstatfs(file.as_raw_fd(), stat.as_mut_ptr()) },
+            0
+        );
+        unsafe { stat.assume_init() }.f_type
+    };
+    if fs_type == libc::TMPFS_MAGIC {
+        assert_eq!(opened.error, IoError::from_errno(DEVICE_READ_UNAVAILABLE));
+        return;
+    }
+    assert_eq!(opened.error, IoError::OK);
+    let fd = f.os.file_descriptor(opened.value);
+    assert_ne!(
+        unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_DIRECT,
+        0
+    );
+    #[repr(align(65536))]
+    struct Extent([u8; LEN]);
+    let mut buf = Extent([0; LEN]);
+    let bad = f.call(
+        READ_AT,
+        opened.value,
+        &1u64.to_le_bytes(),
+        MODE_READ_DEVICE,
+        &mut buf.0,
+        0,
+    );
+    assert_eq!((bad.0.error, bad.1), (IoError::from_errno(libc::EINVAL), 0));
+    let bad = f.call(
+        READ_AT,
+        opened.value,
+        &0u64.to_le_bytes(),
+        MODE_READ_DEVICE,
+        &mut buf.0,
+        1,
+    );
+    assert_eq!((bad.0.error, bad.1), (IoError::from_errno(libc::EINVAL), 1));
+    for (at, n) in [(0u64, LEN), (LEN as u64, 3), (2 * LEN as u64, 0)] {
+        let (out, filled) = f.call(
+            READ_AT,
+            opened.value,
+            &at.to_le_bytes(),
+            MODE_READ_DEVICE,
+            &mut buf.0,
+            0,
+        );
+        assert_eq!((out.error, filled), (IoError::OK, n));
+        if n > 0 {
+            assert_eq!(&buf.0[..n], &data[at as usize..at as usize + n]);
+        }
+    }
+    assert_eq!(
+        f.simple(CLOSE, opened.value, b"", MODE_READ_DEVICE).error,
+        IoError::OK
+    );
+}

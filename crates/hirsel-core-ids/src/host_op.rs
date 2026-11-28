@@ -188,6 +188,9 @@ host_ops! {
 // their ordinals.
 pub const MODE_DURABLE: u8 = 5;
 pub const MODE_DIRECT: u8 = 6;
+pub const MODE_READ_DEVICE: u8 = 7;
+pub const DEVICE_READ_UNAVAILABLE: i32 = 0x40000001;
+pub const DEVICE_READ_EXTENT: u32 = 65536;
 pub const DIRECT_ALIGNMENT: u64 = 4096;
 
 /// A bit of the guest's Dir designation. Providers and tapes use only the underlying handle.
@@ -198,7 +201,7 @@ pub fn needs_writable_dir(op: u8, mode: u8) -> bool {
     matches!(
         op,
         MKDIR | MKDTEMP | MKSTEMP | REMOVE | REMOVE_TREE | RENAME
-    ) || (op == OPEN && mode != 0)
+    ) || (op == OPEN && !matches!(mode, 0 | MODE_READ_DEVICE))
 }
 
 /// A temporary name suffix must fit the 32 bytes guaranteed at entry.

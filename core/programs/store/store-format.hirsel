@@ -508,6 +508,7 @@ pub opaque type JournalInput {
     file: HostFile,
     size: u64,
     base: u64,
+    aligned: bool,
     chunk: Bytes,
     copy_to: Option[HostFile]
 }
@@ -683,7 +684,13 @@ pub fn open_journal_input(take file: HostFile, flush: bool, make_chunk: scoped f
     if list.len(chunk) != 0u64 {
         list.clear(mut chunk)
     }
-    Ok(JournalInput(file: take opened, size: file_stat.size, base: 0, chunk: take chunk, copy_to: None))
+    Ok(JournalInput(file: take opened, size: file_stat.size, base: 0, aligned: false, chunk: take chunk, copy_to: None))
+}
+
+pub fn open_device_input(take file: HostFile, make_chunk: scoped fn() -> Result[Bytes, types.Failure]) -> Result[JournalInput, types.Failure] waits {
+    let mut input = open_journal_input(take file, false, make_chunk)?
+    input.aligned = true
+    Ok(take input)
 }
 
 pub fn journal_input_size(input: JournalInput) -> u64 {
@@ -717,20 +724,26 @@ pub fn refill_journal_chunk(mut input: JournalInput, path: String, offset: u64) 
         return Ok(offset - input.base)
     }
     list.clear(mut input.chunk)
-    if (host.read_at(mut input.file, offset, mut input.chunk) ?=> Io) == 0 {
+    let base = if input.aligned {
+        offset - offset % list.capacity(input.chunk)
+    } else {
+        offset
+    }
+    if (host.read_at(mut input.file, base, mut input.chunk) ?=> Io) <= offset - base {
         return Error(disk_fault(path, offset, Truncated))
     }
     // The pack envelope consumes the entire file in order. Copy each
     // refill once, using the same bytes that the checksum pass reads.
     if let Some(mut output) = input.copy_to {
-        let width = order.min(list.len(input.chunk), input.size - offset)
-        match host.write(mut output, list.slice(input.chunk, 0, width)) {
+        let start = offset - base
+        let width = order.min(list.len(input.chunk) - start, input.size - offset)
+        match host.write(mut output, list.slice(input.chunk, start, start + width)) {
             Ok(()) => (),
             Error(problem) => return Error(Io(problem.error)),
         }
     }
-    input.base = offset
-    Ok(0u64)
+    input.base = base
+    Ok(offset - base)
 }
 
 pub fn refresh_journal_size(mut input: JournalInput, boundary: Option[u64]) -> Result[(), types.Failure] waits {

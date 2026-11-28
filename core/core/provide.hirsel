@@ -87,6 +87,8 @@ fn open_mode(w: u64) -> OpenMode {
         Durable
     } else if w == 6 {
         Direct
+    } else if w == 7 {
+        ReadDevice
     } else {
         ReadWrite
     }

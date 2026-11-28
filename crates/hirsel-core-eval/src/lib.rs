@@ -3672,13 +3672,6 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             "a counted operation names another kind than its alloc"
         );
     }
-    fn direct_buffer_aligned(&self, data: u64) -> bool {
-        let (block, offset) = split(data);
-        data == 0
-            || (self.mem[block].align.is_multiple_of(DIRECT_ALIGNMENT)
-                && (offset as u64).is_multiple_of(DIRECT_ALIGNMENT))
-    }
-
     fn block(&mut self, size: u64, limit: Option<Limit>, charge: u64, res: Option<Res>) -> u64 {
         // An admitted block the host cannot provide is a run stop, as for
         // `hirsel_core_alloc_admitted`, never `Capacity`: a refusal is the limit's

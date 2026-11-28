@@ -67,6 +67,7 @@ OPENAT2_TEST_CASES = {
         "exec_slots_tests::exec_starts_a_child_while_the_program_holds_more_than_open_max_descriptors",
         "tape::tests::sync::every_s1_kind_recorded_on_the_os_replays_with_no_host",
         "tape::tests::filesystem_observations_survive_removing_the_recorded_directory",
+        "host::linux::file::tests::device_reader_reports_support_and_reads_unaligned_eof",
     ] + [case for case in NATIVE_EXEC_TEST_CASES if case.startswith("provider_tests::")],
     "hirsel-core-driver-unittest": [
         "operator_cli::laws::slice1_resolve_identify_read",

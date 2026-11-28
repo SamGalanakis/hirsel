@@ -256,7 +256,9 @@ fn upkeep_scrub[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Res
             if started_ms < hd.upkeep.tour_from {
                 return Ok(false)
             }
-            match store.begin_maintenance_scrub(mut hd.db, started_ms) {
+            // An arriving write waits for this inline slice. Keep the head
+            // buffered; explicitly paced and operator scrub tours read the device.
+            match store.begin_maintenance_scrub_with_mode(mut hd.db, started_ms, Buffered) {
                 Ok(take tour) => {
                     hd.upkeep.tour_start_version = store.main_commit_version(hd.db)
                     hd.upkeep.tour_started_ms = started_ms

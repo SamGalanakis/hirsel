@@ -6,6 +6,8 @@ pub opaque type Scrub {
     packs: List[manifest.ScrubPack],
     position: u64,
     remaining: u64,
+    mode: ScrubMode,
+    provenance: Option[ScrubRead],
     at: u64,
     open: Option[manifest.ScrubInput],
     checked: u64,
@@ -15,18 +17,27 @@ pub opaque type Scrub {
     lease: Arc[manifest.ScrubLease]
 }
 
+pub type ScrubMode: key + send = Device | Buffered
+
+pub type ScrubRead: key + send = Direct | BufferedFallback | Buffered
+
 // generation is the cut whose listed packs the tour reads. checked counts
-// the bytes read so far. next is the lowest pack not yet finished, or None
+// the bytes examined so far. next names the current pack in tour order, or None
 // when the tour is done. faults holds what this step found, at most one per
 // pack: a fault ends that pack's tour.
 pub type ScrubReport: send {
     generation: u64,
     checked: u64,
     next: Option[u64],
+    provenance: Option[ScrubRead],
     faults: List[Fault]
 }
 
 pub fn begin_scrub(mut db: Db) -> Result[Scrub, Error] {
+    begin_scrub_with_mode(mut db, Device)
+}
+
+pub fn begin_scrub_with_mode(mut db: Db, mode: ScrubMode) -> Result[Scrub, Error] {
     healthy(db)?
     if !is_disk(db) {
         return Error(NotFound)
@@ -47,7 +58,7 @@ pub fn begin_scrub(mut db: Db) -> Result[Scrub, Error] {
         failure_result_from_rep(manifest.add_pack_scrub(mut state.packs, arc.share(lease)))
     })?
     let remaining = list.len(packs)
-    Ok(Scrub(d: log_directory(db)?, store: db.store, generation: db.accounting.checkpointed, next_stamp: next_stamp, packs: take packs, position: 0, remaining: remaining, at: 0, open: None, checked: 0, known: manifest.share_page_locations(manifest.pack_locations(disk_state(db).packs)), lease: take lease))
+    Ok(Scrub(d: log_directory(db)?, store: db.store, generation: db.accounting.checkpointed, next_stamp: next_stamp, packs: take packs, position: 0, remaining: remaining, mode: mode, provenance: None, at: 0, open: None, checked: 0, known: manifest.share_page_locations(manifest.pack_locations(disk_state(db).packs)), lease: take lease))
 }
 
 // Reads at least one frame, then stops once budget bytes are read this step.
@@ -77,7 +88,7 @@ pub fn scrub_step(mut tour: Scrub, budget: u64) -> Result[ScrubReport, Error] wa
     } else {
         None
     }
-    Ok(ScrubReport(generation: tour.generation, checked: tour.checked, next: pending, faults: take faults))
+    Ok(ScrubReport(generation: tour.generation, checked: tour.checked, next: pending, provenance: tour.provenance, faults: take faults))
 }
 
 fn scrub_finish_pack(mut tour: Scrub) -> Result[(), Error] waits {
@@ -107,8 +118,21 @@ fn scrub_next(mut tour: Scrub, mut spent: u64) -> Result[(), Error] waits {
     if unopened {
         let path = failure_result_from_rep(manifest.paged_pack_path(seq))?
         let expected = failure_result_from_rep(manifest.scrub_pack_pointers(tour.known, seq))?
-        let opened = failure_result_from_rep(manifest.disk_io(host.open(tour.d, path, Read)))?
-        let mut input = failure_result_from_rep(journal.journal_input(take opened, false))?
+        let (take opened, source) = scrub_open(tour.d, path, tour.mode)?
+        // One fallback makes the cumulative tour unsuitable as evidence of
+        // an all-device pass, even when later files support direct reads.
+        if tour.provenance != Some(BufferedFallback) {
+            tour.provenance = Some(source)
+        }
+        let mut input = if source == Direct {
+            failure_result_from_rep(format.open_device_input(take opened, fn() -> Result[Bytes, types.Failure] {
+                manifest.disk_allocation(fn() -> Result[Bytes, types.Failure] {
+                    Ok(list.with_capacity_aligned(journal.JOURNAL_CHUNK_BYTES, 65536))
+                })
+            }))?
+        } else {
+            failure_result_from_rep(journal.journal_input(take opened, false))?
+        }
         let header = failure_result_from_rep(manifest.disk_read_header(path, failure_result_from_rep(manifest.scrub_prefix(mut input, path, 0, 72, mut spent))?, 3, Some(seq), optional_store_key_to_rep(Some(tour.store))))?
         let index_at = tour.packs[tour.position].index
         tour.open = Some(failure_result_from_rep(manifest.scrub_input(take input, take path, header.context, manifest.pack_scan_indexed(class, tour.next_stamp, index_at), take expected))?)
@@ -127,5 +151,16 @@ fn scrub_next(mut tour: Scrub, mut spent: u64) -> Result[(), Error] waits {
         Ok(())
     } else {
         scrub_finish_pack(mut tour)
+    }
+}
+
+fn scrub_open(dir: Dir, path: String, mode: ScrubMode) -> Result[(HostFile, ScrubRead), Error] waits {
+    if mode == Buffered {
+        return Ok((host.open(dir, path, Read) ?=> Io, Buffered))
+    }
+    match host.open(dir, path, ReadDevice) {
+        Ok(take file) => Ok((take file, Direct)),
+        Error(Other(code)) if code == host.DEVICE_READ_UNAVAILABLE => Ok((host.open(dir, path, Read) ?=> Io, BufferedFallback)),
+        Error(e) => Error(Io(e)),
     }
 }

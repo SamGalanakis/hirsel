@@ -55,6 +55,7 @@ struct File {
 }
 const DURABLE: u8 = 5;
 const DIRECT: u8 = 6;
+const READ_DEVICE: u8 = 7;
 const TRY_LOCK_SHARED: u8 = 172;
 const ZERO_AT: u8 = 173;
 
@@ -136,7 +137,10 @@ impl Bridge {
     ) -> Outcome {
         if self.read_only.is_some() {
             assert!(op != 4, "read-only open tried to lock exclusively");
-            assert!(op != 0 || mode == 0, "read-only open opened a writer");
+            assert!(
+                op != 0 || matches!(mode, 0 | READ_DEVICE),
+                "read-only open opened a writer"
+            );
         }
         // A crashed process closes descriptors without changing the filesystem.
         if op == 3 {
@@ -257,8 +261,17 @@ impl Bridge {
             0 => {
                 let name = name();
                 let exists = self.exists(&name);
-                if !exists && mode == 0 {
+                if !exists && matches!(mode, 0 | READ_DEVICE) {
                     return Self::error(1);
+                }
+                if mode == READ_DEVICE {
+                    return Outcome {
+                        error: Error {
+                            tag: 5,
+                            code: 0x40000001,
+                        },
+                        ..Outcome::default()
+                    };
                 }
                 if exists && mode == 3 {
                     return Self::error(3);

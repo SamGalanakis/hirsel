@@ -62,14 +62,19 @@ pub(crate) fn finish_write(fd: RawFd, mode: u8, out: &mut Outcome) {
 /// alignment contract itself, as on every host. A file system that refuses
 /// the hint keeps a buffered handle, which has the same contract.
 pub(crate) fn enable_direct(fd: BorrowedFd<'_>, _flags: i32) -> io::Result<()> {
+    enable_device_read(fd).map(|_| ())
+}
+
+pub(crate) fn enable_device_read(fd: BorrowedFd<'_>) -> io::Result<bool> {
     // SAFETY: fd is the exclusive live open file description from open.
     if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_NOCACHE, 1) } < 0 {
         let error = io::Error::last_os_error();
-        if !matches!(error.raw_os_error(), Some(libc::EINVAL | libc::ENOTSUP)) {
-            return Err(error);
+        if matches!(error.raw_os_error(), Some(libc::EINVAL | libc::ENOTSUP)) {
+            return Ok(false);
         }
+        return Err(error);
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Darwin's extended ranges are not trusted to read back zeros after a crash

@@ -249,6 +249,7 @@ fn open(mut fs: Fs, mut session: Session, dir: u64, p: String, mode: OpenMode, s
     let leaf = path.name(p)
     let id = session.next_id
     let (readable, writable, append, create, truncate, durable, direct) = match mode {
+        ReadDevice => (true, false, false, false, false, false, false),
         Read => (true, false, false, false, false, false, false),
         Write => (false, true, false, false, true, false, false),
         ReadWrite => (true, true, false, false, false, false, false),
@@ -278,6 +279,10 @@ fn open(mut fs: Fs, mut session: Session, dir: u64, p: String, mode: OpenMode, s
             }
             list.len(fs.nodes)
         }
+    }
+    if let ReadDevice = mode {
+        let _ = answer(mut s, take c, Failed(Other(host.DEVICE_READ_UNAVAILABLE)))
+        return
     }
     map.reserve(mut session.files, 1)
     let seq = fs.sequence + 1

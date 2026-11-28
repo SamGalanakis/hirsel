@@ -1,0 +1,54 @@
+fn device_server(take port: Served[DirOp]) waits {
+    let mut server = take port
+    loop {
+        let Some(take call) = provide.next(mut server) else {
+            break
+        }
+        let answer: DirReply = match provide.dir_op(call) {
+            Open(mode: ReadDevice, ..) => File(1),
+            ReadAt(at: 0, ..) => Count(0),
+            Write(..) => Count(1),
+            Close(..) => Done,
+            _ => fail("unexpected provider request"),
+        }
+        let finished = match provide.dir_op(call) {
+            Close(..) => true,
+            _ => false
+        }
+        let _ = provide.reply(mut server, take call, provide.dir_reply(answer))
+        if finished {
+            break
+        }
+    }
+}
+
+// expect: run device_read_contract(tasks) = true
+fn device_read_contract(tasks: Tasks) -> bool waits {
+    let (d, port) = provide.dir(bytes 4096)
+    let t = task.spawn(tasks, bytes 32768, take port, device_server)
+    let mut file = result.unwrap(host.open(d, "pack", ReadDevice))
+    match host.write(mut file, b"x") {
+        Error(WriteError(written: 0, error: Denied)) => (),
+        _ => fail("ReadDevice admitted write"),
+    }
+    let mut zero: Bytes = list.new()
+    match host.read_at(mut file, 0, mut zero) {
+        Error(Other(22)) => (),
+        _ => return false,
+    }
+    let mut extent: Bytes = list.with_capacity_aligned(65536, 65536)
+    match host.read(mut file, mut extent) {
+        Error(Other(22)) => (),
+        _ => return false,
+    }
+    if result.unwrap(host.read_at(mut file, 0, mut extent)) != 0 {
+        return false
+    }
+    match host.read_at(mut file, 1, mut extent) {
+        Error(Other(22)) => (),
+        _ => return false,
+    }
+    result.unwrap(host.close(take file))
+    result.unwrap(task.join(take t))
+    true
+}

@@ -103,6 +103,14 @@ impl VirtualCell {
 }
 
 impl Machine<'_> {
+    pub(super) fn direct_buffer_aligned(&self, data: u64, used: u64, align: u64) -> bool {
+        if data == 0 {
+            return used == 0;
+        }
+        let (block, offset) = split(data);
+        self.mem[block].align.is_multiple_of(align) && (offset as u64 + used).is_multiple_of(align)
+    }
+
     pub(super) fn read_call_payload(
         &mut self,
         key: u64,
@@ -181,6 +189,26 @@ impl Machine<'_> {
             }
             _ => {}
         }
+        if matches!(op, HostOp::Read | HostOp::ReadAt)
+            && let VirtualCell::Port { handles, .. } = &self.host.world.cells[c]
+            && handles.get(&h).is_some_and(|handle| {
+                handle.file_mode == hirsel_core_ids::host_op::MODE_READ_DEVICE
+            })
+        {
+            if op == HostOp::Read {
+                return Ok(vec![0, OTHER, 22, 0]);
+            }
+            let data = self.load(a[2], 8);
+            let len = self.load(a[2] + 8, 8);
+            let cap = self.load(a[2] + 16, 8);
+            let align = u64::from(hirsel_core_ids::host_op::DEVICE_READ_EXTENT);
+            if !self.direct_buffer_aligned(data, len, align)
+                || !(cap - len).is_multiple_of(align)
+                || !a[1].is_multiple_of(align)
+            {
+                return Ok(vec![0, OTHER, 22, 0]);
+            }
+        }
         if matches!(op, HostOp::WriteAt | HostOp::ZeroAt)
             && let VirtualCell::Port { handles, .. } = &self.host.world.cells[c]
             && let Some(handle) = handles.get(&h)
@@ -196,7 +224,7 @@ impl Machine<'_> {
                 let (_, data, len, _) = self.carrier(a[2]);
                 if !a[1].is_multiple_of(DIRECT_ALIGNMENT)
                     || !len.is_multiple_of(DIRECT_ALIGNMENT)
-                    || !self.direct_buffer_aligned(data)
+                    || !self.direct_buffer_aligned(data, 0, DIRECT_ALIGNMENT)
                 {
                     return Ok(vec![0, OTHER, 22, 0]);
                 }
@@ -273,7 +301,8 @@ impl Machine<'_> {
                 let (_, file) = self.port_handle(answer[0]).expect("a registered file");
                 let (_, handles, ..) = self.host.world.cells[c].port();
                 let handle = handles.get_mut(&file).unwrap();
-                handle.read_only_file = narrow;
+                handle.read_only_file =
+                    narrow || a[2] as u8 == hirsel_core_ids::host_op::MODE_READ_DEVICE;
                 handle.file_mode = a[2] as u8;
             } else if narrow && matches!(op, HostOp::OpenDir | HostOp::Mkdtemp) {
                 answer[0] |= DIR_READ_ONLY;

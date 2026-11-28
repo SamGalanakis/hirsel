@@ -36,6 +36,51 @@ pub(crate) fn sync_directory(fd: RawFd) -> i32 {
 #[inline(always)]
 pub(crate) fn finish_write(_fd: RawFd, _mode: u8, _out: &mut Outcome) {}
 
+/// Require a cache-bypassing descriptor compatible with the charged scrub extent.
+/// tmpfs accepts O_DIRECT on some kernels but has no underlying device.
+pub(crate) fn enable_device_read(fd: BorrowedFd<'_>) -> io::Result<bool> {
+    let mut fs = std::mem::MaybeUninit::uninit();
+    // SAFETY: fd stays live and fstatfs initializes the output on success.
+    if unsafe { libc::fstatfs(fd.as_raw_fd(), fs.as_mut_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if matches!(
+        unsafe { fs.assume_init() }.f_type,
+        libc::TMPFS_MAGIC | 0x858458f6
+    ) {
+        return Ok(false);
+    }
+    let extent = crate::provider::DEVICE_READ_EXTENT;
+    let st = statx_fd(fd, libc::STATX_DIOALIGN)?;
+    if st.stx_mask & libc::STATX_DIOALIGN != 0 {
+        if st.stx_dio_mem_align == 0 && st.stx_dio_offset_align == 0 {
+            return Ok(false);
+        }
+        if ![st.stx_dio_mem_align, st.stx_dio_offset_align]
+            .into_iter()
+            .all(|align| align != 0 && extent.is_multiple_of(align))
+        {
+            return Err(io::Error::from_raw_os_error(libc::EOVERFLOW));
+        }
+    } else {
+        // Older filesystems omit DIOALIGN. Use a page-aligned extent and
+        // let the device refuse any read whose requirements exceed it.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if page <= 0 || !u64::from(extent).is_multiple_of(page as u64) {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+    }
+    // SAFETY: a freshly opened, read-only description, exclusively held here.
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_DIRECT) } < 0 {
+        let error = io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(libc::EINVAL | libc::EOPNOTSUPP)) {
+            return Ok(false);
+        }
+        return Err(error);
+    }
+    Ok(true)
+}
+
 /// Switch a `Direct` handle with open status `flags` to `O_DIRECT` when the
 /// file system's direct-I/O alignment divides the Store's. Otherwise it stays
 /// a buffered `O_DSYNC` handle, which keeps the same completion contract.

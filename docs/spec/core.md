@@ -486,6 +486,14 @@ operations it names; nothing else about them may be inferred from an implementat
   effect, and its one line names the cause, `Dir requires openat2 (Linux 5.6 or later,
   permitted by the sandbox)`. A run granted no `Dir` does not probe.
   `OpenMode`:
+  `ReadDevice` opens an existing file read-only with Linux `O_DIRECT` or Darwin
+  `F_NOCACHE`. `read_at` requires the offset, spare length and start of spare storage to be
+  multiples of 65,536. A final read can return fewer bytes at EOF. An unaligned
+  read or a sequential `read` returns `Other(22)`. The Linux
+  provider checks published direct-I/O alignment before accepting the file.
+  `Other(host.DEVICE_READ_UNAVAILABLE)` identifies a filesystem that cannot
+  supply this mode, including memory filesystems and the in-memory providers.
+  Other open and read failures retain their usual errors.
   `Read` opens an existing file for reading (`NotFound` when absent); `Write` opens for
   writing, creating the file when absent and emptying it otherwise; `Append` opens for
   writing at the end, creating it when absent; `CreateNew` creates a file for writing and

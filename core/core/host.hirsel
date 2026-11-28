@@ -1,5 +1,9 @@
 // Module `host`: the provider operations (CAP-5), with `stdout.write`,
 // `stdout.write_bytes`, `stderr.write` and `stderr.write_bytes`, exactly these.
+// Other(DEVICE_READ_UNAVAILABLE) from ReadDevice means this file system
+// cannot supply an uncached read. Other failures retain their host error.
+pub const DEVICE_READ_UNAVAILABLE: u32 = 0x40000001
+
 pub fn open(d: Dir, p: String, mode: OpenMode) -> Result[HostFile, IoError] waits
 
 /// Appends into spare capacity. Ok(0) means EOF. No room gives Error(Other(22)).

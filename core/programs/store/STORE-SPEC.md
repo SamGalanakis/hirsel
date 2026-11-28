@@ -3436,7 +3436,10 @@ pub type ServeError = Before(Error, Option[Pending]) | After(Error)   // Some(p)
 pub type Looked[R] = Seen(Seen[R]) | Failed(StoreFailure, List[Read]) | Refused(StoreCapacity, List[Read]) | Stopped(core.OutOfTime, List[Read])   // v2.73: every end carries its reads (§1.5)
 pub type DeployError = … | FullNew(StoreCapacity)                  // §3.5a; its other cases unchanged
 pub opaque type Scrub                                              // v2.42, §11.17: one tour; dropping it ends its lease
-pub type ScrubReport { generation: u64, checked: u64, next: Option[u64], faults: List[Fault] }
+pub type ScrubMode = Device | Buffered
+pub type ScrubRead = Direct | BufferedFallback | Buffered
+pub type ScrubReport { generation: u64, checked: u64, next: Option[u64], provenance: Option[ScrubRead], faults: List[Fault] }
+pub fn begin_scrub_with_mode(mut db: Db, mode: ScrubMode) -> Result[Scrub, Error]
 pub fn begin_scrub(mut db: Db) -> Result[Scrub, Error]            // NotFound on a memory store, Poisoned(e) on a poisoned Db
 pub fn scrub_step(mut tour: Scrub, budget: u64) -> Result[ScrubReport, Error] waits
 ```
@@ -3458,7 +3461,7 @@ pub fn scrub_step(mut tour: Scrub, budget: u64) -> Result[ScrubReport, Error] wa
 
 Open checks every listed pack once. After that, the Store answers from resident pages, so damage to the on-disk copy stays hidden until the next open. A scrub rereads that copy while the Store stays open. An operator requests it and paces it. It is a diagnostic: it detects damage and does not repair it. Repair needs a separately verified copy. TigerBeetle's grid scrubber (`src/vsr/grid_scrubber.zig`) also bypasses the block cache and tracks blocks that a concurrent checkpoint releases.
 
-**Begin.** `begin_scrub(mut db)` captures the current generation: `generation` (the cut count), the listed pack inventory with each pack's class, frame count and payload bytes, the next stamp, and a share of the generation's frame records. The share is a persistent-index share, so capturing it copies nothing. The tour holds `Dir`. It reads files by name and uses no resident page body. A memory store returns `NotFound`, and a poisoned Db returns `Poisoned(e)`. Any number of tours may run at once, and each holds its own lease.
+**Begin.** `begin_scrub(mut db)` captures the current generation: `generation` (the cut count), the listed pack inventory with each pack's class, frame count and payload bytes, the next stamp, and a share of the generation's frame records. The share is a persistent-index share, so capturing it copies nothing. The tour holds `Dir`. It reads files by name and uses no resident page body. Device mode requests an uncached descriptor for each pack and fills a single charged, 65,536-byte aligned chunk at an aligned file offset. A final short extent contains only the file bytes returned. `checked` counts the bytes examined by the verifier. `provenance` is `None` before the first pack opens, `Direct` for an all-device tour, or `BufferedFallback` once any pack's filesystem refuses uncached reads. Explicit buffered tours report `Buffered`. Manual and paced tours request device reads by default. Runner uses buffered reads for the idle slice that runs on its write-serving head. Other I/O errors propagate. A memory store returns `NotFound`, and a poisoned Db returns `Poisoned(e)`. Any number of tours may run at once, and each holds its own lease.
 
 **Lease.** The Db and the tour each hold a share of the tour's lease, which lists the captured packs. A cut that retires a leased pack keeps the file and carries the retirement, as §3.5a does for an export lease. Every cut first drops each lease that only the Db still holds, because its tour has been dropped. The first cut after a tour ends unlinks the packs that tour held back. While a tour lives, disk holds at most its generation's packs plus whatever later cuts write. The tour does not lease journal segments, because it does not read them. A tour that outlives `close` has no lease. The next opener may then remove a retired pack, and the step that would read it returns `Io(NotFound)`.
 

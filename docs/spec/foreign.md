@@ -13,8 +13,9 @@ test pass.
 FFI-1 to FFI-9 govern native archives. The [`sqlite` package](#the-sqlite-package) is the
 acceptance consumer. FFI-10 to FFI-16 govern [contained foreign code](#contained-foreign-code).
 The contained module runs as WebAssembly in the embedded Wasmtime and stays inside replay.
-The foreign examples keep the `` ```hirsel unbuilt `` marker because the fence checker
-cannot supply their manifest. The foreign laws check the examples' refusal cases.
+The [native examples](../../core/programs/ffi_laws/VERIFICATION.md#package-context-examples)
+use a package manifest to identify the foreign module. The front fixtures check the
+refusal cases.
 
 ## Trust
 
@@ -78,27 +79,23 @@ call expression. Naming it from another package, as a function value, or as the 
 `code.describe` is refused here, at the name. The owning package's other modules are its
 **wrapper**, and they are the only way any other package reaches the native code.
 
-The package's manifest ([packages](packages.md#2-hirseltoml)) marks a module foreign with a
-`[foreign."<module path>"]` table. The module must be formed by exactly one `[sources]` file,
-and no `[tests.sources]` file may join it.
+[The package manifest](packages.md#2-hirselhcfg) lists the module in `Package.foreign`.
+Its `Package.sources` supplies exactly one file for the module. `Tests.sources`
+cannot add a file to it.
 
-```text
-[sources]
-"sqlite.hirsel" = "sqlite"
-"native.hirsel" = "native"
-
-[foreign.native]
-symbols = "hsq_"
-archives = [
-  { target = "x86_64-unknown-linux-gnu",
-    file = "native/x86_64-unknown-linux-gnu/libhirsel_sqlite.a",
-    sha256 = "<64 lower-case hex digits>" },
-]
+```hcfg
+foreign: Some([
+    ("native", Native(symbols: "hsq_", archives: [
+        ArchiveFile(target: "x86_64-unknown-linux-gnu",
+                    file: "native/x86_64-unknown-linux-gnu/libhirsel_sqlite.a",
+                    sha256: "<64 lower-case hex digits>"),
+    ])),
+]),
 ```
 
 - `symbols` is the module's **symbol prefix**. It is 1 to 32 bytes of ASCII letters, digits
   and `_`, and it starts with a letter. Foreign function `f` is the C symbol whose name is the
-  prefix followed by `f`, so `native.open_memory` above is `hsq_open_memory`. Two foreign
+  prefix followed by `f`. In the SQLite wrapper, `native.open_memory` names `hsq_open_memory`. Two foreign
   modules in one program with the same prefix are refused here, at the second prefix, with
   the first one as the causal site.
 - `archives` is the **archive table**. It has one row per full target triple, for example
@@ -112,8 +109,8 @@ archives = [
   ([packages](packages.md#1-canonical-library-content)). One file is named by one row of the
   package, and the source and archive paths of a package form one case-folded tree. `sha256` is
   the SHA-256 of the file's raw bytes.
-- A `[foreign]` key that names no module of `[sources]`, a module formed by more than one
-  file, or a module that a test-only file joins is refused as a bad field
+- A `Package.foreign` key that names no source module, a module formed by more than one
+  source file, or a module that a test-only file joins is refused as a bad field
   ([packages](packages.md#9-diagnostics)), for example
   `hirsel: sqlite/hirsel.hcfg: foreign.native: module native is formed by 2 files`.
 
@@ -121,25 +118,6 @@ A published library's content `C` holds each foreign module's prefix, its archiv
 the archives' bytes ([packages](packages.md#1-canonical-library-content)), so its root pins
 exactly the audited archives. The pin covers every byte the linker reads, because FFI-3 admits
 only self-contained archives whose members are inside those bytes.
-
-```hirsel unbuilt
-// native.hirsel, module native of package sqlite, marked foreign
-pub fn open_memory(f: Foreign[sqlite.Sqlite], mut e: Bytes) -> Option[foreign.Ptr[sqlite.DbHandle]] waits
-pub fn exec(f: Foreign[sqlite.Sqlite], db: foreign.Ptr[sqlite.DbHandle], sql: Bytes, mut e: Bytes) -> i32 waits
-pub fn close(f: Foreign[sqlite.Sqlite], take db: foreign.Ptr[sqlite.DbHandle]) -> i32 waits
-```
-```hirsel unbuilt
-// native.hirsel, marked foreign
-pub fn version(f: Foreign[sqlite.Sqlite]) -> i32 { 3 }          // refused: FFI-2, a foreign function has no body
-```
-```hirsel unbuilt
-// in package app, which depends on sqlite
-fn v(f: Foreign[sqlite.Sqlite]) -> i32 { sqlite.native.version(f) }   // refused: FFI-2, native is private to sqlite
-```
-```hirsel unbuilt
-// in module sqlite of package sqlite
-fn later(f: Foreign[Sqlite]) -> fn(Foreign[Sqlite]) -> i32 { native.version }   // refused: FFI-2, a foreign function is only called
-```
 
 A foreign function's `waits` is as written ([LANG-8](language.md#lang-8-signatures)). A call
 of one takes one step, as a core function's call does, whatever the native code does
@@ -152,7 +130,7 @@ archive for the build's target. Before the linker runs, and before any object is
 for linking, the driver checks each such module, in ascending order of module definition
 identity, and refuses the build at the first failed check:
 
-| check | refused with (site: the archive row, or the `[foreign]` table when no row exists) |
+| check | refused with (site: the archive row, or the `Package.foreign` entry when no row exists) |
 |---|---|
 | the table has a row for the build's full target | `FFI-3: P has no archive for target T; its archives are for T1, T2` (all the targets, in ascending order; `none` when the table is empty) |
 | its SHA-256 equals the pin | `FFI-3: archive F of P for T does not match its pin: expected sha256 E, found sha256 O` |
@@ -281,8 +259,7 @@ and byte length, in strictly ascending order of hash. A binding selects the pinn
 of its interface whether or not the entry reaches a call to it. Only reach places functions
 in leaves. An archive's bytes are an object of the code store, named
 by that SHA-256, and they are transferred, reserved, collected and reassembled as the
-recipe's other objects are. The recipe's root is `R = H("hirsel.release-recipe.v5", recipe)`
-([launch](launch.md#release-recipe-and-host-assembly)); the version-1 to version-4 domains are never reused. A recipe with a foreign leaf has no `Replay` export. A program that reaches no foreign function has an empty foreign modules part.
+recipe's other objects are. [Launch](launch.md#release-recipe-and-host-assembly) defines the recipe root. A program that reaches no foreign function has an empty foreign modules part.
 Its foreign archives part holds the pins its entry grants select, if any. Recipe admission walks the leaves as launch's admission steps 6 and 7 say. So
 `hirsel build --recipe R` links exactly the pinned bytes the addresses select, and two
 programs that differ only in an archive have different roots.
@@ -332,13 +309,6 @@ The argument is erased at the C boundary and passes nothing to the callee. A wra
 keeps a connection open stores the capability in the resource, and the resource's finalizer
 uses it from there ([FAIL-11](failure.md#fail-11-resources)).
 
-```hirsel unbuilt
-pub fn main(out: Stdout, db: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.SqliteError] waits {
-  let mut c = sqlite.open_memory(db)?
-  sqlite.exec(mut c, "create table t (x integer)")?
-  sqlite.close(take c)
-}
-```
 ```hirsel
 type Mine {}
 fn f(x: Foreign[Mine]) -> u64 { 0 }                              // refused: FFI-4, Mine is not an interface
@@ -403,22 +373,6 @@ is parked is another task reading through an `Arc` payload, which is immutable
 ([CONC-12](tasks.md#conc-12-no-shared-mutable-state)). So an immutable loan can only be read
 alongside, and nothing else can touch an exclusive one. A loan ends when the C function
 returns. Keeping its pointer past that point breaks the native contract (FFI-1).
-
-```hirsel unbuilt
-// in the wrapper: copy a column's bytes out through an exclusive loan
-fn column(f: Foreign[Sqlite], s: foreign.Ptr[StmtHandle], i: u32, mut out: Bytes) -> i32 waits {
-  let mut e: Bytes = error_buffer()
-  let n = native.column_len(f, s, i, mut e)       // -1 on failure, the error in e
-  if n < 0 { return 1 }
-  let start = list.len(out)
-  list.fill(mut out, int.narrow(n), 0)
-  native.column_copy(f, s, i, mut out, start, mut e)   // C writes bytes start .. start + n
-}
-```
-```hirsel unbuilt
-// native.hirsel, marked foreign
-pub fn name(f: Foreign[sqlite.Sqlite], s: String) -> i32       // refused: FFI-5, String is not a foreign type
-```
 
 ### FFI-6: Handles
 
@@ -527,21 +481,6 @@ to the run's end. A run stop and termination by the host run no release: the pro
 is the only one then. Hirsel guarantees that a handle reaches a release at most once and is
 never used after one.
 
-```hirsel unbuilt
-// in module sqlite of package sqlite
-pub opaque type DbHandle {}
-pub opaque resource type Db: send { f: Foreign[Sqlite], p: foreign.Ptr[DbHandle] }
-  drop(d) { let _ = native.close(d.f, d.p) }
-```
-```hirsel unbuilt
-// in module sqlite of package sqlite
-pub type Leak { p: foreign.Ptr[DbHandle] }                        // refused: FFI-6, a handle field outside a resource
-```
-```hirsel unbuilt
-// in module sqlite of package sqlite
-pub fn raw(d: Db) -> foreign.Ptr[DbHandle] { d.p }                // refused: FFI-6, a handle in a pub signature
-```
-
 ### FFI-7: Host stack and `waits`
 
 A foreign function not declared `waits` runs on the native stack of the thread that runs the
@@ -589,7 +528,7 @@ fifth, and the queue always moves. A package whose native library needs one call
 another unissued one, such as a lock released only by a later call, cannot be audited for v1.
 SQLite meets it: two calls on one connection wait only for each other's issued C on the
 connection's mutex, it has no busy handler, its only sleep is the finite WAL read retry on
-the Directory VFS, and its file locks never block.
+the Directory VFS, and its file locks never block (slice 2).
 While a helper runs, the other tasks keep running. **Shutdown with a call in flight**: a run
 ends only after its tasks end, and a task parked in a `waits` call ends only after delivery.
 Its own cancellation and cleanup wait for C as well
@@ -751,60 +690,8 @@ calls `sqlite3_close(db)` once. Temporary storage is in memory (`SQLITE_TEMP_STO
 
 The public API, in module `sqlite`:
 
-```hirsel unbuilt
-pub opaque type Sqlite {}
-pub opaque type DbHandle {}
-pub opaque type StmtHandle {}
-pub type SqliteError { code: i32, message: String }
-pub type Step = Row | Done
-pub opaque resource type Db: send { f: Foreign[Sqlite], p: foreign.Ptr[DbHandle] }
-  drop(d) { let _ = native.close(d.f, d.p) }
-pub opaque resource type Stmt: send { f: Foreign[Sqlite], p: foreign.Ptr[StmtHandle] }
-  drop(s) { let _ = native.finalize(s.f, s.p) }
-pub fn open_memory(f: Foreign[Sqlite]) -> Result[Db, SqliteError] waits
-pub fn exec(mut db: Db, sql: String) -> Result[(), SqliteError] waits
-pub fn prepare(mut db: Db, sql: String) -> Result[Stmt, SqliteError] waits
-pub fn bind_i64(mut s: Stmt, i: u32, v: i64) -> Result[(), SqliteError] waits
-pub fn bind_f64(mut s: Stmt, i: u32, v: f64) -> Result[(), SqliteError] waits
-pub fn bind_bytes(mut s: Stmt, i: u32, v: Bytes) -> Result[(), SqliteError] waits
-pub fn bind_text(mut s: Stmt, i: u32, v: String) -> Result[(), SqliteError] waits
-pub fn bind_null(mut s: Stmt, i: u32) -> Result[(), SqliteError] waits
-pub fn step(mut s: Stmt) -> Result[Step, SqliteError] waits
-pub fn column_kind(mut s: Stmt, i: u32) -> Kind waits
-pub fn column_i64(mut s: Stmt, i: u32) -> i64 waits
-pub fn column_f64(mut s: Stmt, i: u32) -> f64 waits
-pub fn column_bytes(mut s: Stmt, i: u32, mut out: Bytes) -> Result[(), SqliteError] waits
-pub fn reset(mut s: Stmt) -> Result[(), SqliteError] waits
-pub fn finalize(take s: Stmt) -> Result[(), SqliteError] waits
-pub fn close(take db: Db) -> Result[(), SqliteError] waits
-pub type Kind = Integer | Float | Text | Blob | Null
-```
-
 The foreign module `native`, prefix `hsq_`, has exactly these functions. Every one is `waits`
 except `errstr`, and every `e` is an error buffer:
-
-```hirsel unbuilt
-// native.hirsel, module native of package sqlite, marked foreign
-pub fn open_memory(f: Foreign[sqlite.Sqlite], mut e: Bytes) -> Option[foreign.Ptr[sqlite.DbHandle]] waits
-pub fn exec(f: Foreign[sqlite.Sqlite], db: foreign.Ptr[sqlite.DbHandle], sql: Bytes, mut e: Bytes) -> i32 waits
-pub fn prepare(f: Foreign[sqlite.Sqlite], db: foreign.Ptr[sqlite.DbHandle], sql: Bytes, mut e: Bytes) -> Option[foreign.Ptr[sqlite.StmtHandle]] waits
-pub fn column_count(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle]) -> u32 waits
-pub fn bind_i64(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32, v: i64, mut e: Bytes) -> i32 waits
-pub fn bind_f64(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32, v: f64, mut e: Bytes) -> i32 waits
-pub fn bind_blob(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32, v: Bytes, mut e: Bytes) -> i32 waits
-pub fn bind_text(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32, v: Bytes, mut e: Bytes) -> i32 waits
-pub fn bind_null(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32, mut e: Bytes) -> i32 waits
-pub fn step(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], mut e: Bytes) -> i32 waits
-pub fn column_kind(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32) -> i32 waits
-pub fn column_i64(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32) -> i64 waits
-pub fn column_f64(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32) -> f64 waits
-pub fn column_len(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32, mut e: Bytes) -> i64 waits
-pub fn column_copy(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], i: u32, mut out: Bytes, start: u64, mut e: Bytes) -> i32 waits
-pub fn reset(f: Foreign[sqlite.Sqlite], s: foreign.Ptr[sqlite.StmtHandle], mut e: Bytes) -> i32 waits
-pub fn finalize(f: Foreign[sqlite.Sqlite], take s: foreign.Ptr[sqlite.StmtHandle]) -> i32 waits
-pub fn close(f: Foreign[sqlite.Sqlite], take db: foreign.Ptr[sqlite.DbHandle]) -> i32 waits
-pub fn errstr(f: Foreign[sqlite.Sqlite], code: i32, mut e: Bytes)
-```
 
 - **Contract.** Every public function that passes a handle is `waits`, `bind_` and `column_`
   included: under the serialized mutex a bind can wait for a long query on another statement
@@ -1009,20 +896,11 @@ results are a function of its inputs, so a program that reaches only contained c
 SEM-8, recording and replay. A test that calls contained code takes `Foreign[I]`, so PROG-4
 never reuses its pass (FFI-14).
 
-**Status: slice W1 in progress.** A manifest's `containment` key is parsed (FFI-10), a build
-that reaches a contained module admits it (FFI-11) and compiles it for Linux targets, and its
-calls run in the calling task's own instance with loans, handles and traps (FFI-12, FFI-14,
-FFI-15), metered by fuel into steps, slice ends and byte charges (FFI-13). A program that
-reaches only contained code is recorded and replayed (FFI-14). A test can take its
-contained `Foreign[I]` grant from its test configuration alone. Deploy accepts the
-contained binding, and the driver emits no `foreign:` line for it (FFI-14). A build
-keeps each artifact in its part cache (FFI-15 Caching), and a recipe pins the module
-and rebuilds it from the code store (FFI-16). Darwin images remain planned for W2.
+The native compiler and runtime support contained modules on Linux x86-64 and AArch64.
 
 ### FFI-10: Contained modules and their build
 
-A foreign module is contained when its `[foreign."<module path>"]` table holds
-`containment = "wasm"`. With that key, the table holds a `module` row in place of `archives`:
+A `Package.foreign` row selects the `Contained` variant to bind a Wasm module.
 
 ```hcfg
 foreign: Some([
@@ -1030,54 +908,24 @@ foreign: Some([
 ]),
 ```
 
-- `containment` takes the one value `"wasm"`. When the key is absent, the module is native
-  (FFI-2 and FFI-3). Any other value is refused as a bad field, and so are a contained table
-  that also holds `archives` and one that has no `module`. In
-  `hirsel: P/hirsel.hcfg: foreign.native: containment: expected "wasm"`, `P` is the package.
-- `module` is one row, with no target. A Wasm module runs unchanged on every target, so one pin
-  covers them all. `file` ends in `.wasm`, follows the packages chapter's path rules, and is
-  captured by its reading rule. `sha256` is the SHA-256 of the file's raw bytes.
-- **Package identity.** A published library's content `C` holds the module's bytes and its
-  pin, so its library root pins exactly that module. At W1, `C`'s encoding version becomes 2
-  ([packages](packages.md#1-canonical-library-content)): in item 6, each foreign module's
-  symbol prefix is followed by a containment tag. Tag `0` is followed by the archive rows as
-  version 1 writes them. Tag `1` is followed by the module row: the file's path (a text), the
-  32-byte pin, and the module's bytes (their length as a number, then the raw bytes). Readers
-  accept only version 2 from then on, and libraries published under version 1 are republished.
-  There is no dual reader.
-- `symbols` stays the module's symbol prefix. Foreign function `f` is the **export** whose
+- `file` ends in `.wasm` and follows the Packages path and capture rules. `sha256`
+  pins the raw bytes. One module row serves every supported target.
+- [Canonical package content](packages.md#1-canonical-library-content) binds the
+  contained module's path, pin and bytes in its foreign-module row.
+- `symbols` gives the module's symbol prefix. Foreign function `f` is the **export** whose
   name is the prefix followed by `f`.
 
-**The build pipeline.** The module is a WebAssembly 1.0 core module in the binary format, never
-a component. The package's directory keeps the sources and a `build.sh`, and it rebuilds the
-`.wasm` from them byte for byte, as `sqlite`'s pinned build does. The supported pipelines are
-these:
-
-- **C or C++** with the repository's pinned LLVM (`tools/buck2/bootstrap_llvm.py`):
-  `clang --target=wasm32-unknown-unknown -nostdlib -O2 -fno-ident
-  -ffile-prefix-map=$PWD=.`, with the freestanding parts of a libc built in, then `wasm-ld
-  --no-entry --export=<each symbol> --export=<prefix>loan_area --strip-debug` (exports are
-  only the named ones, since `--no-export-dynamic` <!-- doc-ref: external --> is wasm-ld's default). A library that needs a hosted libc takes `--target=wasm32-wasip1` and a
-  pinned wasi-libc sysroot. Its WASI imports are then held to the null imports below.
-- **Rust**: `cargo build --target wasm32-unknown-unknown --release` with `panic = "abort"`, or
-  `wasm32-wasip1` held to the null imports.
-
-The adapter includes the header that `hirsel inspect --foreign-header P` prints. For a
-contained module, that header declares every pointer as a 32-bit linear-memory address and
-defines no `HIRSEL_ABI_TEXT`: a C section attribute does not make a Wasm custom section. With
-clang and wasm-ld 21, `__attribute__((section("hirsel_abi")))` lands in a data segment of
-that name. The build's last step adds the ABI text instead, as `llvm-objcopy
---add-section=hirsel_abi=abi.txt`, which writes a Wasm custom section (checked with LLVM 21's
-`llvm-objcopy`). `abi.txt` holds exactly the bytes that `hirsel inspect --foreign-abi P` <!-- doc-ref: planned -->
-prints. A Rust module can instead use `#[link_section = "hirsel_abi"]`
-on a byte array. FFI-11 then binds the module to its headers, as FFI-3 binds an archive.
+The [Wasm fixture build](../../core/programs/wasm_laws/build.sh) shows how to produce
+a pinned module. The generated `hirsel inspect --foreign-header P` header uses 32-bit
+linear-memory addresses. `hirsel inspect --foreign-abi P` prints the exact text that
+the module supplies in its `hirsel_abi` custom section (FFI-11).
 
 **What containment promises.** A contained module runs in the program's process, beside its
 secrets (`Secret`, TLS keys). Containment promises that the module reads and writes only its
 own linear memory, its loans and the null imports' fixed answers. It does not promise that
 the module cannot learn anything through timing: the guest has no clock, no threads and no
 shared memory, so it has no timer of its own, and Cranelift's heap Spectre mitigations stay on
-(FFI-15), but timing channels are not a promise (O4). A module that must not run beside the
+(FFI-15). Timing channels are outside the containment guarantee. A module that must not run beside the
 program's secrets is not a case this section serves.
 
 ### FFI-11: A contained module is admitted by its pin and its shape
@@ -1114,8 +962,7 @@ check's validator is given the same constant. Everything else is refused by vali
 threads, with shared memory and atomics; relaxed SIMD; memory64; multi-memory; exception
 handling; GC; function references; stack switching; wide arithmetic; custom page sizes; and
 the component model. A pin move that adds a proposal to Wasmtime's defaults admits nothing
-new. (Checked on Wasmtime 48.0.10 with this `Config`: a module with one `externref` table is
-refused with "gc types are disallowed but found type which requires gc".)
+new.
 
 A contained module adds no link input and is never handed to the system linker. The driver
 reads its bytes from the package resolution's capture, checks them in a sealed memory file, as
@@ -1230,16 +1077,9 @@ initial memory, of 65,536 bytes per page, is admitted against the limit current 
 along with its initial tables at 8 bytes per element. A refusal raises `Capacity(c)` at the
 call (MEM-21). Nothing is instantiated and no module code runs. Each `memory.grow` and
 `table.grow` admits its growth against the limit current at the contained call that executes
-it. A refusal answers the guest exactly as WebAssembly's own failure does: `memory.grow`
-returns −1 (Wasmtime's `ResourceLimiter::memory_growing` returning `Ok(false)`, which "will
-cause the `memory.grow` instruction in a module to return -1 (failure)"). The C allocator then
-returns `NULL`, and the wrapper maps that to its own error. This is not a hidden cap. The limit
-is the program's own `bound bytes` or root limit, the refusal is a refused admission, which is
-already a CONC-10 event, and the guest sees an explicit failure. The other answer, `Err`, is a
-trap that Wasmtime's docs call "not necessarily compliant with the WebAssembly specification",
-and it is not taken. Growth past the memory's or table's own declared maximum fails the same
-way, but before any admission: nothing is charged and there is no CONC-10 event, since no
-limit refused it. A charge outlives the bound scope that made it, as any surviving charge
+it. If the limit refuses the growth, WebAssembly receives −1 and the refused
+admission counts as a CONC-10 event. Growth past the declared memory or table
+maximum returns −1 before admission, without a charge or a CONC-10 event. A charge outlives the bound scope that made it, as any surviving charge
 does, and is handed over to the parent on the scope's exit (MEM-20). It is refunded when the
 instance is discarded or dropped. Memory never shrinks while the instance lives. A host that
 refuses the pages a granted grow needs stops the run with `HostMemory` (FAIL-15), as it does
@@ -1418,7 +1258,7 @@ Every other variant belongs to a feature that FFI-11 refuses, so a module that r
 means Wasmtime broke its own feature set. That is a failed runtime invariant, not a property of
 the guest, and the process aborts as on any failed invariant of the runtime. No run stop name
 and no `Fail` text is given to it. `Trap::OutOfFuel` belongs to no refused feature, so the listed
-`out of fuel` trap takes precedence over O15's invariant rule. FAIL-2's `Fail` row
+`out of fuel` trap takes precedence over the invariant-failure rule. FAIL-2's `Fail` row
 lists these texts, and FFI-12's and FFI-13's. A trap is a failure, not environmental
 termination. It runs every cleanup that FAIL-8 runs, and an `isolate` catches it. This is the
 difference from FFI-1, where a native crash takes the process.
@@ -1459,7 +1299,7 @@ FFI-4's launch rules do not apply to it: no `--grant` is needed on the command l
 `foreign:` line is written, and no deploy refusal applies. Its grant `Foreign=D` is an ordinary
 entry grant (CAP-4). It is given by the run's configuration, a test configuration's grant
 string, or a recipe binding, like every other grant that is not `Foreign`. The grant is kept
-(O6): one rule for `Foreign[I]` treats like things alike, and an ambient contained call would be
+because one rule for `Foreign[I]` treats like things alike, and an ambient contained call would be
 the only call without a capability.
 
 ### FFI-15: Wasmtime, compilation and caching
@@ -1475,9 +1315,9 @@ releases". A pin moves only to a later patch of 48, or to the next LTS. The pin 
 input, so a change moves the toolchain image identity, and with it every contained object key
 (below). The native backend's Cranelift (`=0.136.3`, the Wasmtime 49 line) is a separate pin.
 Wasmtime 48 brings its own Cranelift (`0.135`), so the driver builds two Cranelifts. The runtime
-builds none of Wasmtime's. Both pins stay (O9).
+builds none of Wasmtime's. Both pins stay.
 
-Containment rests on Wasmtime's validator, its Cranelift lowering and its runtime (O12). An
+Containment rests on Wasmtime's validator, its Cranelift lowering and its runtime. An
 advisory against this configuration moves the pin, and every image that holds a contained
 artifact is rebuilt and redeployed.
 
@@ -1511,22 +1351,21 @@ from the null address". On Linux, Wasmtime installs handlers for `SIGSEGV`, `SIG
 code to it (`crates/wasmtime/src/runtime/vm/sys/unix/signals.rs` <!-- doc-ref: external -->,
 48.0.10), so the runtime installs its own handlers first and Wasmtime's chain to them. On macOS
 it uses Mach exception ports, Wasmtime's default there, which forward "any non-guest faults" to
-the process-level handlers. That the two meet correctly on Linux is law FW28 (O2): a guest
+the process-level handlers. That the two meet correctly on Linux is law FW28: a guest
 out-of-bounds trap on one scheduler thread while another overflows a Hirsel stack, each
-reported as its own rule says. The macOS case, and Mach ports across `fork()`, belong to W2.
+reported as its own rule says.
 
 **Compiling and cross-compiling.** The driver compiles each contained module once per target,
 with `Engine::precompile_module` on an engine configured for that target. The same code builds
-`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` and `aarch64-apple-darwin` artifacts on
-any host, because Wasmtime's `target` "can be used, for example, to cross-compile from one
+`x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` artifacts on any host, because Wasmtime's `target` "can be used, for example, to cross-compile from one
 platform to another". A cross build never creates a `Module` for a foreign target: it only
 precompiles.
 
 **What the image ships, and loading.** The artifact is one object of the link: the bytes that
 `precompile_module` returned, unchanged, placed in a read-and-execute segment of the image
-(`PT_LOAD` with `R E` on ELF, `__TEXT` on Mach-O) and aligned to 64 KiB. The artifact's own
+(`PT_LOAD` with `R E` on ELF) and aligned to 64 KiB. The artifact's own
 text section is aligned within it to the target's page size as Wasmtime sees it: 4 KiB on
-x86-64, 64 KiB on AArch64 Linux, 16 KiB on AArch64 macOS (`page_size_align`,
+x86-64, 64 KiB on AArch64 Linux (`page_size_align`,
 `crates/environ/src/compile/mod.rs` <!-- doc-ref: external --> lines 370-394). So the text
 lands on an executable page boundary in the image. The runtime's `Config` holds a custom code
 memory (`Config::with_custom_code_memory`, config.rs:1731) whose `required_alignment` is that
@@ -1540,7 +1379,7 @@ enabled" (`CodeMemory::publish`, `crates/wasmtime/src/runtime/code_memory.rs` <!
 lines 415-475, the bail at 452; `MmapVec::supports_virtual_memory`, vm/mmap_vec.rs:157-164). With it, publish
 calls the custom memory and writes nothing to the text. An artifact whose text has relocations
 is refused at load (code_memory.rs:178-192), and `precompile_module` makes none. So no
-executable memory is mapped or written at run time, on any target (O3).
+executable memory is mapped or written at run time, on any target.
 
 Wasmtime marks `deserialize_raw` `unsafe` because a modified artifact can run arbitrary code,
 and says it may be "considered safe" only for the unmodified output of `precompile_module`.
@@ -1562,7 +1401,7 @@ output, and nothing guards it against that user ("trust our own implementation")
 artifact comes only from the build user's own part cache, or is compiled in place. Kiln RE and
 the code store carry module bytes, never artifacts, and compiled artifacts are never moved
 between hosts. In a recipe build, the module's bytes come from the code store, checked by hash,
-and are compiled there. No signature binds an artifact (O1).
+and are compiled there. No signature binds an artifact.
 
 ### FFI-16: Contained code in addresses and recipes
 
@@ -1572,17 +1411,14 @@ and revision change when the module's bytes, its header or its prefix change. Th
 the same on every target, because one module serves every target. The domain is new, so a
 contained function never shares an address with a native one.
 
-At W1, the release recipe's foreign leaf ([FFI-3](#ffi-3-archives-are-admitted-by-their-pin-before-linking),
-[launch](launch.md#release-recipe-and-host-assembly)) gains a containment byte between its
-symbol prefix and its archive table. The byte is 0 for native, followed by the table as today,
+The release recipe's foreign leaf ([FFI-3](#ffi-3-archives-are-admitted-by-their-pin-before-linking),
+[launch](launch.md#release-recipe-and-host-assembly)) carries a containment byte between its
+symbol prefix and its archive table. The byte is 0 for native, followed by the archive table,
 and 1 for wasm, followed in place of the table by the module row: its 32-byte pin and its byte
-length as a number. The reached functions follow as today. The foreign archives part lists that
+length as a number. The reached functions follow. The foreign archives part lists that
 pin as it lists an archive's. The bytes are an object of the code store, named by the pin, and
-are transferred and collected like the recipe's other objects. The leaf's format changes, so
-at W1 the recipe root's domain becomes `hirsel.release-recipe.v5`, and v4 is never read or
-written again
-([launch](launch.md#release-recipe-and-host-assembly)). The recipe is not target-specific for
-this module, and every host assembly compiles the module for its own target (FFI-15).
+are transferred and collected like the recipe's other objects. [Launch](launch.md#release-recipe-and-host-assembly) owns the recipe encoding
+and root. Host assembly compiles the pinned module for its target (FFI-15).
 
 ### Contained laws
 

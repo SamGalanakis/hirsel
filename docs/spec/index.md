@@ -98,6 +98,7 @@ the core library does not, and a block whose comment says `refused` is refused o
 the comment says. A block marked `` ```hirsel unbuilt `` belongs to its rule but shows what the
 built `hirsel` does not implement yet; the mark is removed when it does, and the spec
 test fails on a marked block that is already refused or accepted as its comments say.
+Examples that require a package manifest link to their fixtures.
 `` ```hirsel core `` uses the core declaration rules. A
 `` ```hirsel signatures package/module `` block lists public declarations from that package
 module. Each declaration must match the exported spelling, including the parameter names,

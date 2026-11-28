@@ -23,8 +23,7 @@ fn stamp() -> u64 { host.mono_ns() }                     // refused: CAP-1, no C
 
 ### CAP-2: Capabilities are opaque
 
-A capability type is an opaque type ([PROG-2](programs.md#prog-2-visibility)) of the
-standard library. Its values are made only by its own module, from entry grants (CAP-4) or
+A capability type is an opaque type ([PROG-2](programs.md#prog-2-visibility)) declared by core. Its values are made only by its own module, from entry grants (CAP-4) or
 by attenuation (CAP-7), so no program can forge one. `Foreign[I]` is made only from an
 entry grant ([FFI-4](foreign.md#ffi-4-the-foreign-capability)).
 A `Secret` can also be sealed from bytes the program already holds

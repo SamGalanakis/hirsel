@@ -166,6 +166,11 @@ fn quality(db: &Connection) -> Result<Value> {
     if header.get("runtime_events_lost").is_some() && count("runtime_events_lost")? != 0 {
         warnings.push("lost_runtime_events");
     }
+    match header.get("kernel_capture").and_then(Value::as_str) {
+        Some("unavailable") => warnings.push("kernel_samples_unavailable"),
+        Some("enabled") if count("kernel_samples")? == 0 => warnings.push("no_kernel_samples"),
+        _ => {}
+    }
     if header.get("runtime_trace_complete").is_some() && count("runtime_trace_complete")? == 0 {
         warnings.push("incomplete_runtime_trace");
     }

@@ -15,6 +15,7 @@ struct Sampling {
     out: PathBuf,
     freq: u64,
     pmu: Option<String>,
+    kernel: bool,
     stack_bytes: Option<u32>,
 }
 
@@ -24,6 +25,7 @@ impl Default for Sampling {
             out: "profile.hprof".into(),
             freq: 997,
             pmu: None,
+            kernel: false,
             stack_bytes: None,
         }
     }
@@ -35,6 +37,7 @@ impl Sampling {
             out: &self.out,
             freq: self.freq,
             pmu: self.pmu.as_deref(),
+            kernel: self.kernel,
             stack_bytes: self.stack_bytes,
         }
     }
@@ -68,6 +71,7 @@ impl Run {
                     | ProfOut(_)
                     | ProfFrequency(_)
                     | ProfPmu(_)
+                    | ProfKernel
                     | ProfStackBytes(_)
             )
         }) {
@@ -77,6 +81,7 @@ impl Run {
                 ProfOut(value) => run.sampling.out = value.into(),
                 ProfFrequency(value) => run.sampling.freq = value.parse()?,
                 ProfPmu(value) => run.sampling.pmu = Some(value),
+                ProfKernel => run.sampling.kernel = true,
                 ProfStackBytes(value) => run.sampling.stack_bytes = Some(value.parse()?),
                 _ => unreachable!("only profiling options are extracted"),
             }
@@ -168,6 +173,7 @@ pub(crate) fn attach(invocation: Request<AttachOption>) -> Result<()> {
             AttachOption::ProfOut(value) => sampling.out = value.into(),
             AttachOption::ProfFrequency(value) => sampling.freq = value.parse()?,
             AttachOption::ProfPmu(value) => sampling.pmu = Some(value),
+            AttachOption::ProfKernel => sampling.kernel = true,
         }
     }
     hirsel_prof::attach(pid, duration, &sampling.options(), |path, image| {

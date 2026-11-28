@@ -108,7 +108,8 @@ The database has the following tables, views and columns.
 `build_id`, `image_digest`, `symbol_tier`, `clock`, `primary_event`,
 `primary_unit`, `freq_hz`, `fallback_reason`, `start_ns`, `duration_ns`,
 `samples_total`, `samples_lost`, `stacks_truncated`, `unwind_failed`,
-`unresolved_samples`, `host_root_samples` and `kernel_samples`.
+`unresolved_samples`, `host_root_samples`, `fiber_root_samples` and
+`kernel_samples`.
 
 Addresses in `*_hex` columns are hexadecimal text. Unsigned numeric values
 above the SQLite signed integer range use exact decimal text. Timestamps
@@ -138,6 +139,15 @@ event and one exact unsigned period. The period is a nonnegative SQLite
 integer up to 9 223 372 036 854 775 807, with larger u64 values stored as
 canonical decimal text. CPU rollups and pprof weights use that row's
 event and period. Instruction profiles use the `instructions` event directly.
+
+Linux sampling events default to user execution. Pass `--kernel` to
+`prof run` or `prof attach` to include kernel execution. The host's
+`perf_event_paranoid` setting or profiler capabilities such as
+`CAP_PERFMON` determine access. If perf denies kernel access, the
+profiler retries with user-only events and records the reason in
+`fallback_reason`. The summary reports `kernel_capture` as `enabled`,
+`user_only` or `unavailable`. When requested kernel samples are absent,
+the summary warns with `kernel_samples_unavailable` or `no_kernel_samples`.
 
 The unwinder reads DWARF CFI (`.eh_frame`, `.debug_frame`) with gimli and
 uses the captured stack and registers. A Mach-O image's linker keeps an
@@ -268,7 +278,9 @@ Every JSON query includes `quality` and `result`. `quality` contains the
 and one, a `verdict` and `warnings`. A share is null when no samples were
 captured. Query results encode unsigned integers above 2^53 as decimal
 strings. `summary` groups hotspots by event and shows at most five rows
-per event. Function grouping deduplicates the definition across all
+per event. It reports lost samples, truncated stacks and samples ending at
+a fiber root separately in `samples_lost`, `stacks_truncated` and
+`fiber_root_samples`. Function grouping deduplicates the definition across all
 instances in a stack. A frame with a source location and no function name
 appears as `<file>:<line>` in hotspots.
 

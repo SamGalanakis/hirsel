@@ -20,6 +20,7 @@ fn capture_native_profile(
             out,
             freq: 997,
             pmu: Some("cpu-clock"),
+            kernel: false,
             stack_bytes: None,
         },
         |path, bytes| crate::prof_command::symbol_source(path, bytes, None),
@@ -88,6 +89,7 @@ int main(void) {
             out: &out,
             freq: 997,
             pmu: Some("cpu-clock"),
+            kernel: false,
             stack_bytes: None,
         },
         |path, bytes| {

@@ -258,6 +258,7 @@ impl CompilerFlags {
                 | Opt::Locked
                 | Opt::PackageStore(_)
                 | Opt::ProfFrequency(_)
+                | Opt::ProfKernel
                 | Opt::ProfMem(_)
                 | Opt::ProfOut(_)
                 | Opt::ProfPmu(_)

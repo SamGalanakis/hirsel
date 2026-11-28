@@ -59,6 +59,7 @@ pub enum AttachOption {
     ProfDebug(String),
     ProfDuration(String),
     ProfFrequency(String),
+    ProfKernel,
     ProfOut(String),
     ProfPmu(String),
 }
@@ -339,6 +340,7 @@ pub enum CompilerOption {
     PackageStore(String),
     PlaceTimeout(String),
     ProfFrequency(String),
+    ProfKernel,
     ProfMem(hirsel_prof::MemMode),
     ProfOut(String),
     ProfPmu(String),

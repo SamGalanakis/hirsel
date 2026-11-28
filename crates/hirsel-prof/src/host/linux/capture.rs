@@ -40,16 +40,17 @@ pub fn run(
     )?;
     let pid = child.pid() as u32;
     let sampling = perf::online_cpus().and_then(|cpus| open_perf(pid, &cpus, options, true));
-    let (mut group, event, fallback) = match sampling {
-        Ok((group, events, fallback)) => (Some(group), events[0], fallback),
+    let (mut group, event, fallback, kernel) = match sampling {
+        Ok((group, events, fallback, kernel)) => (Some(group), events[0], fallback, kernel),
         Err(error) if launch.observation.is_some() => {
             let mut tracker = PerfGroup::new();
             match tracker.open_tracking(pid as i32) {
-                Ok(()) => (Some(tracker), perf::RUNTIME, error.to_string()),
+                Ok(()) => (Some(tracker), perf::RUNTIME, error.to_string(), false),
                 Err(track) => (
                     None,
                     perf::RUNTIME,
                     format!("{error}; mapping tracking: {track}"),
+                    false,
                 ),
             }
         }
@@ -112,6 +113,7 @@ pub fn run(
             samples_lost,
             freq: options.freq,
             fallback,
+            kernel_capture: Some(kernel_capture(options.kernel, kernel)),
             event,
             provenance,
         },
@@ -124,15 +126,39 @@ pub(super) fn open_perf(
     cpus: &[i32],
     options: &CaptureOptions<'_>,
     enable_on_exec: bool,
-) -> Result<(PerfGroup, Vec<Event>, String)> {
+) -> Result<(PerfGroup, Vec<Event>, String, bool)> {
     let mut events = perf::events(options.pmu.unwrap_or("cycles"))?;
     let open = |events: &[Event]| {
-        let mut group = PerfGroup::new();
-        open_rings(&mut group, pid, cpus, events, options, enable_on_exec)?;
-        Ok::<_, (io::Error, Event)>(group)
+        let open = |kernel| {
+            let mut group = PerfGroup::new();
+            open_rings(
+                &mut group,
+                pid,
+                cpus,
+                events,
+                options,
+                kernel,
+                enable_on_exec,
+            )?;
+            Ok::<_, (io::Error, Event)>(group)
+        };
+        match open(options.kernel) {
+            Ok(group) => Ok((group, String::new(), options.kernel)),
+            Err((err, event))
+                if options.kernel
+                    && matches!(err.raw_os_error(), Some(libc::EACCES | libc::EPERM)) =>
+            {
+                let reason = format!(
+                    "kernel samples unavailable ({})",
+                    perf::open_error(err, event)
+                );
+                open(false).map(|group| (group, reason, false))
+            }
+            Err(err) => Err(err),
+        }
     };
     match open(&events) {
-        Ok(group) => Ok((group, events, String::new())),
+        Ok((group, reason, kernel)) => Ok((group, events, reason, kernel)),
         Err((first, event))
             if options.pmu.is_none()
                 && matches!(
@@ -142,12 +168,25 @@ pub(super) fn open_perf(
         {
             let reason = format!("{} unavailable: {first}", event.name);
             events[0] = perf::CPU_CLOCK;
-            let group = open(&events).map_err(|(err, event)| {
+            let (group, kernel_reason, kernel) = open(&events).map_err(|(err, event)| {
                 format!("{reason}; fallback {}", perf::open_error(err, event))
             })?;
-            Ok((group, events, reason))
+            let reason = if kernel_reason.is_empty() {
+                reason
+            } else {
+                format!("{reason}. {kernel_reason}")
+            };
+            Ok((group, events, reason, kernel))
         }
         Err((err, event)) => Err(perf::open_error(err, event).into()),
+    }
+}
+
+pub(super) fn kernel_capture(requested: bool, enabled: bool) -> &'static str {
+    match (requested, enabled) {
+        (_, true) => "enabled",
+        (true, false) => "unavailable",
+        (false, false) => "user_only",
     }
 }
 
@@ -157,6 +196,7 @@ pub(super) fn open_rings(
     cpus: &[i32],
     events: &[Event],
     options: &CaptureOptions<'_>,
+    kernel: bool,
     enable_on_exec: bool,
 ) -> std::result::Result<(), (io::Error, Event)> {
     for &cpu in cpus {
@@ -169,6 +209,7 @@ pub(super) fn open_rings(
                     PerfSettings {
                         freq: options.freq,
                         stack_bytes: options.stack_bytes.unwrap_or(perf::STACK_BYTES),
+                        kernel,
                         sideband: enable_on_exec && index == 0,
                         enable_on_exec,
                     },
@@ -260,6 +301,7 @@ int main(void) {
                 out: &profile,
                 freq: 997,
                 pmu: Some("cpu-clock"),
+                kernel: false,
                 stack_bytes: None,
             },
             |_, bytes| Ok(local_symbols(bytes)),

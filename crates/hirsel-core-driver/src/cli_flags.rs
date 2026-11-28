@@ -88,6 +88,7 @@ flags! {
     ProfOut ["--out"] "PATH" => "Write the profile to this path.";
     ProfFrequency ["--freq"] "HZ" => "Sample at this frequency per event (default 997).";
     ProfPmu ["--pmu"] "LIST" => "Sample a comma-separated list of events (default cycles).";
+    ProfKernel ["--kernel"] => "Include Linux kernel execution when perf permissions allow it.";
     ProfStackBytes ["--stack-bytes"] "BYTES" => "Capture this many bytes of user stack (default 32768).";
     ProfDuration ["--duration"] "SECS" => "Stop sampling after this many seconds.";
     ProfDebug ["--debug"] "PATH" => "Use detached DWARF verified against the sampled image.";

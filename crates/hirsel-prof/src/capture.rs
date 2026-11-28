@@ -27,6 +27,8 @@ pub struct CaptureOptions<'a> {
     pub out: &'a Path,
     pub freq: u64,
     pub pmu: Option<&'a str>,
+    /// Include Linux kernel execution in the sampling event when permitted.
+    pub kernel: bool,
     /// User stack bytes copied per sample; `None` keeps the host default.
     /// Only a provider that copies stacks accepts it.
     pub stack_bytes: Option<u32>,
@@ -161,6 +163,7 @@ pub fn replay(
             samples_lost: 0,
             freq: 0,
             fallback: String::new(),
+            kernel_capture: None,
             event: RUNTIME,
             provenance,
         },
@@ -249,11 +252,18 @@ pub(crate) struct Capture {
     pub(crate) samples_lost: u64,
     pub(crate) freq: u64,
     pub(crate) fallback: String,
+    pub(crate) kernel_capture: Option<&'static str>,
     pub(crate) event: Event,
     pub(crate) provenance: Provenance,
 }
 
 pub(crate) fn finish(profile: ProfileWriter, capture: Capture) -> Result<()> {
+    if let Some(scope) = capture.kernel_capture {
+        profile.connection().execute(
+            "INSERT INTO run_meta VALUES ('kernel_capture', ?1)",
+            [scope],
+        )?;
+    }
     profile.finish(&RunMeta {
         capture_mode: capture.mode,
         target: crate::host::TARGET,

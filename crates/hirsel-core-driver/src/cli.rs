@@ -238,10 +238,10 @@ commands! {
         Serve(ServeOption), One: HELP, MaxMemory, Stop;
     "prof", "prof <command>", "Capture or inspect a CPU profile.";
         Simple(NoOption), Namespace: HELP;
-    "prof run", "prof run [package-dir] [build-opts] [--tasks] [--mem[=sampled]] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]", "Build and sample a native executable from exec until exit.";
+    "prof run", "prof run [package-dir] [build-opts] [--tasks] [--mem[=sampled]] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--kernel] [--stack-bytes 32768] [-- args...]", "Build and sample a native executable from exec until exit.";
         [Execute] Compiler(CompilerOption), Tail:
             PackageStore, Locked, Frozen, Record, HELP, Resident, ProfTasks, ProfMem, ProfOut, ProfFrequency,
-            ProfPmu, ProfStackBytes, Json, SourceCore, SourceStd, CoreProduct, Dir as Repeatable, Grant as Repeatable, Release,
+            ProfPmu, ProfKernel, ProfStackBytes, Json, SourceCore, SourceStd, CoreProduct, Dir as Repeatable, Grant as Repeatable, Release,
             DebugLines, Backend, Runtime, LogicalChargeReport, Cc, Target, Emulator, Sysroot, Limit, Entry,
             Libraries, Store, Inputs, Metrics, ProfileFront, Image, Emit;
     "prof replay", "prof replay [package-dir | --inputs MANIFEST] --tape TAPE [--entry DEFINITION] [--tasks] [--mem[=exact|sampled]] [--out FILE.hprof]", "Profile serial replay through the recording and profiling runtime.";
@@ -249,8 +249,8 @@ commands! {
             PackageStore, Locked, Frozen, Tape, ReplayUnit, HELP, ProfTasks, ProfMem, ProfOut, SourceCore,
             SourceStd, CoreProduct, Dir as Repeatable, Grant as Repeatable, Release, DebugLines, Backend, Runtime, LogicalChargeReport,
             Cc, Target, Limit, Output, Entry, Libraries, Store, Inputs, Metrics, Image, Emit;
-    "prof attach", "prof attach <PID> [--duration SECS] [--freq 997] [--pmu LIST] [--debug PATH] [--out FILE.hprof]", "Snapshot mappings, then sample a running Linux process without stopping it.";
-        Attach(AttachOption), One: HELP, ProfOut, ProfFrequency, ProfPmu, ProfDuration, ProfDebug, REFUSE_MEM;
+    "prof attach", "prof attach <PID> [--duration SECS] [--freq 997] [--pmu LIST] [--kernel] [--debug PATH] [--out FILE.hprof]", "Snapshot mappings, then sample a running Linux process without stopping it.";
+        Attach(AttachOption), One: HELP, ProfOut, ProfFrequency, ProfPmu, ProfKernel, ProfDuration, ProfDebug, REFUSE_MEM;
     "prof tail", "prof tail <FILE.hprof> [--limit 20] [--json]", "Report completed and censored task latencies and the observed causal edges.";
         ProfileQuery(ProfileQueryOption), One: HELP, ProfRows, Json;
     "prof summary", "prof summary <FILE.hprof> [--json]", "Report capture quality and the five hottest functions per event.";

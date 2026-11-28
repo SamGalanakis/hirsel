@@ -32,6 +32,9 @@ pub fn run(
     options: &CaptureOptions<'_>,
     resolve: impl FnOnce(&Path, &[u8]) -> io::Result<SymbolSource>,
 ) -> Result<ExitStatus> {
+    if options.kernel {
+        return Err("--kernel is available only on Linux".into());
+    }
     if let Some(mode) = launch.observation.and_then(|options| options.mem) {
         return Err(match mode {
             MemMode::Exact => crate::capture::LIVE_EXACT.into(),
@@ -120,6 +123,7 @@ pub fn run(
             samples_lost: observations.lost,
             freq: options.freq,
             fallback: String::new(),
+            kernel_capture: None,
             event: CPU_CLOCK,
             provenance,
         },

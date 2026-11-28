@@ -186,6 +186,7 @@ impl ProfileWriter {
              INSERT INTO run_meta SELECT 'unknown_mapping', count(*) FROM cpu_sample WHERE unwind_status = 'unknown_mapping';
              INSERT INTO run_meta SELECT 'unwind_failed', count(*) FROM cpu_sample WHERE stack_root = 'failed';
              INSERT INTO run_meta SELECT 'host_root_samples', count(*) FROM cpu_sample WHERE stack_root = 'host';
+             INSERT INTO run_meta SELECT 'fiber_root_samples', count(*) FROM cpu_sample WHERE stack_root = 'fiber';
              INSERT INTO run_meta SELECT 'kernel_samples', count(*) FROM cpu_sample WHERE stack_root = 'kernel';
              INSERT INTO run_meta SELECT 'unresolved_samples', count(*)
                  FROM cpu_sample s JOIN callsite c ON c.id = s.callsite_id
@@ -300,6 +301,56 @@ mod tests {
             .query_row("SELECT text FROM source_snippet", [], |r| r.get(0))
             .unwrap();
         assert_eq!(saved, snippet);
+    }
+
+    #[test]
+    fn summary_counts_lost_truncated_fiber_and_unnamed_leaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("summary.hprof");
+        let writer = ProfileWriter::create(&path).unwrap();
+        writer.connection().execute_batch(
+            "INSERT INTO thread VALUES (1,1,1,'main',0,NULL);
+             INSERT INTO function VALUES (1,NULL,'','', 'foreign'), (2,'app.main','main','main','hirsel');
+             INSERT INTO frame VALUES (1,NULL,NULL,1,NULL,NULL,NULL,1), (2,NULL,NULL,2,NULL,NULL,NULL,0);
+             INSERT INTO callsite VALUES (1,NULL,1,0),(2,NULL,2,0);
+             INSERT INTO cpu_sample VALUES
+                 (1,1,1,NULL,NULL,0,1,'0x10','cycles',3,'truncated','truncated_stack'),
+                 (2,2,1,NULL,NULL,0,2,'0x20','cycles',5,'fiber','fiber_root');
+             INSERT INTO run_meta VALUES ('kernel_capture', 'unavailable');",
+        ).unwrap();
+        writer
+            .finish(&RunMeta {
+                capture_mode: "attach",
+                target: "",
+                cmdline: "",
+                build_id: "",
+                image_digest: "",
+                symbol_tier: "",
+                clock: "CLOCK_MONOTONIC",
+                primary_event: "cycles",
+                primary_unit: "cycles",
+                freq_hz: 997,
+                fallback_reason: "kernel samples unavailable",
+                start_ns: 0,
+                duration_ns: 3,
+                samples_lost: 4,
+            })
+            .unwrap();
+
+        let quality = crate::query(&path, crate::Query::Summary, 5)
+            .unwrap()
+            .quality;
+        assert_eq!(quality["samples_total"], 2);
+        assert_eq!(quality["samples_lost"], 4);
+        assert_eq!(quality["stacks_truncated"], 1);
+        assert_eq!(quality["fiber_root_samples"], 1);
+        assert_eq!(quality["unresolved_samples"], 1);
+        assert!(
+            quality["warnings"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("kernel_samples_unavailable"))
+        );
     }
 
     #[test]

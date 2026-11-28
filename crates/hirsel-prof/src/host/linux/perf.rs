@@ -168,6 +168,7 @@ pub(crate) fn online_cpus() -> Result<Vec<i32>> {
 pub(crate) struct PerfSettings {
     pub(crate) freq: u64,
     pub(crate) stack_bytes: u32,
+    pub(crate) kernel: bool,
     pub(crate) sideband: bool,
     pub(crate) enable_on_exec: bool,
 }
@@ -210,7 +211,10 @@ impl PerfGroup {
         event: Event,
         settings: Option<PerfSettings>,
     ) -> io::Result<()> {
-        let mut flags = (1 << 0) | (1 << 5) | (1 << 6) | (1 << 18) | (1 << 25);
+        let mut flags = (1 << 0) | (1 << 6) | (1 << 18) | (1 << 25);
+        if !settings.as_ref().is_some_and(|settings| settings.kernel) {
+            flags |= 1 << 5; // exclude_kernel
+        }
         if settings.as_ref().is_none_or(|settings| settings.sideband) {
             flags |= (1 << 8) | (1 << 9) | (1 << 13) | (1 << 23) | (1 << 24);
         }
@@ -713,6 +717,7 @@ mod tests {
                 PerfSettings {
                     freq: 997,
                     stack_bytes: 32768,
+                    kernel: false,
                     sideband: false,
                     enable_on_exec: false,
                 },

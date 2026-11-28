@@ -5,7 +5,9 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use super::capture::{Capture, CaptureOptions, Provenance, finish, open_perf, open_rings};
+use super::capture::{
+    Capture, CaptureOptions, Provenance, finish, kernel_capture, open_perf, open_rings,
+};
 use super::perf::{self, Kind};
 use super::procfs;
 use crate::capture::SymbolSource;
@@ -34,7 +36,7 @@ pub fn attach(
     };
     let profile = ProfileWriter::create(options.out)?;
     let interrupt = Interrupt::register()?;
-    let (mut group, events, fallback) = open_perf(pid, cpus, options, false)?;
+    let (mut group, events, fallback, kernel) = open_perf(pid, cpus, options, false)?;
     // Keep metadata flowing while the CPU sampling events stay disabled.
     group
         .open_tracking(pid_arg)
@@ -54,7 +56,7 @@ pub fn attach(
         let opened = group
             .open_tracking(tid as i32)
             .map_err(|err| (err, perf::TRACKING))
-            .and_then(|()| open_rings(group, tid, cpus, &events, options, false));
+            .and_then(|()| open_rings(group, tid, cpus, &events, options, kernel, false));
         match opened {
             Ok(()) => {
                 if sampling_started {
@@ -143,6 +145,7 @@ pub fn attach(
             samples_lost,
             freq: options.freq,
             fallback,
+            kernel_capture: Some(kernel_capture(options.kernel, kernel)),
             event: events[0],
             provenance,
         },
@@ -304,6 +307,7 @@ int main(void) {
                 out: &profile,
                 freq: 997,
                 pmu: Some("cpu-clock"),
+                kernel: false,
                 stack_bytes: None,
             },
             |_, bytes| Ok(local_symbols(bytes)),

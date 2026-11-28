@@ -10,6 +10,7 @@ import sys
 
 
 LIMIT = 1000
+HIRSEL_LIMIT = 2000
 SUFFIXES = ('.hirsel', '.rs', '.py', '.ts', '.js', '.c', '.h')
 RATCHET = 'tools/file_length_ratchet.json'
 EXCLUDED_TREES = (
@@ -78,6 +79,10 @@ def line_count(data):
     return data.count(b'\n') + int(bool(data) and not data.endswith(b'\n'))
 
 
+def default_limit(path):
+    return HIRSEL_LIMIT if path.endswith('.hirsel') else LIMIT
+
+
 def parse_ratchet(data):
     if data is None:
         return {}
@@ -136,13 +141,14 @@ def check_transition(root, before, after, paths, moved=None):
         lines = line_count(current.get(path, b''))
         old_entry = old.get(path, old.get(source, {}))
         new_entry = new.get(path, {})
-        old_cap = old_entry.get('lines', LIMIT)
-        new_cap = new_entry.get('lines', LIMIT)
-        limit = min(old_cap, new_cap, max(LIMIT, prior))
+        baseline = default_limit(path)
+        old_cap = max(baseline, old_entry.get('lines', baseline))
+        new_cap = max(baseline, new_entry.get('lines', baseline))
+        limit = min(old_cap, new_cap, max(baseline, prior))
         explicit_raise = (new_cap > old_cap
                           or new_entry.get('raise_revision', 0) > old_entry.get('raise_revision', 0))
         raised = (after is not None and path in old and path in changed and explicit_raise
-                  and LIMIT < prior < new_cap == lines and 'reason' in new_entry)
+                  and baseline < prior < new_cap == lines and 'reason' in new_entry)
         if raised:
             limit = new_cap
         elif new_cap > old_cap:
@@ -189,7 +195,7 @@ def update_ratchet(root, entries):
     lowered = {}
     for path, data in snapshot(root, None, entries).items():
         lines = min(entries[path]['lines'], line_count(data))
-        if lines > LIMIT:
+        if lines > default_limit(path):
             lowered[path] = dict(entries[path], lines=lines)
     return lowered
 
@@ -222,8 +228,9 @@ def main(root):
         except ValueError:
             parser.error('LINES must be an integer')
         prior = line_count(snapshot(root, 'HEAD', {path}).get(path, b''))
-        if prior <= LIMIT:
-            parser.error(f'{path} must exceed {LIMIT:,} lines in HEAD to raise its limit')
+        baseline = default_limit(path)
+        if prior <= baseline:
+            parser.error(f'{path} must exceed {baseline:,} lines in HEAD to raise its limit')
         if lines <= prior:
             parser.error(f'LINES must exceed the current length of {prior}')
         # A raise can set a stale cap to the same or a lower number. Record a

@@ -64,6 +64,17 @@ class FileLengthRatchet(unittest.TestCase):
             self.assertEqual(refused.returncode, 1)
             run('git', 'restore', '--staged', 'new.py')
 
+            source = root / 'new.hirsel'
+            source.write_text('// line\n' * 2000)
+            run('git', 'add', 'new.hirsel')
+            run(sys.executable, '-B', CHECK)
+            source.write_text(source.read_text() + '// line\n')
+            run('git', 'add', 'new.hirsel')
+            refused = run(sys.executable, '-B', CHECK, check=False)
+            self.assertIn('new.hirsel: 2,001 lines, limit 2,000', refused.stderr)
+            self.assertEqual(refused.returncode, 1)
+            run('git', 'restore', '--staged', 'new.hirsel')
+
             run('git', 'commit', '-qm', 'Grow both files with explicit raises')
             self.assertEqual(run('git', 'rev-list', '--count', 'HEAD').stdout.strip(), '2')
             committed = json.loads(run('git', 'show', f'HEAD:{RATCHET}').stdout)

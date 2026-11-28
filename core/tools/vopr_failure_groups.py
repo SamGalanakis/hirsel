@@ -3,6 +3,7 @@
 from collections import Counter
 import gzip
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -48,6 +49,11 @@ def result_rows(receipt):
             yield json.loads(line)
 
 
+def deferred(rows):
+    """Whether a batch receipt records that Boat deferred its seeds (tools/sim-campaign)."""
+    return any(row.get("kind") == "batch_deferred" for row in rows)
+
+
 def expected_canary(row):
     seed = row["seed"]
     return (seed > 0 and row["status"] == seed % 2
@@ -58,7 +64,8 @@ def expected_canary(row):
 
 
 def publish(run, *, require_canary=False, probe_reds=()):
-    """Write all failure groups. Exit 2 for an unverified sweep, 3 for preparation reds."""
+    """Write all failure groups. Exit 2 for an unverified sweep, 75 when Boat deferred
+    every batch, 3 for preparation reds."""
     previous = set()
     for report in run.parent.glob("*/failure-groups.jsonl"):
         if report.parent != run:
@@ -71,9 +78,15 @@ def publish(run, *, require_canary=False, probe_reds=()):
     batches = sorted(run.glob("*.jsonl.gz"))
     receipts = ([prepare] if prepare.is_file() else []) + batches
     canary_ok = not require_canary or bool(batches)
+    deferrals = 0
     for receipt in receipts:
         canary = []
-        for row in result_rows(receipt):
+        rows = list(result_rows(receipt))
+        batch_deferred = deferred(rows)
+        deferrals += batch_deferred
+        for row in rows:
+            if row.get("kind") == "batch_deferred":
+                continue
             if require_canary and row["law"] == CANARY and row.get("seed", 0) > 0:
                 canary.append(row)
                 if expected_canary(row):
@@ -86,12 +99,17 @@ def publish(run, *, require_canary=False, probe_reds=()):
                 for field in ("reason", "sem8_tape", "sem8_tape_error"):
                     if field in row:
                         samples[key].setdefault(field, row[field])
-        if require_canary and receipt.suffix == ".gz":
+        # A deferred batch ran seed 0 only; its canary seeds were never dispatched.
+        if require_canary and receipt.suffix == ".gz" and not batch_deferred:
             passed = (len(canary) == 2 and {row["seed"] % 2 for row in canary} == {0, 1}
                       and all(expected_canary(row) for row in canary))
             if not passed:
                 print(f"{receipt}: missing canary pass or expected red", file=sys.stderr)
                 canary_ok = False
+    if deferrals:
+        key = "boat-dispatch", "batch_deferred", None
+        counts[key] = deferrals
+        samples[key] = {"receipt": None, "build": None, "digest": None, "seed": None}
     if require_canary and not canary_ok:
         print(f"{run}: no verified canary result", file=sys.stderr)
         key = CANARY, "canary_missing", None
@@ -118,6 +136,9 @@ def publish(run, *, require_canary=False, probe_reds=()):
     output.replace(run / "failure-groups.jsonl")
     if not canary_ok:
         return 2
+    if require_canary and deferrals == len(batches) and batches:
+        print(f"{run}: Boat deferred every batch; no seeds ran", file=sys.stderr)
+        return os.EX_TEMPFAIL
     return 3 if any(key[1] == "prepare_red" for key in counts) else 0
 
 

@@ -131,9 +131,27 @@ fi
 
 cd "$scratch"
 phase=sweep
-sweep_status=0
-python3 "$briefs/vopr-campaign-2092/sweep2.py" "$checkout/tools/sim-campaign" \
-  1 "${HIRSEL_VOPR_MINUTES:-24}" --nightly "$run" || sweep_status=$?
+sweep_deadline=$(( SECONDS + 60 * ${HIRSEL_VOPR_MINUTES:-24} ))
+next_batch=1
+while :; do
+  sweep_status=0
+  python3 "$briefs/vopr-campaign-2092/sweep2.py" "$checkout/tools/sim-campaign" \
+    "$next_batch" $(( (sweep_deadline - SECONDS) / 60 )) --nightly "$run" || sweep_status=$?
+  # Boat defers VOPR batches while law shards hold its turn. The deferred batch's
+  # receipt says so; wait for the law shards and resume at the next batch while a
+  # whole batch (sweep2.py's 720 s) still fits.
+  shopt -s nullglob
+  receipts=("$run"/nightly-*.jsonl.gz)
+  shopt -u nullglob
+  (( sweep_status == 75 && ${#receipts[@]} )) || break
+  last=${receipts[-1]}
+  zgrep -q '"kind": "batch_deferred"' "$last" || break
+  (( sweep_deadline - SECONDS - 300 > 720 )) || break
+  echo "$(basename "$last" .jsonl.gz): deferred by Boat; retrying in 300 s" >&2
+  sleep 300
+  index=${last%.jsonl.gz}
+  next_batch=$(( 10#${index##*-} + 1 ))
+done
 # Each batch merged one coverage profile per law group; fold them into the night's.
 # Coverage never changes the night's status.
 shopt -s nullglob

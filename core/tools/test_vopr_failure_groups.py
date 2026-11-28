@@ -41,6 +41,39 @@ class FailureGroups(unittest.TestCase):
             self.assertEqual(publish(run, require_canary=True), 2)
             self.assertIn("canary_missing", (run / "failure-groups.jsonl").read_text())
 
+    def test_a_boat_deferral_is_reported_as_one_deferral_and_an_empty_dispatch_stays_canary_missing(self):
+        # 2026-11-28: Boat deferred the night's only batch (exit 75) after seed 0, and the
+        # night reported canary_missing as if the canary had stopped running.
+        python = sys.executable
+        for dispatched, sweep, night, groups in (
+            (75, 75, 75, [["boat-dispatch", "batch_deferred", None]]),
+            (2, 2, 2, [[prepare.CANARY, "canary_missing", None]]),
+        ):
+            with self.subTest(dispatched=dispatched), tempfile.TemporaryDirectory() as held:
+                root = Path(held)
+                law = root / "law-bin"
+                law.write_text(f"#!{python}\n")
+                law.chmod(0o755)
+                dispatcher = root / "dispatcher"
+                dispatcher.write_text(f"#!{python}\nimport sys\nsys.exit({dispatched})\n")
+                dispatcher.chmod(0o755)
+                (root / "manifest.json").write_text(json.dumps([
+                    {"law": prepare.CANARY, "executable": "law-bin", "seeds": 2},
+                ]))
+                results = root / "night-001.jsonl"
+                ran = subprocess.run([str(SIM_CAMPAIGN_PATH), "batch", "night-001", str(root / "manifest.json"),
+                                      "--ledger", str(root / "seeds.sqlite"), "--results", str(results),
+                                      "--dispatcher", str(dispatcher)],
+                                     cwd=root, capture_output=True, text=True)
+                self.assertEqual(ran.returncode, sweep, ran.stderr)
+                run = root / "run"
+                run.mkdir()
+                with results.open() as src, gzip.open(run / "night-001.jsonl.gz", "wt") as dst:
+                    dst.write(src.read())
+                self.assertEqual(publish(run, require_canary=True), night)
+                written = [json.loads(line) for line in (run / "failure-groups.jsonl").read_text().splitlines()]
+                self.assertEqual([row["group"] for row in written], groups)
+
     def test_partition(self):
         # Each case: rows that must share one group, or rows that must split.
         same = [

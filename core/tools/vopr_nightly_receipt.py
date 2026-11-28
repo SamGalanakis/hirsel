@@ -10,7 +10,7 @@ import subprocess
 import sys
 
 from sim_campaign import CANARY
-from vopr_failure_groups import expected_canary, publish, result_rows
+from vopr_failure_groups import deferred, expected_canary, publish, result_rows
 from vopr_nightly_negative import CONTROL_NAMES
 
 
@@ -111,9 +111,15 @@ def summarize(run, manifest, commit):
     for law, entry in prepared.items():
         for label in entry.get("required_witnesses", []):
             probes[law, label]
+    batches_deferred = 0
     for batch in sorted(run.glob("*.jsonl.gz")):
         canaries = []
-        for row in read_evidence(batch, errors):
+        rows = list(read_evidence(batch, errors))
+        batch_deferred = deferred(rows)
+        batches_deferred += batch_deferred
+        for row in rows:
+            if row.get("kind") == "batch_deferred":
+                continue
             law, seed = row["law"], row.get("seed")
             if row.get("build") != commit or law not in prepared:
                 errors.append(f"{batch.name}: unexpected result for {law}")
@@ -148,6 +154,8 @@ def summarize(run, manifest, commit):
                             faults.add(label.removeprefix("fault:"))
                         elif law == "store@1/store/test_l69_random_arm" and label in STORE_CRASH_PROBES:
                             faults.add(STORE_CRASH_PROBES[label])
+        if batch_deferred:
+            continue
         good = sorted(canaries) == [(0, True), (1, True)]
         canary_red = good if canary_red is None else canary_red and good
     frequencies = []
@@ -156,7 +164,9 @@ def summarize(run, manifest, commit):
                "hits": count["hits"], "true_calls": count["true_calls"]}
         if label in declared.get(law, {}):
             rare = declared[law][label]
-            missed = frequency_missed(row["hits"], row["runs"])
+            # A law Boat never ran this night has no reach evidence; the deferral is the red.
+            missed = (frequency_missed(row["hits"], row["runs"])
+                      and not (batches_deferred and not row["runs"]))
             row.update(rare=rare, divisor=PROBE_DIVISOR, severity=(30 if rare else 40) if missed else None)
             if missed:
                 misses.add((law, label))
@@ -187,6 +197,7 @@ def summarize(run, manifest, commit):
         "laws_prepared": sorted(prepared),
         "laws_unprepared": unprepared,
         "code_revision": revisions,
+        "batches_deferred": batches_deferred,
         "seeds_executed": counts["seeds_executed"],
         "seeds_failed": counts["seeds_failed"],
         "deterministic_reds": sorted(failed_at_zero),

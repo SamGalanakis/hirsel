@@ -507,6 +507,10 @@ def dispatch_campaign(args, executable=None, laws=None):
         with subprocess.Popen(command, stdout=subprocess.PIPE, text=True) as boat:
             complete, failed = record(db, args.campaign, ranges, boat.stdout, results, executable, laws)
             status = boat.wait()
+        if laws is not None and status == os.EX_TEMPFAIL:
+            # The batch receipt records that Boat deferred the seeds, so a night
+            # reads it as no runs dispatched rather than as laws that ran nothing.
+            print(json.dumps({"kind": "batch_deferred", "campaign": args.campaign}), file=results)
         if laws is not None:
             for tape in (root / "fetched/tapes").glob("*.tape"):
                 tapes.mkdir(exist_ok=True)

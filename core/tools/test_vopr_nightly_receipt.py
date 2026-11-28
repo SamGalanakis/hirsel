@@ -62,6 +62,28 @@ class NightlyReceipt(unittest.TestCase):
             self.assertEqual((rare["runs"], rare["hits"], rare["severity"]), (2, 0, 30))
             self.assertEqual((common["runs"], common["hits"], common["severity"]), (2, 1, None))
 
+    def test_a_deferred_night_reports_no_reach_miss_for_laws_boat_never_ran(self):
+        # 2026-11-28: one deferred batch turned all 27 declared probes into runs-0 reach reds.
+        from vopr_nightly_receipt import summarize
+
+        law = "store@1/store/test_model"
+        for rows, missed in (
+            ([{"kind": "batch_deferred", "campaign": "night-001"}], []),
+            ([], [(law, "64 or more commands")]),
+        ):
+            with self.subTest(deferred=bool(rows)), tempfile.TemporaryDirectory() as directory:
+                run = Path(directory)
+                manifest = run / "manifest.json"
+                manifest.write_text(json.dumps([{"build": "commit", "law": law}]))
+                (run / "probe-declarations.json").write_text(json.dumps({law: {"64 or more commands": False}}))
+                with gzip.open(run / "night-001.jsonl.gz", "wt") as stream:
+                    for row in [{"build": "commit", "law": law, "seed": 0, "status": 0}, *rows]:
+                        print(json.dumps(row), file=stream)
+                summary = summarize(run, manifest, "commit")
+                self.assertEqual(summary["probes_missed"], missed)
+                self.assertEqual(summary["batches_deferred"], len(rows))
+                self.assertFalse([error for error in summary["evidence_errors"] if "unexpected" in error])
+
     def test_sometimes_counts_hits_per_seed_across_batches(self):
         from vopr_nightly_receipt import summarize
 

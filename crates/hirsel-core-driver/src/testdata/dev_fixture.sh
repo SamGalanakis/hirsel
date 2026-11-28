@@ -15,7 +15,7 @@ for package in runner store; do
 done
 # The runner manifest's test sources outside its root: a build checks they exist.
 mkdir -p "$workspace/runner/tests" "$workspace/runner/observe"
-cp -L "$libraries/programs/runner/tests/b9-vectors.hirsel" "$workspace/runner/tests/"
+cp -L "$libraries/programs/runner/tests/"*.hirsel "$workspace/runner/tests/"
 cp -L "$libraries/programs/runner/observe"/*.hirsel "$workspace/runner/observe/"
 cp -L "$testdata/dev_place.hirsel" "$workspace/runner/"
 printf 'pkg_v1.Workspace(members: ["runner", "store"])\n' > "$workspace/hirsel.hcfg"

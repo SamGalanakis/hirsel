@@ -66,17 +66,12 @@ pub(super) fn paid_repeats(
     Ok(paid)
 }
 
+/// The bytes of the one element a latch writes.
+///
 /// The longest latch the frontend emits for one element: its offset, two
 /// addresses, the element's size, the write and the increment, with room for
 /// the constants it materializes.
 const MAX_LATCH: usize = 8;
-
-/// The one element a latch writes, and whether it is the array element store
-/// the active rule requires to be paid.
-struct Unit {
-    bytes: u64,
-    array_store: bool,
-}
 
 fn unit(
     m: &Module,
@@ -87,13 +82,7 @@ fn unit(
     index: ValueId,
     next: ValueId,
     budget: &Debit<'_>,
-) -> Result<Option<Unit>, Error> {
-    let steps = |a: AddressId| {
-        body.addresses[a.index()]
-            .steps
-            .get(&body.pools.steps)
-            .unwrap_or_default()
-    };
+) -> Result<Option<u64>, Error> {
     // Each paid unit covers one iteration of a short latch, so the work per
     // charged byte stays within a constant factor of a bulk copy's.
     if rows.len() > MAX_LATCH {
@@ -105,11 +94,7 @@ fn unit(
         budget.check()?;
         let write = match *row {
             Inst::Store { address, .. } => match body.addresses[address.index()].ty {
-                PlaceTy::Value(Ty::Scalar(s)) => Some(Unit {
-                    bytes: s.size(),
-                    array_store: matches!(steps(address),
-                            [Step::Field(0), Step::Element(v)] if *v == index),
-                }),
+                PlaceTy::Value(Ty::Scalar(s)) => Some(s.size()),
                 _ => return Ok(None),
             },
             // One element's bytes, sized by the copied place's own type.
@@ -122,10 +107,7 @@ fn unit(
                             ..
                         }),
                     ) if *held == t => match layouts.logical(m, t)? {
-                        Some(bytes) => Some(Unit {
-                            bytes,
-                            array_store: false,
-                        }),
+                        Some(bytes) => Some(bytes),
                         None => return Ok(None),
                     },
                     _ => return Ok(None),
@@ -170,7 +152,7 @@ fn unit(
         }
     }
     // A zero-sized element pays nothing, so it cannot bound the iterations.
-    Ok(found.filter(|u| increment && u.bytes > 0))
+    Ok(found.filter(|&bytes| increment && bytes > 0))
 }
 
 fn repeat(
@@ -251,6 +233,10 @@ fn repeat(
     // `initial + count` (a wrapped end runs no iteration). An unknown count is
     // an SSA value; the charge must name that same value with nothing
     // redefining it in between, so no memory read stands in for the charge.
+    let elements = |count: ValueId| match facts.constant(count) {
+        Some(n) => Bytes::Fixed(n.saturating_mul(unit)),
+        None => Bytes::Exact(count, unit),
+    };
     let (needed, after) = match (facts.definition(*bound), facts.constant(*initial)) {
         (
             Some(Inst::IntArith {
@@ -261,14 +247,8 @@ fn repeat(
                 ..
             }),
             _,
-        ) if left == initial => (Bytes::Exact(*count, unit.bytes), Some(*bound)),
-        (_, Some(0)) => match facts.constant(*bound) {
-            Some(n) => match n.checked_mul(unit.bytes) {
-                Some(bytes) => (Bytes::Fixed(bytes), None),
-                None => return Ok(None),
-            },
-            None => (Bytes::Exact(*bound, unit.bytes), None),
-        },
+        ) if left == initial => (elements(*count), Some(*bound)),
+        (_, Some(0)) => (elements(*bound), None),
         _ => return Ok(None),
     };
     if !facts.prepaid(
@@ -280,12 +260,11 @@ fn repeat(
         hirsel_core_ids::work_steps::table::COPY,
         budget,
     )? {
-        if unit.array_store && matches!(needed, Bytes::Fixed(_)) {
-            return Err(Error::Invalid(format!(
-                "b{head}: scalar repeat lacks matching MEM-30 precharge"
-            )));
-        }
-        return Ok(None);
+        // Admission refuses every element repeat whose count is unpaid, not
+        // only the cycles the active graph would see.
+        return Err(Error::Invalid(format!(
+            "b{head}: element repeat lacks matching MEM-30 precharge"
+        )));
     }
     Ok(Some(latch))
 }

@@ -198,10 +198,14 @@ b3:
     ] {
         let fixture = load(why, &forged);
         wf::specialized_module(&fixture).unwrap();
-        assert!(
-            matches!(wf::metering_strict_with_budget(&fixture, &decode::Debit::unlimited()), Err(wf::Error::Invalid(ref e)) if e.contains("cycle")),
-            "{why}"
-        );
+        // Admission refuses the unpaid element loop too, though its latch
+        // stores and so leaves the scalar cycle rule.
+        for verify in [wf::metering_with_budget, wf::metering_strict_with_budget] {
+            assert!(
+                matches!(verify(&fixture, &decode::Debit::unlimited()), Err(wf::Error::Invalid(ref e)) if e.contains("precharge")),
+                "{why}"
+            );
+        }
     }
 }
 

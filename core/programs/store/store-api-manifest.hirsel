@@ -1,5 +1,7 @@
 fn validate_page_manifest(d: Dir, id: StoreId, take page_record: manifest.PageManifest) -> Result[manifest.ValidatedPageManifest, Error] waits {
-    failure_result_from_rep(manifest.require_object_memory_manifest(page_record))?
+    if page_record.account_tiered != 0 {
+        return Error(Unsupported(0x0031))
+    }
     validate_directory_graph(d, id, take page_record, false)
 }
 
@@ -20,7 +22,9 @@ fn walk_directory_graph(d: Dir, id: StoreId, take page_record: manifest.PageMani
 fn walk_directory_preview(d: Dir, id: StoreId, take page_record: manifest.PageManifest, allow_tiered: bool, walk_cold: bool, settled: manifest.SettledPacks, preview: Option[View[pager.PreviewRead]]) -> Result[manifest.ValidatedPageManifest, Error] waits {
     failure_result_from_rep(pager.require_preview(preview, store_key_to_rep(id), page_record.origin))?
     let graph = manifest.PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new())
-    let mut lists = manifest.empty_listed_pages(allow_tiered, take graph)
+    // A Directory inventory can still list class-3/4 packs after demotion.
+    // The graph walk checks the residency of each reachable collection.
+    let mut lists = manifest.empty_listed_pages(true, take graph)
     let mut final_item: Option[u64] = None
     let mut directory = d
     failure_result_from_rep(manifest.read_page_list(mut directory, store_key_to_rep(id), page_record, page_record.pack_root, None, PackList, mut final_item, mut lists, manifest.read_list_page))?

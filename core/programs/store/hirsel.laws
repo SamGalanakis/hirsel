@@ -313,6 +313,7 @@ store@1/store/test_declaration_seal src=ad880271f76c6b2e sig=63ce43c19fda8e21 ru
 store@1/store/test_direct_blob_bucket_idle_retirement src=460f77f3bce19655 sig=3c39162d6dea8c72 run=b9acc5aaec8cf9a9 bug=- oracle=- rows=pending
 store@1/store/test_direct_blob_idle_cancel_and_power_cut src=10bcf992eee94f2c sig=fcb0330de71ccc36 run=c7b2a52baff70a63 bug=- oracle=- rows=pending
 store@1/store/test_directory_drain_to_baseline src=16d791c575bbc691 sig=7015ca0942563269 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+store@1/store/test_directory_follower_after_demotion src=2ebad77b2c1b0775 sig=23bad69160f82795 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/test_drop_recreate src=dd97e6095452eede sig=26a90bbe14fee0a5 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_empty_commit_follower_and_weak_level src=1413e64f1a5c7c5f sig=5ee8805d2526e103 run=3df318621522d07b bug=- oracle=- rows=pending
 store@1/store/test_empty_commit_memory_ticket src=e26ce7dc162c66a2 sig=8feaaf9032b3d6c6 run=aff7b6b8625190d8 bug=- oracle=- rows=pending

@@ -1,0 +1,63 @@
+@test
+fn test_directory_follower_after_demotion(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut options = hot_options(0)?
+    options.free_budget = 0
+    options.probe_budget = 0
+    let mut writer = open(tasks, d, c, r, options)?
+    let rows = hot_seed(mut writer, 3)?
+    set_residency(mut writer, rows.id, Memory)?
+    let (_, _, take published) = failure_result_from_rep(capture.read_only_manifest(d))?
+    if published.account_tiered != 0 || published.deferred_next == 0 || published.deferred_frees.stamp == 0 || !idle_l100_has_tiered_pack(writer) {
+        fail("demotion must leave resident rows, pending frees and a listed Tiered pack")
+    }
+    let plan = follower_law_plan(Directory, options)
+    {
+        let service = follower_law_service(tasks, plan, 1)?
+        let mut ids = followers()
+        {
+            let mut mirror = follower(mut ids, follower_slot(follower_owner(service)?, plan)?, log_authority(d), c, None)?
+            let main_line = follower_main(mirror)
+            let old = snapshot_follower(mirror, main_line)?
+            let reading = follower_reader(mirror, 0)?
+            if get(reading, old, rows, 2)? != Some(2u64) || !typed_put(mut writer, rows, 2, 41) {
+                fail("demoted row or writer commit differed")
+            }
+            let expected = version(snapshot(writer))
+            close(take writer)?
+            let mut draining = open(tasks, d, c, r, hot_options(0)?)?
+            // The first cut drains this single leaf. The next retires its pack.
+            let _ = checkpoint(mut draining)?
+            let _ = checkpoint(mut draining)?
+            let (_, _, take drained) = failure_result_from_rep(capture.read_only_manifest(d))?
+            if drained.deferred_next == 0 || drained.deferred_frees.stamp != 0 || idle_l100_has_tiered_pack(draining) {
+                fail("drained fixture must retain only the deferred-free frontier")
+            }
+            let due = clock.deadline_after_ms(host.mono_ns(c), BUCKET_LAW_OP_MS)
+            let pos = catch_up(mut mirror, due)?
+            let current = at_least(mut mirror, pos, due)?
+            let latest = fresh(mut mirror, due)?
+            if pos.version != expected || version(current) != expected || version(latest) != expected || get(reading, latest, rows, 2)? != Some(41u64) || get(reading, old, rows, 2)? != Some(2u64) {
+                fail("follower lost the demoted row across the writer's cut")
+            }
+            close(take draining)?
+        }
+        close_follower_service(take service)?
+    }
+    let before = follower_law_room()
+    {
+        let service = follower_law_service(tasks, plan, 1)?
+        let mut ids = followers()
+        {
+            let mirror = follower(mut ids, follower_slot(follower_owner(service)?, plan)?, log_authority(d), c, None)?
+            let s = snapshot_follower(mirror, follower_main(mirror))?
+            if get(follower_reader(mirror, 0)?, s, rows, 2)? != Some(41u64) {
+                fail("idle follower missed the post-demotion commit")
+            }
+        }
+        close_follower_service(take service)?
+    }
+    if follower_law_room() != before {
+        fail("closing the follower service retained its grant")
+    }
+    Ok(())
+}

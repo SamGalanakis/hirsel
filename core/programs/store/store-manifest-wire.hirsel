@@ -324,18 +324,6 @@ pub fn manifest_account(m: PageManifest) -> u64 {
     m.account_memory + m.account_tiered
 }
 
-// Objects@1 / sim@1 and Memory-only reader manifests refuse Tiered roots until
-// Tiered lands on those paths.
-pub fn require_object_memory_manifest(m: PageManifest) -> Result[(), types.Failure] {
-    if m.account_tiered != 0 {
-        return Error(Unsupported(0x0031))
-    }
-    if m.deferred_frees.stamp != 0 || m.deferred_next != 0 {
-        return Error(Unsupported(0x0031))
-    }
-    Ok(())
-}
-
 pub fn cut_manifest_size[in installed, in proposed](input: CutInput[in installed, in proposed]) -> u64 {
     let records = match input.change {
         CutAddHead(head) => input.record_bytes + branch_root_bytes(head.name, head.roots),

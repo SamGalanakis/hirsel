@@ -158,15 +158,23 @@ fn csim_synced(ev: CsimEvidence, w: std.sim.world.Receipt) -> bool {
 // write. D6 drops the damaged frame and every frame after it; a
 // frame holds at most `group` commits, the newest recorded by the time its
 // receipt was drained, so the recovery goes back at most to just before
-// the oldest of them. A backward misdirect damages an older frame, so only
-// the cut-level point bounds it. A Torn receipt explains nothing here: a
+// the oldest of them. That bound holds for a lost write and a forward
+// misdirect, which leave the older bytes of the file as they were. A
+// backward misdirect damages an older frame, and so can a Corrupt: it flips
+// one bit anywhere in the write, and a group write restarts at the tail's
+// 4096-byte block, over every acknowledged frame the block holds. Only the
+// cut-level point bounds those two. A Torn receipt explains nothing here: a
 // power cut tears only a write whose success was never delivered.
 fn csim_rollback_allowed(ev: CsimEvidence, found: u64, floor: u64) -> bool {
     if found >= floor {
         return true
     }
     for w in ev.journal {
-        if csim_synced(ev, w.receipt) && (w.receipt.landed < w.receipt.at || found + ev.group + 1 >= w.worlds) {
+        let older = match w.receipt.fault {
+            Some(Corrupt) => true,
+            _ => w.receipt.landed < w.receipt.at,
+        }
+        if csim_synced(ev, w.receipt) && (older || found + ev.group + 1 >= w.worlds) {
             for r in ev.seen {
                 if csim_damaged_read(r) && r.node == w.receipt.node && (w.receipt.crashes < r.crashes || w.crashes < ev.crashes) {
                     return true

@@ -87,12 +87,10 @@ const CSIM_AROUND: Inline[u64, 13] =[CS_PUT, CS_DURABLE, CS_DELETE, CS_CAPTURE, 
 
 const CSIM_SHAPE_SEEDS: Inline[u64, 3] =[7, 96, 145]
 
-// D6SuffixLoss seeds whose damage lands in an acknowledged frame that
-// csim_rollback_allowed accepts. Other seeds of the shape are not all green:
-// 7, 15, 20 and 28 fail oracle (a), because a group write restarts at the
-// tail's 4096-byte block and its damage can reach an older frame than `group`
-// covers.
-const CSIM_D6_SEEDS: Inline[u64, 3] =[1, 6, 12]
+// D6SuffixLoss seeds whose damage lands in an acknowledged frame. In 7, 15,
+// 20 and 28 a corrupted group write, which restarts at the tail's 4096-byte
+// block, damages an older acknowledged frame than the ones it appends.
+const CSIM_D6_SEEDS: Inline[u64, 7] =[1, 6, 12, 7, 15, 20, 28]
 
 fn csim_skeleton(shape: CsimShape) -> List[CsimSlot] {
     let mut slots: List[CsimSlot] = list.new()

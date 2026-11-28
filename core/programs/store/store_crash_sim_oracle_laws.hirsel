@@ -157,7 +157,7 @@ fn test_csim_oracle_positive_delivered_eio(tasks: Tasks, c: Clock) -> Result[(),
 fn test_csim_oracle_positive_d6(tasks: Tasks, c: Clock) -> Result[(), String] waits {
     let image = oc_image(tasks, c)?
     let (tx, rx): (Sender[std.sim.world.Receipt], Receiver[std.sim.world.Receipt]) = channel.new(64)
-    let (d, server) = sim_disk_mount_tapped(tasks, c, take image, oc_plan(11, Some((1, Corrupt))), OC_ROOM, Some(take tx))
+    let (d, server) = sim_disk_mount_tapped(tasks, c, take image, oc_plan(11, Some((1, LostWrite))), OC_ROOM, Some(take tx))
     oc_put(d, "s/j-1", 0x55)?
     let mut crashed = sim_disk_unmount(take d, take server)
     let mut ev = csim_evidence(1)
@@ -176,8 +176,9 @@ fn test_csim_oracle_positive_d6(tasks: Tasks, c: Clock) -> Result[(), String] wa
     if oc_count(ev, true) != 1 {
         return Error("positive control 2: the recovery read did not see the damaged frame")
     }
-    // The damaged write was drained with worlds 0..3 recorded and 3 acked:
-    // with one commit per frame it held world 3, so D6 may show world 2.
+    // The lost write was drained with worlds 0..3 recorded and 3 acked:
+    // with one commit per frame it held world 3, and it left the older
+    // frames as they were, so D6 may show world 2 and nothing older.
     if !csim_rollback_allowed(ev, 2, 3) {
         return Error("positive control 2: a D6 history was refused")
     }

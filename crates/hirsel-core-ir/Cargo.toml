@@ -6,10 +6,6 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-[features]
-# Structural well-formedness for producer tests and checked CoreIR export.
-wf = []
-
 [dependencies]
 serde = { version = "1", features = ["derive", "rc"] }
 hirsel-core-ids = { path = "../hirsel-core-ids" }

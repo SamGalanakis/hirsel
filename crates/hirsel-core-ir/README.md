@@ -3,7 +3,7 @@
 CoreIR is the lowered form the one-pass front end emits and the evaluator, Cranelift
 and LLVM consume.
 Data types (`src/ir.rs`), the text form (`src/text.rs`),
-a test-only well-formedness function (`src/wf.rs`, feature `wf`) and one sample per
+the well-formedness verifier (`src/wf.rs`) and one sample per
 operation family (`samples/*.core`, each with its source program and hand-derived
 `run:` lines that the tests execute). The crate docs (`src/lib.rs`) state which parts
 are frozen (the base instructions and FORM v1a/v1b, all under the single `core v1`

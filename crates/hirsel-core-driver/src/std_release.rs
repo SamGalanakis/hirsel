@@ -617,13 +617,13 @@ fn lower_module(
     }
     let target =
         hirsel_core_layout::Target::from_triple(options.target).expect("supported native target");
-    let facts = hirsel_core_ir::roles::Facts::program(&[&module], &[]);
     let emit = |message: String| NativeStop::Emit {
         definition: first.definition.clone(),
         message,
     };
-    // The LLVM modules read nothing of the Core module or its facts, which
-    // leave before the optimiser and the code generator run.
+    hirsel_core_ir::wf::module(&module).map_err(emit)?;
+    let facts = hirsel_core_ir::roles::Facts::program(&[&module], &[]);
+    // Lowering releases CoreIR and its facts before LLVM optimization.
     let lowered = hirsel_llvm_lazy::lower_program(
         &[hirsel_llvm_lazy::Unit::Core {
             module: &module,

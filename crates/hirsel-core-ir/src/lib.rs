@@ -1145,7 +1145,6 @@ pub mod static_data;
 pub mod step_contexts;
 mod target;
 pub mod text;
-#[cfg(any(test, feature = "wf"))]
 pub mod wf;
 
 pub use address::{CodeRow, builtin_address, code_addresses, code_revision, is_versioned_builtin};

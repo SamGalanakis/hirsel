@@ -127,7 +127,6 @@ pub(crate) fn slot_facts(b: &Body, signatures: &[Signature]) -> SlotFacts {
     }
 }
 
-#[cfg(any(test, feature = "wf"))]
 /// Each slot's `StorageLive`, `StorageDead` and use points.
 pub(crate) fn slots(b: &Body) -> Slots {
     slots_with(b, &provenance(b))
@@ -177,7 +176,6 @@ fn slots_with(b: &Body, from: &[Vec<u32>]) -> Slots {
     out
 }
 
-#[cfg(any(test, feature = "wf"))]
 /// For each block, the blocks control enters it from and how much of each ran
 /// before: the whole block for a terminator edge, the instructions before the
 /// failing one for a failure edge.
@@ -197,7 +195,6 @@ fn predecessors(b: &Body) -> Vec<Vec<Point>> {
     preds
 }
 
-#[cfg(any(test, feature = "wf"))]
 /// The first use of a slot on a path where its last `StorageLive` or
 /// `StorageDead` is a `StorageDead`, as (use point, slot).
 pub(crate) fn use_after_end(b: &Body) -> Option<(Point, usize)> {
@@ -211,7 +208,6 @@ pub(crate) fn use_after_end(b: &Body) -> Option<(Point, usize)> {
     uses_after_end(b, &slots(b), true).into_iter().next()
 }
 
-#[cfg(any(test, feature = "wf"))]
 /// For each slot used on a path where its last `StorageLive` or `StorageDead` is a
 /// `StorageDead`, one such use, as (use point, slot); only the first when `first`.
 fn uses_after_end(b: &Body, slots: &Slots, first: bool) -> Vec<(Point, usize)> {

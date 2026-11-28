@@ -170,8 +170,7 @@ fn emit_unit(
     object_key: ContentHash,
     instance: &Identity,
 ) -> Result<hirsel_core_ir::source::NativeObject, String> {
-    // Disjoint slots share a home before emission (hirsel_core_ir::extent);
-    // the compiler identity in every cache key names this step.
+    // The compiler identity in the cache key covers slot sharing and verification.
     let mut shared = module.clone();
     shared.law_observation = options.recording;
     shared.store_teardown = options.store_teardown;
@@ -187,6 +186,7 @@ fn emit_unit(
         hirsel_core_ir::extent::share_slots(body, signatures);
     }
     let module = &shared;
+    hirsel_core_ir::wf::module(module)?;
     match options.backend {
         Backend::Cranelift => hirsel_cranelift::core::emit_object_with_charge_observation(
             module,

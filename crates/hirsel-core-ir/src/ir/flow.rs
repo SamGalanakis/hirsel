@@ -44,7 +44,6 @@ impl Inst {
 
 /// The blocks control leaves `bi` for: its instructions' failure blocks and its
 /// terminator's targets.
-#[cfg(any(test, feature = "wf"))]
 pub(crate) fn successors(b: &Body, bi: usize) -> Vec<BlockId> {
     let mut successors = Vec::new();
     for_each_successor(b, bi, |next| successors.push(next));

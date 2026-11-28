@@ -462,6 +462,10 @@ pub(super) fn emit_release_image(
     if let Some(pass) = super::RELEASE_PASS.get() {
         pass(&mut joined);
     }
+    hirsel_core_ir::wf::module(&joined).map_err(|message| NativeStop::Emit {
+        definition: entry.clone(),
+        message,
+    })?;
     let modules = [joined];
     let refs = [&modules[0]];
     // The checked body keys identify the source-neutral published modules.

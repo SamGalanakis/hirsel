@@ -11,7 +11,6 @@
 mod flow;
 pub use crate::static_data::StaticValue;
 pub(crate) use flow::for_each_successor;
-#[cfg(any(test, feature = "wf"))]
 pub(crate) use flow::successors;
 mod allocation;
 mod closed;

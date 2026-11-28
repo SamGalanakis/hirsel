@@ -197,21 +197,51 @@ impl RegistrationOrder {
 }
 
 impl<F> Code<F> {
+    fn candidate_index(&self, candidate: &Candidate) -> Result<u32, Refusal> {
+        if !std::ptr::eq(candidate.image.as_ptr(), Arc::as_ptr(&self.image)) {
+            return Err(Refusal::NoEntry);
+        }
+        u32::try_from(candidate.index).map_err(|_| Refusal::Capacity)
+    }
+
     /// Bind the installer-selected rows to this realization before activation.
     /// Several distinct routes can use one executable with different bindings.
     pub fn register<'a>(
         &self,
         candidates: impl IntoIterator<Item = &'a Candidate>,
     ) -> Result<Registered<F>, Refusal> {
-        let indices = candidates.into_iter().map(|candidate| {
-            if !std::ptr::eq(candidate.image.as_ptr(), Arc::as_ptr(&self.image)) {
-                return Err(Refusal::NoEntry);
-            }
-            u32::try_from(candidate.index).map_err(|_| Refusal::Capacity)
-        });
+        let indices = candidates.into_iter().map(|c| self.candidate_index(c));
         Ok(Registered {
             code: self.clone(),
             order: RegistrationOrder::new(indices)?,
+        })
+    }
+}
+
+impl<F> Registered<F> {
+    /// Compare this launch's observed selection with the release's canonical
+    /// order. Even a sparse canonical selection shares its index array. On a
+    /// difference, retain exactly the launch's selected ordinals.
+    pub fn rebind<'a>(
+        &self,
+        candidates: impl IntoIterator<Item = &'a Candidate>,
+    ) -> Result<Self, Refusal> {
+        let mut selected = candidates.into_iter().map(|c| self.code.candidate_index(c));
+        let mut matched = 0;
+        let order = loop {
+            let observed = selected.next().transpose()?;
+            if self.order.get(matched) != observed {
+                let prefix = (0..matched).map(|at| Ok(self.order.get(at).unwrap()));
+                break RegistrationOrder::new(prefix.chain(observed.map(Ok)).chain(selected))?;
+            }
+            if observed.is_none() {
+                break self.order.clone();
+            }
+            matched += 1;
+        };
+        Ok(Self {
+            code: self.code.clone(),
+            order,
         })
     }
 }
@@ -354,7 +384,7 @@ impl Worker {
         let updates = self.shared.updates.load(Ordering::Relaxed);
         if updates != self.seen {
             self.seen = updates;
-            self.park();
+            self.drop_unborrowed(|row| row.cell.version.load(Ordering::Relaxed) != row.version);
         }
         self.clock += 1;
         let version = cell.version.load(Ordering::Acquire);
@@ -577,13 +607,17 @@ impl Worker {
         ))
     }
 
-    /// Drop every unborrowed row whose slot has moved on. A worker calls this
-    /// before it parks. Borrowed rows stay pinned until their calls finish or promote.
+    /// Release idle pins before sleeping. A slot can retire after the worker
+    /// parks, with no subsequent dispatch to observe its new version.
     pub fn park(&mut self) {
+        self.drop_unborrowed(|_| true);
+    }
+
+    fn drop_unborrowed(&mut self, evict: impl Fn(&Row) -> bool) {
         for slot in &mut self.rows {
-            if let Some(row) = slot
-                && row.borrows == 0
-                && row.cell.version.load(Ordering::Relaxed) != row.version
+            if slot
+                .as_ref()
+                .is_some_and(|row| row.borrows == 0 && evict(row))
             {
                 *slot = None;
             }

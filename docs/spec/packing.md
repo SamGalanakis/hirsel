@@ -374,8 +374,9 @@ entry whose `signature` digest equals the digest of `F`.
    evicting the least recently used. To dispatch, a worker reads the slot's version (a
    plain load); when its row has that version it borrows the row's `Code` with no atomic
    operation and no write to shared memory. Otherwise it takes the slot's lock, clones the
-   current `Code` into the row and drops the old one. A worker drops rows whose slot has
-   moved on before it parks and whenever it sees the pool's update counter change.
+   current `Code` into the row and drops the old one. An active worker drops unborrowed rows whose slot has moved on
+   when it sees the pool's update counter change. Before parking it drops every unborrowed
+   row, so retirement can reclaim the image while the worker sleeps.
 5. **Retired code.** An image that no slot names is **retired**. A pool has a
    **retired-code byte budget** (default 64 MiB). Bytes count against it from the moment
    an image is retired until its cohort is recycled. An `activate` that would retire an

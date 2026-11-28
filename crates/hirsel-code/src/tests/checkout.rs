@@ -65,7 +65,10 @@ fn resolved_entry_stays_with_its_installation_through_replacement() {
         Err(Refusal::NoEntry)
     );
     // A second checkout of B can have a different selection or grant binding.
-    let third = slot.activate_checkout(second.version(), &reversed).unwrap();
+    let bound = reversed
+        .rebind([sibling.candidate(), new.candidate()])
+        .unwrap();
+    let third = slot.activate_checkout(second.version(), &bound).unwrap();
     assert_eq!(
         worker.dispatch_entry(&second, 0, &new, |_| ()),
         Err(Refusal::NoEntry)
@@ -90,7 +93,11 @@ fn resolved_entry_stays_with_its_installation_through_replacement() {
         Err::<Option<()>, _>(Refusal::NoEntry)
     );
     // A repeated executable can serve two registrations with different bound arguments.
-    let repeated = code.register([new.candidate(), new.candidate()]).unwrap();
+    assert!(matches!(
+        reversed.rebind([sibling.candidate(), new.candidate(), old.candidate()]),
+        Err(Refusal::NoEntry)
+    ));
+    let repeated = reversed.rebind([new.candidate(), new.candidate()]).unwrap();
     let fourth = slot.activate_checkout(third.version(), &repeated).unwrap();
     for ordinal in [0, 1] {
         assert_eq!(
@@ -98,15 +105,15 @@ fn resolved_entry_stays_with_its_installation_through_replacement() {
             Ok(Some(22))
         );
     }
-    let empty = code.register([]).unwrap();
+    let empty = reversed.rebind([]).unwrap();
     let fifth = slot.activate_checkout(fourth.version(), &empty).unwrap();
     assert_eq!(
         worker.dispatch_registered(&fifth, 0, |_: Leaf| ()),
         Err(Refusal::NoEntry)
     );
-    drop((first, second, third, fourth, fifth, repeated, empty));
-    drop((b, code, selected, reversed));
-    drop(slot);
     worker.park();
+    drop((first, second, third, fourth, fifth, repeated, empty));
+    drop((b, code, selected, bound, reversed));
+    drop(slot);
     assert_eq!((loader.installed(), loader.retired()), (0, 0));
 }

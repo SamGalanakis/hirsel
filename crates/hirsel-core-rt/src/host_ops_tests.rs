@@ -425,13 +425,11 @@ unsafe extern "C" fn entry(ctx: *mut Context, cfg: *const Config, _: *mut MainRe
                 let file = call(ctx, OPEN, 1, Some(&mut literal(b"log")), 0).value;
                 assert_eq!(call(ctx, TRY_LOCK, file, None, 0).value, 1);
                 assert_eq!(call(ctx, UNLOCK, file, None, 0).error, IoError::OK);
-                let mut borrowed = literal(b"unchanged");
-                let pointer = borrowed.data;
-                assert_eq!(call(ctx, READ, file, Some(&mut borrowed), 0).value, 0);
-                assert_eq!(
-                    (borrowed.data, borrowed.len, borrowed.capacity),
-                    (pointer, 9, 0)
-                );
+                let mut buf = literal(b"unchanged");
+                let pointer = buf.data;
+                let read = call(ctx, READ, file, Some(&mut buf), 0);
+                assert_eq!(read.error, IoError::from_errno(libc::EINVAL));
+                assert_eq!((buf.data, buf.len, buf.capacity), (pointer, 9, 0));
                 (*state).close_next_read = true;
                 let mut bytes = [0u8; 8];
                 let mut buf = Buffer {

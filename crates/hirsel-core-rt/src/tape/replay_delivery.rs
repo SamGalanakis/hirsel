@@ -479,6 +479,12 @@ pub(super) unsafe fn replay_out(
             return Err(Fault::Corrupt);
         }
     } else if carries_payload(op) {
+        if op == RANDOM
+            && ok
+            && out.payload.len() as u64 != space.ok_or(Fault::Corrupt)?.recorded[0]
+        {
+            return Err(Fault::Corrupt);
+        }
         if op == NEXT_ENTRIES
             && (!valid_entries(&out.payload, out.value) || (!ok && !out.payload.is_empty()))
         {

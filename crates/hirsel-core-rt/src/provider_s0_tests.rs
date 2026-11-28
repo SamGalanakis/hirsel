@@ -288,11 +288,7 @@ fn request(operation: u8, site: u64) -> Request {
         handle: 0,
         path: ptr::null(),
         path_len: 0,
-        buffer: Buffer {
-            data: ptr::null_mut(),
-            len: 0,
-            capacity: 0,
-        },
+        buffer: crate::net::empty_buffer(),
         site,
     }
 }
@@ -1223,6 +1219,11 @@ unsafe extern "C" fn file_job(context: *mut Context, _: *mut u8, input: *mut u8)
         let opened = crate::host_file::hirsel_core_host_file_open(context, &provider, &mut open);
         assert_eq!(opened.status, 0);
         let mut op = request(job.operation, FILE_SITE);
+        let mut byte = 0u8;
+        if job.operation == READ {
+            op.buffer.data = &raw mut byte;
+            op.buffer.capacity = 1;
+        }
         let outcome = crate::host_file::hirsel_core_host_file(context, opened.value, &mut op);
         (*job.rec).results.push((FILE_SITE, outcome, 0));
         1
@@ -1298,11 +1299,10 @@ fn closes(rec: &Rec) -> usize {
 fn cancelled_file_op(operation: u8, issued: bool) -> Rec {
     unsafe fn body(context: *mut Context, rec: *mut Rec) {
         unsafe {
-            let job = FileJob {
+            let mut input = FileJob {
                 rec,
                 operation: OPERATION.get(),
             };
-            let mut input = job;
             let task = hirsel_core_spawn(
                 context,
                 0,

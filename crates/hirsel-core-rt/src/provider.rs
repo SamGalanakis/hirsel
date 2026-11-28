@@ -300,8 +300,9 @@ unsafe fn admit<const RETURNABLE: bool>(
                 return Some(CANCELLED);
             }
             let request = &*request;
-            if (matches!(operation, MKDTEMP | MKSTEMP)
-                && request.buffer.capacity.saturating_sub(request.buffer.len) < 32)
+            if (operation == RANDOM && request.buffer.capacity == 0)
+                || (matches!(operation, MKDTEMP | MKSTEMP)
+                    && request.buffer.capacity.saturating_sub(request.buffer.len) < 32)
                 || (operation == NEXT_ENTRIES
                     && request.buffer.capacity.saturating_sub(request.buffer.len) < 258)
                 || (operation == WRITE_AT

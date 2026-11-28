@@ -503,8 +503,9 @@ operations it names; nothing else about them may be inferred from an implementat
   the writing handle, which the kernel holds until the last request issued through it completes
   (Store §3.3b, v2.98). A read never returns bytes the host failed to read: an unreadable page is an
   error for the read that reaches it, never zeros. `host.read` appends to `buf` at most its spare
-  capacity, never changes its capacity, advances the file's cursor by the count and returns it, `Ok(0)` at end of file
-  or when `buf` has no spare capacity; a read that returns an error has appended nothing
+  capacity and advances the cursor by the returned count. `Ok(0)` means EOF. A buffer
+  with no spare capacity gives `Error(Other(22))` (EINVAL) before issue, even at EOF.
+  A read that returns an error has appended nothing
   and moved no cursor, so a partial read is delivered as `Ok`. A successful `host.write`
   committed all of `b`; a `WriteError`'s `written` bytes stay written. Streams take bytes
   the same way: `stdout.write_bytes(out, b)` and `stderr.write_bytes` commit a prefix of
@@ -595,8 +596,10 @@ operations it names; nothing else about them may be inferred from an implementat
   point and passes the replay point as `host.sleep_until` does. No host operation admits; every byte it returns
   lands in capacity the caller already holds. `HostFile` is a mechanical resource
   ([MEM-24](budgets.md#mem-24-logical-charges)): its finalizer closes it and ignores the
-  outcome. `host.random(r: Random, mut b: Bytes)` appends to `b` exactly its spare capacity of bytes from the host's cryptographic source, never
-  changes its capacity, and never waits or fails. The bytes are unpredictable and
+  outcome. `host.random(r: Random, mut b: Bytes)` overwrites bytes zero through
+  `list.capacity(b) - 1` from the host's cryptographic source and sets the length to
+  capacity. Zero writable capacity raises `Bounds` before issue. A host entropy failure
+  ends the run. A draw admits nothing and does not wait. The bytes are unpredictable and
   independent of every other value the run observes; like every provider result they pass
   the replay point at issue and at delivery ([CAP-8](capabilities.md#cap-8-the-replay-point)),
   and a simulation supplies its own.

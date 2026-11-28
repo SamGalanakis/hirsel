@@ -160,3 +160,13 @@ pub(super) unsafe fn canonical(r: &Request) -> Args {
         _ => arguments,
     }
 }
+
+/// A random draw requests an exact size. Other buffered reads accept any room
+/// that fits the recorded delivery.
+pub(super) fn match_issue(op: u8, recorded: &Args, current: &Args) -> bool {
+    if op == RANDOM {
+        recorded == current
+    } else {
+        recorded.operands() == current.operands()
+    }
+}

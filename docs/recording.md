@@ -94,6 +94,10 @@ and every task the run starts belongs to it.
 **Canonical arguments.** An issue's arguments of 16 bytes or fewer are stored literally,
 and longer ones as their xxh3-64 digest.
 
+A `host.random` issue records the exact draw length in the first capacity field. Replay
+requires that length to match the destination capacity. A successful delivery carries
+exactly that many bytes and replaces the destination starting at byte zero.
+
 **Spare capacity.** An issue that reads into a buffer (a listing read, a positioned read,
 `RESOLVE`, `DGRAM_RECV`, `stdin.read`, a credential fetch) records its buffer's spare
 capacity, but a replay does not compare the replaying buffer's spare capacity with the

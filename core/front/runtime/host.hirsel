@@ -26,8 +26,9 @@ pub fn main(d: Dir) -> Result[(), Exit] {
     result.unwrap(host.close(take f))
     let mut reader = result.unwrap(host.open(d, "file", Read))
     let mut buf: Bytes = list.new()
-    if result.unwrap(host.read(mut reader, mut buf)) != 0u64 {
-        return Error(Exit(status: 5))
+    match host.read(mut reader, mut buf) {
+        Error(Other(22)) => {},
+        _ => return Error(Exit(status: 5)),
     }
     result.unwrap(host.close(take reader))
     result.unwrap(host.mkdir(d, "directory"))

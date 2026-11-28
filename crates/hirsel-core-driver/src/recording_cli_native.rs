@@ -88,7 +88,7 @@ fn recording_cli_replays() {
     assert!(!out.contains("site"));
     // Random already exists in the provider ABI. Its payload must also replay,
     // including DATA continuation, rather than leave the carrier empty.
-    let random = "pub fn main(r: Random, out: Stdout) -> Result[(), Exit] { let mut b: Bytes = list.with_capacity(70000); host.random(r, mut b); if list.len(b) != 70000u64 { return Error(Exit(status: 6)) }; result.unwrap(stdout.write_bytes(out, b)); Ok(()) }";
+    let random = "pub fn main(r: Random, out: Stdout) -> Result[(), Exit] { let mut b: Bytes = list.with_capacity(70000); list.fill(mut b, 70000, 0u8); host.random(r, mut b); if list.len(b) != 70000u64 { return Error(Exit(status: 6)) }; result.unwrap(stdout.write_bytes(out, b)); Ok(()) }";
     std::fs::write(app.join("main.hirsel"), random).unwrap();
     let random_tape = dir.path().join("random.tape");
     let (code, _, err) = invoke(
@@ -112,6 +112,20 @@ fn recording_cli_replays() {
         (Some(0), String::new()),
         "random replay: {err}"
     );
+    use hirsel_tape_format::{Frame, op};
+    let draws: Vec<_> = rl8_root_frames(&random_tape)
+        .into_iter()
+        .filter_map(|frame| match frame {
+            Frame::Op {
+                op: op::RANDOM,
+                args,
+                out,
+                ..
+            } => Some((args.recorded_spare(), out.written, out.payload.len())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(draws, [(Some([70000, 0]), 70000, 70000)]);
     profile_fixture_replay(&common, &app, &random_tape);
     std::fs::write(
         app.join("main.hirsel"),

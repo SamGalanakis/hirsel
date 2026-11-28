@@ -4,10 +4,11 @@ pub fn main(d: Dir) -> Result[(), Exit] {
     match host.open(d, "../escape", Read) { Error(Denied) => {}, _ => return Error(Exit(status: 2)) }
     let mut f = result.unwrap(host.open(d, "input", Read))
     let mut buf: Bytes = list.new()
-    if result.unwrap(host.read(mut f, mut buf)) != 0u64 { return Error(Exit(status: 3)) }
+    match host.read(mut f, mut buf) { Error(Other(22)) => {}, _ => return Error(Exit(status: 3)) }
     buf = list.with_capacity(5)
     if result.unwrap(host.read(mut f, mut buf)) != 5u64 || list.len(buf) != 5u64 { return Error(Exit(status: 4)) }
     if buf[0] != b'h' || buf[1] != b'e' || buf[2] != b'l' || buf[3] != b'l' || buf[4] != b'o' { return Error(Exit(status: 5)) }
+    list.clear(mut buf)
     if result.unwrap(host.read(mut f, mut buf)) != 0u64 { return Error(Exit(status: 6)) }
     match host.write(mut f, string.as_bytes("x")) { Error(e) => if e.written != 0u64 { return Error(Exit(status: 8)) } else { match e.error { Closed => {}, _ => return Error(Exit(status: 9)) } }, _ => return Error(Exit(status: 10)) }
     result.unwrap(host.close(take f))

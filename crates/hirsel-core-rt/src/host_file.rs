@@ -638,7 +638,12 @@ pub unsafe extern "C" fn hirsel_core_host_file(
             (*registry).registry.file(file)
         };
         if owned.read_only_dir && matches!((*request).operation, WRITE | WRITE_AT | ZERO_AT) {
-            return crate::host_ops::denied(context, (*request).site);
+            return crate::host_ops::refused(context, (*request).site, libc::EACCES);
+        }
+        if matches!((*request).operation, READ | READ_AT)
+            && (*request).buffer.capacity <= (*request).buffer.len
+        {
+            return crate::host_ops::refused(context, (*request).site, libc::EINVAL);
         }
         (*request).handle = owned.handle;
         if matches!((*request).operation, READ_AT | WRITE_AT | ZERO_AT) {

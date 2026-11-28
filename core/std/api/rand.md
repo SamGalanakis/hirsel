@@ -18,9 +18,10 @@ belongs to the caller and uses no implicit global or thread state.
 - A store call can use `std.rand.new(info.seed, 0)` with its `CallInfo.seed`.
   Each call gets a different seed and replay uses that same seed. Tests and other
   reproducible callers can supply their own constant or derived words.
-- For fresh entropy, use a buffer with 16 bytes of spare capacity and call
-  `host.random(r, mut b)` with an explicit `Random` capability. In a new buffer,
-  pass the result to `std.rand.new(list.word_le(b, 0), list.word_le(b, 8))`.
+- For fresh entropy, use a buffer with capacity 16 and call
+  `host.random(r, mut b)` with an explicit `Random` capability. The draw overwrites every byte
+  starting at zero and sets the length to capacity without allocating. A buffer with
+  zero writable capacity raises `Bounds` before issue. Pass the result to `std.rand.new(list.word_le(b, 0), list.word_le(b, 8))`.
   Recording captures the host bytes at delivery and replay supplies them again
   ([the replay point](../../../docs/spec/capabilities.md#cap-8-the-replay-point)).
   Subsequent draws only use the generator state.

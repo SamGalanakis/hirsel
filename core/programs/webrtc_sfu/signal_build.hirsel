@@ -18,7 +18,6 @@ const PWD_BYTES: u64 = 12
 
 fn drawn(r: Random, n: u64) -> Bytes {
     let mut raw: Bytes = list.with_capacity(n)
-    list.fill(mut raw, n, 0)
     host.random(r, mut raw)
     raw
 }

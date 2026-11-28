@@ -177,8 +177,10 @@ fn replace(d: Dir, b: Bytes) -> Result[(), IoError] waits {
 }
 ```
 
-Random bytes land in capacity the caller already holds, so a draw admits nothing, and they
-pass the replay point like every provider result (CAP-8):
+`host.random(r, mut b)` fills the entire writable capacity starting at byte zero and sets
+the length to that capacity. A reserved, partially filled or full 16-byte buffer receives
+16 fresh bytes. Zero writable capacity raises `Bounds` before issue. The draw admits
+nothing. CAP-8 records the requested length and the delivered bytes.
 
 ```hirsel
 fn store_id(r: Random) -> Bytes {
@@ -187,6 +189,11 @@ fn store_id(r: Random) -> Bytes {
   b
 }
 ```
+
+File reads preserve the existing prefix. `host.read` and `host.read_at` append into spare
+capacity and return the count. With no spare capacity they return `Error(Other(22))`
+(EINVAL) before issue. With room available, `Ok(0)` means EOF. Clear the buffer to reuse
+its storage, or reserve more space to continue appending.
 
 `host.stopped(p: Process) waits` completes after the process receives its first
 SIGTERM or SIGINT, including a signal received before the call. It is a

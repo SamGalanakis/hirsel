@@ -140,15 +140,34 @@ fn read_into_in_steps(d: Dir) -> u64 waits {
     a * 100 + b * 10 + c
 }
 
-// A buffer with no spare capacity reads nothing.
-// expect: run read_into_full_buffer(dir) = 0
-fn read_into_full_buffer(d: Dir) -> u64 waits {
-    result.unwrap(file.write(d, "s", string.as_bytes("abc")))
+// Refusal leaves both the prefix and the cursor available for a retry.
+// expect: run read_into_full_buffer(dir) = true
+fn read_into_full_buffer(d: Dir) -> bool waits {
+    result.unwrap(file.write(d, "s", b"abc"))
     let mut src = result.unwrap(file.open(d, "s", Read))
-    let mut buf: Bytes = list.new()
-    let n = result.unwrap(file.read_into(mut src, mut buf))
-    result.unwrap(file.close(take src))
-    n
+    let mut buf: Bytes = list.with_capacity(2)
+    list.fill(mut buf, 2, b'!')
+    match file.read_into(mut src, mut buf) {
+        Error(Other(22)) => {},
+        _ => return false,
+    }
+    match file.read_at(mut src, 1, mut buf) {
+        Error(Other(22)) => {},
+        _ => return false,
+    }
+    if list.compare_bytes(buf, b"!!") != Equal {
+        return false
+    }
+    list.truncate(mut buf, 1)
+    if result.unwrap(file.read_into(mut src, mut buf)) != 1 || list.compare_bytes(buf, b"!a") != Equal {
+        return false
+    }
+    list.clear(mut buf)
+    if result.unwrap(file.read_into(mut src, mut buf)) != 2 || list.compare_bytes(buf, b"bc") != Equal {
+        return false
+    }
+    list.clear(mut buf)
+    result.unwrap(file.read_into(mut src, mut buf)) == 0
 }
 
 // Append writes after what is there.

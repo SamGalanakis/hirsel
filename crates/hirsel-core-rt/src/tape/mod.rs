@@ -1596,7 +1596,7 @@ unsafe fn replay(
                 Some(Mismatch::Op)
             } else if *object != ordinal as u64 {
                 Some(Mismatch::Object)
-            } else if stored.operands() != args.operands() {
+            } else if !arguments::match_issue(*op, stored, args) {
                 Some(Mismatch::Arg)
             } else {
                 None

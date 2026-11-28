@@ -15,11 +15,11 @@ fn request(operation: u8, mode: u8, site: u64, buffer: Buffer) -> Request {
     }
 }
 
-/// Deny a checked operation at entry, without issuing it to a provider.
+/// Refuse a checked operation at entry, without issuing it to a provider.
 ///
 /// # Safety
 /// The context belongs to the currently running task.
-pub(crate) unsafe fn denied(context: *mut Context, site: u64) -> Outcome {
+pub(crate) unsafe fn refused(context: *mut Context, site: u64, errno: i32) -> Outcome {
     // SAFETY: the caller owns this task's entry and context.
     unsafe {
         crate::process::deny_describe_capability(context);
@@ -29,7 +29,7 @@ pub(crate) unsafe fn denied(context: *mut Context, site: u64) -> Outcome {
         }
     }
     Outcome {
-        error: IoError::from_errno(libc::EACCES),
+        error: IoError::from_errno(errno),
         ..Outcome::default()
     }
 }
@@ -68,11 +68,20 @@ pub unsafe extern "C" fn hirsel_core_host_io(
     unsafe {
         let buffer = carrier(operand);
         let mut request = request(op, mode, site, buffer);
+        if op == crate::provider::RANDOM {
+            // Providers and the recorder append to this private carrier, starting at byte zero.
+            request.buffer.len = 0;
+        }
         let provider = hirsel_core_capability_provider(context, handle);
         request.handle = hirsel_core_capability_handle(context, handle);
         let result = drive(context, provider, &mut request, None);
-        if op == crate::provider::RANDOM && request.buffer.len != buffer.len {
-            (*operand).len = request.buffer.len;
+        if op == crate::provider::RANDOM && result.status == 0 {
+            if result.error != IoError::OK || request.buffer.len != buffer.capacity {
+                crate::run_stop::raise(crate::run_stop::Stop::from_static(
+                    b"host.random: provider did not fill the requested buffer",
+                ));
+            }
+            (*operand).len = buffer.capacity;
         }
         result
     }
@@ -170,7 +179,7 @@ pub unsafe extern "C" fn hirsel_core_host_op(
             | ZERO_EXTENSION | OPEN_DIR | ENTRIES | STAT => {
                 let rights = handle & DIR_READ_ONLY;
                 if rights != 0 && needs_writable_dir(op, mode) {
-                    return denied(context, site);
+                    return refused(context, site, libc::EACCES);
                 }
                 if op == ENTRIES
                     && !operand.is_null()
@@ -180,7 +189,7 @@ pub unsafe extern "C" fn hirsel_core_host_op(
                             buffer.len,
                         )))
                 {
-                    return denied(context, site);
+                    return refused(context, site, libc::EACCES);
                 }
                 let handle = handle & !DIR_READ_ONLY;
                 let provider = hirsel_core_capability_provider(context, handle);
@@ -320,7 +329,7 @@ pub unsafe extern "C" fn hirsel_core_host_rename(
 ) -> Outcome {
     unsafe {
         if handle & DIR_READ_ONLY != 0 {
-            return denied(context, site);
+            return refused(context, site, libc::EACCES);
         }
         let a = *from;
         let b = *to;

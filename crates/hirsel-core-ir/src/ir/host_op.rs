@@ -22,7 +22,7 @@ pub enum HostOp {
     Sync,
     /// Flush directory entries with fsync.
     SyncDir,
-    /// Fill a Bytes carrier's spare capacity from the Random capability.
+    /// Fill a Bytes carrier's entire writable capacity from the Random capability.
     Random,
     Connect,
     Listen,

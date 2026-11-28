@@ -55,3 +55,43 @@ fn random_tape_whole_draws_and_charge() -> bool {
     host.random(tape, mut rest)
     random_tape_retains_charge() && bounds && list.len(first) == 1 && first[0] == 0x66 && list.len(rest) == 3 && rest[0] == 0x6f && rest[1] == 0x75 && rest[2] == 0x72
 }
+
+// expect: run random_fills_owned_capacity() = true
+fn random_fills_owned_capacity() -> bool {
+    let source = b"abcdef"
+    let r = provide.random_tape(take source)
+    let mut b: Bytes = list.with_capacity(2)
+    host.random(r, mut b)
+    if list.compare_bytes(b, b"ab") != Equal {
+        return false
+    }
+    list.fill_slice(mut b, 0, 2, 0u8)
+    host.random(r, mut b)
+    if list.compare_bytes(b, b"cd") != Equal {
+        return false
+    }
+    list.truncate(mut b, 1)
+    host.random(r, mut b)
+    list.compare_bytes(b, b"ef") == Equal
+}
+
+// expect: run random_requires_storage() = true
+fn random_requires_storage() -> bool {
+    let r = provide.random(1)
+    let failed = isolate(fn() -> () {
+        let mut b: Bytes = list.new()
+        host.random(r, mut b)
+    })
+    match failed {
+        Ok(Error(causes)) => {
+            for cause in causes {
+                return match cause.kind {
+                    Bounds => true,
+                    _ => false,
+                }
+            }
+            false
+        },
+        _ => false,
+    }
+}

@@ -28,7 +28,7 @@ pub fn open(d: Dir, p: String, mode: OpenMode) -> Result[HostFile, IoError] wait
 }
 
 /// Reads at most capacity(buf) - len(buf) bytes from f's position and appends them to
-/// buf; Ok(0) at end of file or when buf has no spare capacity. `host.read`.
+/// buf. Ok(0) means EOF. No spare capacity gives Error(Other(22)) before issue.
 /// Fails: Error(Denied | Closed | Other(_)); buf unchanged. Alloc: nothing; buf never
 /// grows. Prefix: on failure nothing was read. Cost: O(n) bytes.
 /// Ex: `list.clear(mut buf); let n = std.file.read_into(mut src, mut buf)?`
@@ -44,7 +44,7 @@ pub fn write_all(mut f: HostFile, data: Bytes) -> Result[(), WriteError] waits {
     host.write(mut f, data)
 }
 
-/// Appends up to the spare capacity of buf by reading at a byte offset.
+/// Appends at a byte offset with the same room requirement and EOF result as read_into.
 pub fn read_at(mut f: HostFile, at: u64, mut buf: Bytes) -> Result[u64, IoError] waits {
     host.read_at(mut f, at, mut buf)
 }

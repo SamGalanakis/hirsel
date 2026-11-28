@@ -172,16 +172,19 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
             }
             source.push_str("}\n");
         }
-        if let Some((op, _)) = run.matrix
+        if let Some((op, failing)) = run.matrix
             && sig.params.contains(&Param::Value(Ty::Ptr))
         {
-            let len = if matches!(op, HostOp::Read | HostOp::Mkdtemp) {
-                4
-            } else {
-                3
+            let len = match op {
+                HostOp::Random if !failing => 64,
+                HostOp::Read | HostOp::Mkdtemp => 4,
+                _ => 3,
             };
             let cap = if op == HostOp::NextEntries { 300 } else { 64 };
             writeln!(source, "require(operand.data==operand_bytes && operand.capacity=={cap} && operand.len=={len});").unwrap();
+            if op == HostOp::Random && !failing {
+                source.push_str("require(operand_bytes[0]==0xa5 && operand_bytes[63]==0xa5); memcpy(operand_bytes, \"abc\", 3);\n");
+            }
         }
         if sig.results.is_empty() {
             writeln!(source, "emit(ctx,status,values,0); return 0; }}").unwrap();

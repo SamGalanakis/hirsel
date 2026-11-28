@@ -12,6 +12,11 @@ Each operation's `Prefix:` clause names effects that survive error or cancellati
 `file.stat(mut f)` reports the open file's kind, size and modification time
 ([Dir, Metadata](dir.md#metadata)).
 
+`file.read_into` and `host.read` append to the existing prefix and return the count.
+`Ok(0)` means EOF. A full buffer, including one with capacity zero, gives
+`Error(Other(22))` (EINVAL) before issue and leaves the cursor and buffer unchanged.
+Clear the buffer before reading the next chunk, or reserve space to keep the prefix.
+
 ## Bounded reads
 
 ```
@@ -51,7 +56,7 @@ pub fn file.write_at(mut f: HostFile, at: u64, data: Bytes) -> Result[(), WriteE
 Neither moves the file's position.
 
 - **Reading.** `read_at` appends at most the spare capacity of `buf` and returns the count.
-  `Ok(0)` means `at` is at or past the end of the file, or `buf` has no spare capacity. A
+  `Ok(0)` means `at` is at or past EOF. Zero spare capacity gives `Error(Other(22))`. A
   shorter count than requested is a partial read, as with `host.read`. A failed read has
   appended nothing.
 - **Writing.** `write_at` writes all of `b`, extending the file when the range passes its

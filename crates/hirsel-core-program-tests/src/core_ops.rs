@@ -345,6 +345,9 @@ fn host_rows_preserve_handles_result_tags_and_mutated_carriers() {
         let mut b:Bytes = list.with_capacity(4);
         if result.unwrap(host.read(mut reader,mut b)) != 4u64 || list.len(b)!=4u64 { return 5u64 }
         if b[0]!=b'd' || b[3]!=b'a' { return 6u64 }
+        match host.read(mut reader,mut b) { Error(Other(22)) => {}, _ => return 7u64 }
+        match host.read_at(mut reader,0,mut b) { Error(Other(22)) => {}, _ => return 7u64 }
+        list.clear(mut b);
         if result.unwrap(host.read(mut reader,mut b)) != 0u64 { return 7u64 }
         result.unwrap(host.close(take reader));
         result.unwrap(host.remove(d,"file"));

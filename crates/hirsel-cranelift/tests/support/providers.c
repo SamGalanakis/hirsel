@@ -50,10 +50,15 @@ static HirselCoreHostOutcome legacy_issue(void *state,HirselCoreHostRequest *r) 
             require(r->path!=NULL && r->path_len==8 && !memcmp(r->path,"\x08\x07\x06\x05\x04\x03\x02\x01",8));
         } else {
             require(r->buffer.data==(has_operand(op) ? operand_bytes : NULL));
-            require(r->buffer.len==(has_operand(op) ? 3 : 0));
+            require(r->buffer.len==(has_operand(op) && op!=18 ? 3 : 0));
             require(r->buffer.capacity==(has_operand(op) ? (op==45 ? 300 : 64) : 0));
             require(r->path==(has_path(op) ? operand_bytes : NULL));
             require(r->path_len==(has_path(op) ? 3 : 0));
+        }
+        if(op==18 && !w->failing) {
+            memset(r->buffer.data, 0xa5, r->buffer.capacity);
+            r->buffer.len=r->buffer.capacity;
+            return (HirselCoreHostOutcome){.written=r->buffer.len};
         }
         if(op==1 || op==7) {
             r->buffer.data[r->buffer.len++]='X';

@@ -352,22 +352,19 @@ impl Machine<'_> {
     }
 
     pub(super) fn draw_virtual_random(&mut self, cell: usize, carrier: u64) -> X<Vec<u64>> {
-        let (_, data, len, cap) = self.carrier(carrier);
-        let spare = cap.saturating_sub(len) as usize;
-        if spare == 0 {
-            return Ok(vec![]);
-        }
-        let (block, offset) = self.check_write(data + len, spare);
+        let data = self.load(carrier, 8);
+        let capacity = self.load(carrier + 16, 8) as usize;
+        let (block, offset) = self.check_write(data, capacity);
         let VirtualCell::Random(stream) = &mut self.host.world.cells[cell] else {
             unreachable!()
         };
-        let bytes = &mut self.mem[block].bytes[offset..offset + spare];
+        let bytes = &mut self.mem[block].bytes[offset..offset + capacity];
         // SAFETY: MaybeUninit<u8> has the layout of u8 and draw only writes initialized bytes.
-        let out = unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr().cast(), spare) };
+        let out = unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr().cast(), capacity) };
         if !stream.draw(out) {
             return Err(Stop::Cause("Bounds"));
         }
-        self.store(carrier + 8, 8, len + spare as u64);
+        self.store(carrier + 8, 8, capacity as u64);
         Ok(vec![])
     }
     /// The `provide` rows, and Clock, Random and Process operations on a cell.

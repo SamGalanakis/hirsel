@@ -2,6 +2,7 @@
 // `stdout.write_bytes`, `stderr.write` and `stderr.write_bytes`, exactly these.
 pub fn open(d: Dir, p: String, mode: OpenMode) -> Result[HostFile, IoError] waits
 
+/// Appends into spare capacity. Ok(0) means EOF. No room gives Error(Other(22)).
 pub fn read(mut f: HostFile, mut buf: Bytes) -> Result[u64, IoError] waits
 
 pub fn write(mut f: HostFile, b: Bytes) -> Result[(), WriteError] waits
@@ -18,6 +19,7 @@ pub fn stat(d: Dir, p: String) -> Result[Stat, IoError] waits
 
 pub fn stat_file(mut f: HostFile) -> Result[Stat, IoError] waits
 
+/// Like read at the supplied offset, leaving the cursor unchanged.
 pub fn read_at(mut f: HostFile, at: u64, mut buf: Bytes) -> Result[u64, IoError] waits
 
 pub fn write_at(mut f: HostFile, at: u64, b: Bytes) -> Result[(), WriteError] waits
@@ -53,6 +55,7 @@ pub fn sync_dir(d: Dir) -> Result[(), IoError] waits
 /// Whether a crashed extension can expose only zeros or bytes written there.
 pub fn zero_extension(d: Dir) -> Result[bool, IoError] waits
 
+/// Fills the entire writable capacity and sets the length to capacity. Zero capacity raises Bounds.
 pub fn random(r: Random, mut b: Bytes)
 
 pub fn wall_ms(c: Clock) -> u64

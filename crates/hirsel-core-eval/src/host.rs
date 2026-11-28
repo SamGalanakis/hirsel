@@ -47,6 +47,17 @@ impl Machine<'_> {
             self.check_cancel(t)?;
             return Ok(vec![0, DENIED, 0, 0]);
         }
+        if matches!(op, HostOp::Read | HostOp::ReadAt) {
+            let buffer = a[if op == HostOp::ReadAt { 2 } else { 1 }];
+            if self.load(buffer + 16, 8) <= self.load(buffer + 8, 8) {
+                self.check_cancel(t)?;
+                return Ok(vec![0, OTHER, 22, 0]); // Other(EINVAL)
+            }
+        }
+        if op == HostOp::Random && self.load(a[1] + 16, 8) == 0 {
+            self.check_cancel(t)?;
+            return Err(Stop::Cause("Bounds"));
+        }
         if let Some(reply) = self.provide(t, op, a) {
             return reply;
         }
@@ -425,15 +436,19 @@ impl Machine<'_> {
                 ok(0, n)
             }
             HostOp::Random => {
-                let (_, data, len, cap) = self.carrier(a[1]);
-                let spare = cap.saturating_sub(len) as usize;
-                let bytes = (0..spare)
-                    .map(|i| self.host.world.random.wrapping_add(i as u8))
-                    .collect::<Vec<_>>();
-                self.host.world.random = self.host.world.random.wrapping_add(spare as u8);
-                self.put(data + len, &bytes);
-                self.store(a[1] + 8, 8, len + spare as u64);
-                ok(0, spare as u64)
+                let data = self.load(a[1], 8);
+                let cap = self.load(a[1] + 16, 8);
+                let (block, offset) = self.check_write(data, cap as usize);
+                let start = self.host.world.random;
+                for (i, byte) in self.mem[block].bytes[offset..offset + cap as usize]
+                    .iter_mut()
+                    .enumerate()
+                {
+                    *byte = start.wrapping_add(i as u8);
+                }
+                self.host.world.random = start.wrapping_add(cap as u8);
+                self.store(a[1] + 8, 8, cap);
+                vec![]
             }
             HostOp::Open => {
                 let key = match self.host.world.dir_key(a[0], self.carrier_bytes(a[1])) {

@@ -238,7 +238,7 @@ bound, matched or dropped. So an `Error` leaves the whole build: nothing is publ
 resumes, the `n` bytes stay charged until `r` closes, and views of complete elements stay
 valid ([FAIL-6](failure.md#fail-6-region-prefixes)). Nothing infers `n`, runs `w` twice,
 moves or grows a written byte, or admits in `finish`; a program that wants the exact size
-computes it first from input it can read twice ([example 8](examples.md#8-a-json-document-written-in-place)).
+computes it first from input it can read twice ([example 8](../examples.md#8-a-json-document-written-in-place)).
 `finish_trim(take b)`, for either builder, publishes as `finish` does and refunds the
 unused end, `round8(n) − round8(used)`, to the limit the allocation's record leads to
 ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)), whatever limit is current; it

@@ -80,9 +80,10 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Embedding](embed.md) | EMB-1 to EMB-9 |
 | [Core library](core.md) | |
 | [Reserved](reserved.md) | |
-| [Examples](examples.md) | |
 
 ## Reading this specification
+
+[Worked examples](../examples.md) show eight complete programs and their outcomes.
 
 Each rule is a `### ID: Title` heading followed by one normative statement and, where it
 refuses programs, the smallest accepted and refused programs. MEM-31 and MEM-32 keep rule

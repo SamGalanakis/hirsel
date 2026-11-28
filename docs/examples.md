@@ -2,20 +2,20 @@
 
 Eight complete programs. Each runs with a root limit
 of 1,048,576 bytes. **Output** is the exact text the program writes to standard output,
-and **outcome** is how the run ends ([PROG-3](programs.md#prog-3-entry)). Each refusal is an
+and **outcome** is how the run ends ([PROG-3](spec/programs.md#prog-3-entry)). Each refusal is an
 edit of the program; the site is `line:column` in the edited program, at the start of the
-token the rule names ([PROG-7](diagnostics.md#prog-7-one-rule-one-site)). Examples are
+token the rule names ([PROG-7](spec/diagnostics.md#prog-7-one-rule-one-site)). Examples are
 informative; the rules they cite are normative. `?` never converts an error
-([LANG-18](language.md#lang-18-errors)), so each program converts with `put` and `match`. An allocation the current limit refuses
-raises the failure `Capacity` ([MEM-21](budgets.md#mem-21-admission)); programs 1, 3 and 8
-catch it with `isolate` ([FAIL-16](failure.md#fail-16-isolation)).
+([LANG-18](spec/language.md#lang-18-errors)), so each program converts with `put` and `match`. An allocation the current limit refuses
+raises the failure `Capacity` ([MEM-21](spec/budgets.md#mem-21-admission)); programs 1, 3 and 8
+catch it with `isolate` ([FAIL-16](spec/failure.md#fail-16-isolation)).
 
 ## 1. Bounded scratch in a region
 
 A word is copied into a region inside a bound scope. With 64 bytes it fits: the `Text`
 copy of `"hello"` charges 16 (8 count + 5 bytes, rounded up to 8), and the `Word` record is
 an own value held inline in its slot
-([MEM-13](memory.md#mem-13-own-layout)), so it charges nothing. With 8 bytes the
+([MEM-13](spec/memory.md#mem-13-own-layout)), so it charges nothing. With 8 bytes the
 `Text` copy is refused: it raises `Capacity`, the failure cleans the region and leaves the
 bound scope, and `isolate` returns its causes.
 

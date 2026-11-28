@@ -39,11 +39,11 @@ type Highlight = {
   modifiers: number;
 };
 
-export async function createHighlighter(directory: string) {
+export async function createHighlighter(directory: string, data = false) {
   await Parser.init();
   const [language, source] = await Promise.all([
-    Language.load(join(directory, "tree-sitter-hirsel.wasm")),
-    readFile(join(directory, "highlights.scm"), "utf8"),
+    Language.load(join(directory, data ? "tree-sitter-hirsel_data.wasm" : "tree-sitter-hirsel.wasm")),
+    readFile(join(directory, data ? "data-highlights.scm" : "highlights.scm"), "utf8"),
   ]);
   const query = new Query(language, source);
   const parser = new Parser();

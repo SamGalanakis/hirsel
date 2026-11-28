@@ -9,6 +9,8 @@ use super::navigation::{self, Location, absolute};
 use super::references::{Key, References};
 use super::rename::Graph;
 use super::workspace::{EditorInputs, Project};
+use crate::package_dir::MANIFEST;
+use crate::package_files::{Captured, FileId};
 use crate::reachability::authority::Cards;
 use crate::{CheckProduct, ContentHash, FileProduct};
 use hirsel_core_ids::{DefPath, PackageId};
@@ -23,6 +25,7 @@ use std::sync::Arc;
 
 pub(super) struct EditorSnapshot {
     pub(super) inputs: EditorInputs,
+    pub(super) manifest_overlays: BTreeMap<FileId, Captured>,
     pub(super) origins: BTreeMap<PathBuf, Text>,
     pub(super) diagnostics: Vec<Diagnostic>,
     pub(super) modes: BTreeMap<PathBuf, ParseMode>,
@@ -67,9 +70,11 @@ impl EditorSnapshot {
             .filter(|(path, _)| inputs.owns(path))
             .map(|(path, document)| (path.clone(), document.text.clone()))
             .collect();
-        let member_sources = workspace_sources(&inputs, &mut origins);
+        let manifest_overlays = inputs.manifest_overlays();
+        let member_sources = workspace_sources(&inputs, &mut origins, &manifest_overlays);
         Self {
             inputs,
+            manifest_overlays,
             origins,
             diagnostics: Vec::new(),
             modes: BTreeMap::new(),
@@ -894,15 +899,16 @@ impl Invalid {
 fn workspace_sources(
     inputs: &EditorInputs,
     origins: &mut BTreeMap<PathBuf, Text>,
+    manifest_overlays: &BTreeMap<FileId, Captured>,
 ) -> BTreeMap<PathBuf, BTreeSet<PathBuf>> {
     let directories = origins
         .keys()
-        .filter_map(|path| {
-            path.ancestors()
-                .skip(1)
-                .find(|dir| dir.join(crate::package_dir::MANIFEST).is_file())
+        .filter(|path| {
+            !super::config::is_config(path)
+                || path.file_name().is_some_and(|name| name == MANIFEST)
+                    && !inputs.detached.contains(*path)
         })
-        .map(Path::to_owned)
+        .filter_map(|path| inputs.manifest_directory(path))
         .collect::<BTreeSet<_>>();
     let mut roots = BTreeMap::new();
     for directory in directories {
@@ -913,7 +919,7 @@ fn workspace_sources(
             continue;
         }
         let Ok(Some(workspace)) =
-            crate::package_workspace::Workspace::discover_for(&directory, false)
+            crate::package_workspace::Workspace::discover_for_editor(&directory, manifest_overlays)
         else {
             continue;
         };

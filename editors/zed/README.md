@@ -3,7 +3,9 @@
 Install Hirsel and add the executable to PATH. For a checkout, run
 `zed: install dev extension` from Zed's command palette and select
 `editors/zed`. Zed builds the extension with Rust and fetches and builds the
-Tree-sitter grammar from the revision in `extension.toml`.
+source and configuration Tree-sitter grammars from the revisions in
+`extension.toml`. Zed opens `.hcfg` files as Hirsel Config and uses the Hirsel
+server for diagnostics, hover, completion, and formatting.
 
 To format Hirsel buffers when you save, add this to your Zed settings.
 
@@ -11,6 +13,10 @@ To format Hirsel buffers when you save, add this to your Zed settings.
 {
   "languages": {
     "Hirsel": {
+      "formatter": "language_server",
+      "format_on_save": "on"
+    },
+    "Hirsel Config": {
       "formatter": "language_server",
       "format_on_save": "on"
     }

@@ -1,7 +1,7 @@
 # Hirsel for Neovim
 
 Use Neovim 0.11 or later. Install Hirsel and put its executable on PATH.
-From this checkout, build the common Tree-sitter grammar for your machine.
+From this checkout, build the source and configuration Tree-sitter grammars for your machine.
 
 ```sh
 editors/nvim/scripts/install-parser.sh
@@ -14,18 +14,19 @@ directory as its first argument.
 ```lua
 vim.opt.runtimepath:prepend("/path/to/hirsel/editors/nvim")
 vim.api.nvim_create_autocmd("FileType", {
-  pattern = "hirsel",
+  pattern = { "hirsel", "hirsel_data" },
   callback = function(args)
-    vim.treesitter.start(args.buf, "hirsel")
+    vim.treesitter.start(args.buf)
   end,
 })
 vim.lsp.enable("hirsel")
 ```
 
-Neovim looks for `hirsel.hcfg` when choosing the LSP project root.
+Neovim starts the Hirsel server for `.hirsel` and `.hcfg` buffers. It uses
+`hirsel.hcfg` as the project root marker and accepts the server's file watchers.
 Regenerate the runtime queries when the common queries change by copying
 `highlights.scm`, `injections.scm`, and `locals.scm` from
-`editors/tree-sitter-hirsel/queries/` to `queries/hirsel/`.
+`editors/tree-sitter-hirsel/queries/` to `queries/hirsel/`. Copy `data-highlights.scm` to `queries/hirsel_data/highlights.scm`.
 
 ## Format on save
 

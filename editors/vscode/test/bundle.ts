@@ -37,5 +37,20 @@ export async function run() {
   const location = "targetUri" in target ? target.targetUri : target.uri;
   assert.equal(location.toString(), uri.toString());
 
+  const configUri = vscode.Uri.joinPath(workspace.uri, "config.hcfg");
+  const config = await vscode.workspace.openTextDocument(configUri);
+  await vscode.window.showTextDocument(config);
+  assert.equal(config.languageId, "hirsel-data");
+  const configTokens = await vscode.commands.executeCommand<vscode.SemanticTokens>(
+    "vscode.provideDocumentSemanticTokens", configUri);
+  assert.ok(configTokens?.data.length, "the bundled data parser loaded");
+  await waitFor(async () => {
+    const configPosition = config.positionAt(config.getText().indexOf("cache"));
+    const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
+      "vscode.executeHoverProvider", configUri, configPosition);
+    return hovers.some(({ contents }) => contents.some((part) =>
+      (typeof part === "string" ? part : part.value).includes("Optional")));
+  }, "schema hover for the .hcfg buffer");
+
   console.log("VS Code loaded the isolated bundle and used real Hirsel highlighting, hover, definition and diagnostics");
 }

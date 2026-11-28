@@ -1,5 +1,7 @@
 #[path = "dx_tests.rs"]
 mod dx_tests;
+#[path = "hcfg_tests.rs"]
+mod hcfg_tests;
 #[path = "image_navigation.rs"]
 mod image_navigation;
 

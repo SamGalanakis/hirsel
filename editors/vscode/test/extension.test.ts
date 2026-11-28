@@ -87,3 +87,27 @@ test("custom semantic tokens have TextMate fallbacks", async () => {
   assert.deepEqual(manifest.contributes.semanticTokenTypes.map(({ id }: { id: string }) => id),
     ["hirselCharacter", "hirselBracket", "hirselDelimiter"]);
 });
+
+test("the configuration grammar highlights keys and constructors", async () => {
+  const manifest = JSON.parse(await readFile(join(__dirname, "../../package.json"), "utf8"));
+  assert.ok(manifest.contributes.languages.some(({ id, extensions }: { id: string; extensions: string[] }) =>
+    id === "hirsel-data" && extensions.includes(".hcfg")));
+  assert.deepEqual(await readFile(join(grammar, "data-highlights.scm")),
+    await readFile(join(__dirname, "../../../tree-sitter-hirsel/queries/data-highlights.scm")));
+  const { parser, query } = await createHighlighter(grammar, true);
+  const source = 'pkg_v1.Package(name: "local/app", charge: ChargeV1)';
+  const tree = parser.parse(source);
+  assert.ok(tree);
+  try {
+    assert.equal(tree.rootNode.type, "data_document");
+    assert.equal(tree.rootNode.hasError, false);
+    const tokens = highlightRanges(query, tree).map(({ start, end, type }) =>
+      [source.slice(start, end), tokenTypes[type]]);
+    assert.ok(tokens.some(([word, type]) => word === "name" && type === "property"));
+    assert.ok(tokens.some(([word, type]) => word === "ChargeV1" && type === "enumMember"));
+  } finally {
+    tree.delete();
+    query.delete();
+    parser.delete();
+  }
+});

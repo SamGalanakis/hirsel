@@ -198,6 +198,17 @@ impl Workspace {
         Self::discover_with(dir, needs_package, false, BTreeMap::new())
     }
 
+    pub(crate) fn discover_for_editor(
+        dir: &Path,
+        overlays: &BTreeMap<FileId, Captured>,
+    ) -> Result<Option<Self>, Box<dyn std::error::Error>> {
+        let manifests = overlays
+            .iter()
+            .map(|(&id, manifest)| (id, Some(manifest.clone())))
+            .collect();
+        Self::discover_with(dir, false, false, manifests)
+    }
+
     /// The isolated distribution staging directory with its proposed manifest.
     pub(crate) fn staged(
         dir: &Path,

@@ -26,6 +26,7 @@ mimalloc = ["dep:mimalloc"]
 comptime-g1 = ["hirsel-core-eval/host-instructions"]
 
 [dependencies]
+hirsel-data = { path = "../hirsel-data" }
 hirsel-config-schema = { path = "../hirsel-config-schema" }
 hirsel-compiler = { path = "../hirsel-compiler" }
 bytes = "1"

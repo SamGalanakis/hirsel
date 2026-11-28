@@ -1,14 +1,16 @@
 use super::cache::{Cache, Check};
+use super::config;
 use super::diagnostics::{self, Diagnostic, InputOrigins, Origin};
 use super::documents::{Document, SourceOverlay, Text};
 use super::snapshot::{EditorSnapshot, immutable_path};
 use crate::ContentHash;
 use crate::package_content::Id;
 use crate::package_dir::{MANIFEST, PackageDir};
+use crate::package_files::{Captured, FileId, open_directory};
 use crate::package_lock::{self, Lock, Mode};
 use crate::package_resolve::Resolution;
 use crate::package_store::PackageStore;
-use crate::package_workspace::{Member, Workspace};
+use crate::package_workspace::{Member, Workspace, identity};
 use crate::{CheckRequest, CoreImage, Driver, Meter, PackageProduct};
 use hirsel_core_ids::DefPath;
 use hirsel_core_resolve::{CapturedSource, ModuleSource, NameIndex, PackageManifest};
@@ -37,8 +39,9 @@ impl EditorInputs {
 
     pub(super) fn open(&mut self, path: PathBuf, document: Document) -> bool {
         if !self.owns(&path)
-            && path.extension().is_some_and(|ext| ext == "hirsel")
-            && manifest_directory(&path).is_none()
+            && (config::is_config(&path)
+                || path.extension().is_some_and(|ext| ext == "hirsel")
+                    && self.manifest_directory(&path).is_none())
         {
             self.detached.insert(path.clone());
         }
@@ -47,6 +50,39 @@ impl EditorInputs {
             return true;
         }
         false
+    }
+
+    pub(super) fn manifest_directory(&self, path: &Path) -> Option<PathBuf> {
+        path.ancestors()
+            .skip(1)
+            .find(|directory| {
+                let manifest = directory.join(MANIFEST);
+                (self.owns(&manifest) && self.overlay.contains_key(&manifest))
+                    || manifest.symlink_metadata().is_ok()
+            })
+            .map(Path::to_owned)
+    }
+
+    pub(super) fn manifest_overlays(&self) -> BTreeMap<FileId, Captured> {
+        self.overlay
+            .iter()
+            .filter(|(path, _)| {
+                path.file_name().is_some_and(|name| name == MANIFEST) && self.owns(path)
+            })
+            .filter_map(|(path, document)| {
+                let directory = open_directory(path.parent()?).ok()?;
+                let id = identity(&directory).ok()?;
+                // Editor checks are read-only. The directory identity keys a
+                // hypothetical manifest even when the file does not exist.
+                Some((
+                    id,
+                    Captured {
+                        bytes: document.text.bytes.as_ref().into(),
+                        identity: id,
+                    },
+                ))
+            })
+            .collect()
     }
 }
 
@@ -72,6 +108,14 @@ impl EditorSnapshot {
     }
 
     fn configuration(&mut self, path: &Path, error: impl ToString) {
+        if config::is_config(path)
+            && self
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.path() == path)
+        {
+            return;
+        }
         self.diagnostics
             .push(Diagnostic::configuration(path, error.to_string()));
     }
@@ -109,11 +153,24 @@ impl EditorSession {
     ) -> EditorSnapshot {
         let mut snapshot = EditorSnapshot::new(inputs);
         let mut groups = BTreeMap::<Option<PathBuf>, BTreeSet<PathBuf>>::new();
-        for path in snapshot.origins.keys() {
-            groups
-                .entry(manifest_directory(path))
-                .or_default()
-                .insert(path.clone());
+        for (path, text) in &snapshot.origins {
+            if config::is_config(path) {
+                if obsolete() {
+                    return snapshot;
+                }
+                snapshot.diagnostics.extend(config::check(path, text));
+                if path.file_name().is_some_and(|name| name == MANIFEST)
+                    && !snapshot.inputs.detached.contains(path)
+                    && let Some(directory) = path.parent()
+                {
+                    groups.entry(Some(directory.to_owned())).or_default();
+                }
+            } else {
+                groups
+                    .entry(snapshot.inputs.manifest_directory(path))
+                    .or_default()
+                    .insert(path.clone());
+            }
         }
         if let Some(paths) = groups.remove(&None) {
             for path in paths {
@@ -132,19 +189,20 @@ impl EditorSession {
             }
             let directory = directory.expect("standalone paths were handled");
             let manifest = directory.join(MANIFEST);
-            let workspace = match Workspace::discover_for(&directory, false) {
-                Ok(Some(workspace)) => workspace,
-                Ok(None) => {
-                    for path in &paths {
-                        snapshot.syntax(path);
+            let workspace =
+                match Workspace::discover_for_editor(&directory, &snapshot.manifest_overlays) {
+                    Ok(Some(workspace)) => workspace,
+                    Ok(None) => {
+                        for path in &paths {
+                            snapshot.syntax(path);
+                        }
+                        continue;
                     }
-                    continue;
-                }
-                Err(error) => {
-                    snapshot.project_problem(&manifest, error, &paths);
-                    continue;
-                }
-            };
+                    Err(error) => {
+                        snapshot.project_problem(&manifest, error, &paths);
+                        continue;
+                    }
+                };
             let mut by_member = BTreeMap::new();
             for (id, member) in &workspace.members {
                 let owned: BTreeSet<_> = paths
@@ -184,7 +242,8 @@ impl EditorSession {
                 continue;
             }
             let root = workspace.directory.clone();
-            // Resolve and validate the lock before any overlay bytes enter a check request.
+            // Frozen resolution checks the lock against the effective manifest
+            // graph before checking any source buffers.
             let mode = Mode::Frozen;
             let lock_path = root.join(package_lock::NAME);
             let remedy = format!(
@@ -512,13 +571,6 @@ impl EditorSession {
         index.add_manifests(&manifests);
         Ok(Some(Arc::new(index)))
     }
-}
-
-fn manifest_directory(path: &Path) -> Option<PathBuf> {
-    path.ancestors()
-        .skip(1)
-        .find(|directory| directory.join(MANIFEST).symlink_metadata().is_ok())
-        .map(Path::to_owned)
 }
 
 fn member_directory(member: &Member) -> &Path {

@@ -17,7 +17,8 @@
       "camelcase": "HirselData",
       "scope": "source.hirsel.data",
       "path": "data",
-      "file-types": ["hcfg"]
+      "file-types": ["hcfg"],
+      "highlights": "queries/data-highlights.scm"
     }
   ],
   "metadata": {

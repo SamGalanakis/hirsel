@@ -1004,6 +1004,7 @@ dependencies = [
  "hirsel-core-resolve",
  "hirsel-core-syntax",
  "hirsel-cranelift",
+ "hirsel-data",
  "hirsel-guard",
  "hirsel-intern",
  "hirsel-llvm-lazy",

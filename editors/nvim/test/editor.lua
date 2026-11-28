@@ -38,6 +38,18 @@ end), "Hirsel client did not attach")
 assert(vim.deep_equal(client.config.cmd, { "hirsel", "lsp" }))
 assert(client.config.root_dir == workspace, client.config.root_dir)
 
+vim.cmd.edit(workspace .. "/hirsel.hcfg")
+assert(vim.bo.filetype == "hirsel_data")
+local config = vim.api.nvim_get_current_buf()
+vim.treesitter.start(config, "hirsel_data")
+local config_tree = vim.treesitter.get_parser(config):parse()[1]
+assert(config_tree:root():type() == "data_document" and not config_tree:root():has_error())
+assert(vim.treesitter.query.get("hirsel_data", "highlights"))
+assert(vim.wait(5000, function()
+  return vim.lsp.buf_is_attached(config, client.id)
+end), "Hirsel client did not attach to the config buffer")
+vim.cmd.buffer(bufnr)
+
 vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { "fn  main() -> u8 { 1 }" })
 assert(vim.wait(5000, function()
   return vim.diagnostic.get(bufnr)[1] ~= nil

@@ -56,7 +56,11 @@ def serve():
             case "initialize":
                 result = {"capabilities": CAPABILITIES}
             case "textDocument/didOpen":
-                assert document["languageId"] == "hirsel"
+                language = document["languageId"]
+                if urlparse(uri).path.endswith(".hcfg"):
+                    assert language in ("hirsel-data", "hirsel_data"), language
+                else:
+                    assert language == "hirsel", language
                 documents[uri] = document["text"]
             case "textDocument/didChange":
                 [change] = params["contentChanges"]

@@ -33,6 +33,7 @@ try {
   await writeFile(join(user, "User/settings.json"), JSON.stringify(settings));
   if (real) {
     await writeFile(join(workspace, "main.hirsel"), "fn answer() -> u64 { let count = 42u64; count }\n");
+    await writeFile(join(workspace, "config.hcfg"), 'user_v1.Config(contexts: [], routes: [], cache: None)\n');
     await symlink(resolve(driver), executable);
   } else {
     await writeFile(join(workspace, "hirsel.hcfg"), "");

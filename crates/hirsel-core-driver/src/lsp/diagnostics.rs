@@ -36,6 +36,22 @@ impl Diagnostic {
         }
     }
 
+    pub(super) fn data(path: &Path, span: Span, message: String, related: Option<Span>) -> Self {
+        let location = |span| Location {
+            path: path.to_owned(),
+            span,
+        };
+        Self {
+            primary: location(span),
+            code: None,
+            message,
+            causes: related
+                .into_iter()
+                .map(|span| (location(span), "first occurrence"))
+                .collect(),
+        }
+    }
+
     pub(super) fn path(&self) -> &Path {
         &self.primary.path
     }

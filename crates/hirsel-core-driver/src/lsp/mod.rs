@@ -1,6 +1,8 @@
 pub(crate) mod cache;
 mod code_actions;
 mod completion;
+mod config;
+mod config_query;
 mod diagnostics;
 mod documents;
 mod formatting;
@@ -530,6 +532,30 @@ impl State {
             .snapshot
             .as_ref()
             .filter(|snapshot| snapshot.inputs.generation == generation);
+        if config::is_config(&path) {
+            let answer = snapshot
+                .and_then(|snapshot| snapshot.origins.get(&path))
+                .map_or_else(
+                    || empty_query(&kind),
+                    |text| match kind {
+                        QueryKind::Hover(position) => {
+                            config_query::hover(&path, text, position, self.encoding)
+                                .unwrap_or_default()
+                        }
+                        QueryKind::Completion(position) => {
+                            config_query::complete(&path, text, position, self.encoding)
+                                .unwrap_or_else(|| json!([]))
+                        }
+                        QueryKind::Format => formatting::edits(
+                            text,
+                            hirsel_core_syntax::ParseMode::Data,
+                            self.encoding,
+                        ),
+                        _ => empty_query(&kind),
+                    },
+                );
+            return protocol::result(&id, answer);
+        }
         let span = |range: QueryRange| {
             let snapshot = snapshot?;
             let start = snapshot.offset(&path, range.start, self.encoding)?;
@@ -651,6 +677,18 @@ impl State {
             self.send(&self.answer(query))?;
         }
         Ok(())
+    }
+}
+
+fn empty_query(kind: &QueryKind) -> Value {
+    match kind {
+        QueryKind::Symbols
+        | QueryKind::Format
+        | QueryKind::Completion(_)
+        | QueryKind::References(..)
+        | QueryKind::CodeAction(..)
+        | QueryKind::InlayHint(_) => json!([]),
+        _ => Value::Null,
     }
 }
 

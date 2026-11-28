@@ -1,1 +1,1 @@
-vim.filetype.add({ extension = { hirsel = "hirsel" } })
+vim.filetype.add({ extension = { hirsel = "hirsel", hcfg = "hirsel_data" } })

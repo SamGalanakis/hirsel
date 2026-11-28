@@ -34,6 +34,16 @@
           ".hirsel"
         ],
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "hirsel-data",
+        "aliases": [
+          "Hirsel Config"
+        ],
+        "extensions": [
+          ".hcfg"
+        ],
+        "configuration": "./language-configuration.json"
       }
     ],
     "configuration": {
@@ -49,6 +59,9 @@
     },
     "configurationDefaults": {
       "[hirsel]": {
+        "editor.semanticHighlighting.enabled": true
+      },
+      "[hirsel-data]": {
         "editor.semanticHighlighting.enabled": true
       }
     },
@@ -70,6 +83,26 @@
     "semanticTokenScopes": [
       {
         "language": "hirsel",
+        "scopes": {
+          "decorator": [
+            "storage.type.annotation"
+          ],
+          "hirselCharacter": [
+            "constant.character"
+          ],
+          "hirselBracket": [
+            "punctuation.bracket"
+          ],
+          "hirselDelimiter": [
+            "punctuation.separator"
+          ],
+          "label": [
+            "entity.name.label"
+          ]
+        }
+      },
+      {
+        "language": "hirsel-data",
         "scopes": {
           "decorator": [
             "storage.type.annotation"

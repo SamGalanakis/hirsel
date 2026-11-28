@@ -187,6 +187,16 @@ def check_data(library):
             raise ValueError(f"unexpected data parse for {source!r}: {root}")
 
 
+    Query(parser.language, (GRAMMAR / "queries/data-highlights.scm").read_text())
+    paths = subprocess.check_output(["git", "ls-files", "-z", "--", "*.hcfg"], cwd=ROOT)
+    documents = [ROOT / os.fsdecode(path) for path in paths.split(b"\0") if path]
+    for path in documents:
+        root = parser.parse(path.read_bytes()).root_node
+        if root.type != "data_document" or root.has_error:
+            raise ValueError(f"{path.relative_to(ROOT)}: unexpected data parse: {root}")
+    print(f"{len(documents)} configuration files, 0 unexpected data parses")
+
+
 def main():
     options = argparse.ArgumentParser(description=__doc__)
     options.add_argument("--parser", type=Path, help="use an already built Tree-sitter shared library")

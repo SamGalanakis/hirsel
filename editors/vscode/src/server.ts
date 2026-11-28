@@ -7,7 +7,8 @@ import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { LanguageClient, State } from "vscode-languageclient/node";
 
-export const documentSelector = [{ scheme: "file", language: "hirsel" }];
+export const dataLanguageId = "hirsel-data";
+export const documentSelector = ["hirsel", dataLanguageId].map((language) => ({ scheme: "file", language }));
 const restartCommand = "hirsel.restartServer";
 const outputCommand = "hirsel.showOutput";
 const run = promisify(execFile);

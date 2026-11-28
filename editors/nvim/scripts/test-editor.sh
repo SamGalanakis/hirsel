@@ -13,7 +13,8 @@ done
 
 ln -s "$package/../vscode/test/mock-lsp.py" "$scratch/hirsel"
 mkdir "$scratch/workspace"
-touch "$scratch/workspace/hirsel.hcfg"
+printf '%s\n' 'pkg_v1.Workspace(members: [])' > "$scratch/workspace/hirsel.hcfg"
+cmp "$package/../tree-sitter-hirsel/queries/data-highlights.scm" "$package/queries/hirsel_data/highlights.scm"
 printf '%s\n' 'fn  main() -> u8 { 0 }' > "$scratch/workspace/main.hirsel"
 printf '%s\n' 'fn target() -> u8 { 0 }' > "$scratch/workspace/target.hirsel"
 

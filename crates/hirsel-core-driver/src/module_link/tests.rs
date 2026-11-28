@@ -372,3 +372,130 @@ fn a_link_refuses_what_a_module_cannot_hold() {
         "a Elf Aarch64 object for x86_64-unknown-linux-gnu"
     );
 }
+
+#[test]
+fn local_data_aarch64_relocations_keep_the_symbol_offset() {
+    let mut obj = Object::new(BinaryFormat::Elf, Architecture::Aarch64, Endianness::Little);
+    let forms = [
+        (
+            0x90000000u32,
+            elf::R_AARCH64_ADR_PREL_PG_HI21,
+            Kind::PageData,
+        ),
+        (
+            0x91000000,
+            elf::R_AARCH64_ADD_ABS_LO12_NC,
+            Kind::Low12AddData,
+        ),
+        (
+            0x39400000,
+            elf::R_AARCH64_LDST8_ABS_LO12_NC,
+            Kind::Low12LoadData,
+        ),
+        (
+            0x79400000,
+            elf::R_AARCH64_LDST16_ABS_LO12_NC,
+            Kind::Low12LoadData,
+        ),
+        (
+            0xb9400000,
+            elf::R_AARCH64_LDST32_ABS_LO12_NC,
+            Kind::Low12LoadData,
+        ),
+        (
+            0xf9400000,
+            elf::R_AARCH64_LDST64_ABS_LO12_NC,
+            Kind::Low12LoadData,
+        ),
+        (
+            0x3dc00000,
+            elf::R_AARCH64_LDST128_ABS_LO12_NC,
+            Kind::Low12LoadData,
+        ),
+    ];
+    let bytes: Vec<_> = forms
+        .iter()
+        .flat_map(|(op, _, _)| op.to_le_bytes())
+        .collect();
+    let code = section(&mut obj, ".text", SectionKind::Text, &bytes, 4);
+    symbol(&mut obj, ENTRY, Some((code, bytes.len() as u64)), true);
+    let data = section(&mut obj, ".rodata", SectionKind::ReadOnlyData, &[0; 48], 16);
+    let target = symbol(&mut obj, "bytes", Some((data, 48)), false);
+    for (i, &(_, reloc, _)) in forms.iter().enumerate() {
+        relocate(&mut obj, code, 4 * i as u64, target, reloc, 16);
+    }
+    let header = Header {
+        target: Target::Aarch64Linux,
+        ..header()
+    };
+    let image = link(header, &[&obj.write().unwrap()], &root(), vec![])
+        .unwrap()
+        .encode();
+    let module = Module::parse(&image).unwrap();
+    let expected: Vec<_> = forms
+        .iter()
+        .enumerate()
+        .map(|(i, &(_, _, kind))| Fixup {
+            site: 4 * i as u32,
+            kind,
+            bias: 0,
+            addend: 16,
+        })
+        .collect();
+    assert_eq!(module.text_fixups().collect::<Vec<_>>(), expected);
+}
+
+#[test]
+fn local_data_pc32_uses_instruction_end_and_checks_target() {
+    // cmp byte ptr [rip+disp32], 7: the byte immediate follows its displacement.
+    let link_cmp = |addend| {
+        let mut obj = x86();
+        let code = section(
+            &mut obj,
+            ".text",
+            SectionKind::Text,
+            &[0x80, 0x3d, 0, 0, 0, 0, 7, 0xc3],
+            1,
+        );
+        symbol(&mut obj, ENTRY, Some((code, 8)), true);
+        let data = section(&mut obj, ".rodata", SectionKind::ReadOnlyData, &[0; 16], 1);
+        let k = symbol(&mut obj, "k", Some((data, 16)), false);
+        relocate(&mut obj, code, 2, k, elf::R_X86_64_PC32, addend);
+        link(header(), &[&obj.write().unwrap()], &root(), vec![])
+    };
+    for offset in [0, 1, 15, 16] {
+        let bytes = link_cmp(offset - 5).unwrap().encode();
+        let module = Module::parse(&bytes).unwrap();
+        assert_eq!(
+            module.text_fixups().next().unwrap(),
+            Fixup {
+                site: 2,
+                kind: Kind::Rel32Data,
+                bias: 5,
+                addend: offset,
+            }
+        );
+    }
+    for addend in [-6, 12, i64::MIN, i64::MAX] {
+        assert!(link_cmp(addend).unwrap_err().contains("PC32"));
+    }
+}
+
+#[test]
+fn pc32_text_accepts_both_signed_limits_and_refuses_overflow() {
+    let branch = |addend| {
+        let mut obj = x86();
+        let section = section(&mut obj, ".text", SectionKind::Text, &[0xe9, 0, 0, 0, 0], 1);
+        let target = symbol(&mut obj, ENTRY, Some((section, 5)), true);
+        relocate(&mut obj, section, 1, target, elf::R_X86_64_PC32, addend);
+        link(header(), &[&obj.write().unwrap()], &root(), vec![])
+    };
+    // S = 0, P = 1: the displacement is A - 1.
+    for limit in [i32::MIN, i32::MAX] {
+        let image = branch(i64::from(limit) + 1).unwrap();
+        assert_eq!(image.text[1..5], limit.to_le_bytes());
+    }
+    for addend in [i64::from(i32::MIN), i64::from(i32::MAX) + 2, i64::MIN] {
+        assert_eq!(branch(addend).unwrap_err(), "a branch farther than 2 GiB");
+    }
+}

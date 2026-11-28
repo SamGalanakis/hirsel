@@ -82,6 +82,8 @@ enum Use {
     Pointer,
     /// The second instruction of an aarch64 pointer load.
     PointerLow,
+    /// Direct AArch64 address of a local data symbol, with no pointer slot.
+    Data(Kind),
     /// A 64-bit address word.
     Word,
 }
@@ -110,6 +112,20 @@ fn use_of(arch: Arch, r_type: u32) -> Result<Use, String> {
             R_AARCH64_CALL26 | R_AARCH64_JUMP26 => Use::Branch,
             R_AARCH64_ADR_GOT_PAGE => Use::Pointer,
             R_AARCH64_LD64_GOT_LO12_NC => Use::PointerLow,
+            r if r == elf::R_AARCH64_ADR_PREL_PG_HI21.0 => Use::Data(Kind::PageData),
+            r if r == elf::R_AARCH64_ADD_ABS_LO12_NC.0 => Use::Data(Kind::Low12AddData),
+            r if [
+                elf::R_AARCH64_LDST8_ABS_LO12_NC,
+                elf::R_AARCH64_LDST16_ABS_LO12_NC,
+                elf::R_AARCH64_LDST32_ABS_LO12_NC,
+                elf::R_AARCH64_LDST64_ABS_LO12_NC,
+                elf::R_AARCH64_LDST128_ABS_LO12_NC,
+            ]
+            .iter()
+            .any(|kind| kind.0 == r) =>
+            {
+                Use::Data(Kind::Low12LoadData)
+            }
             R_AARCH64_ABS64 => Use::Word,
             other => return refuse(format_args!("aarch64 relocation type {other}")),
         },
@@ -240,6 +256,48 @@ fn offset32(value: u64, what: &str) -> Result<u32, String> {
     u32::try_from(value).map_err(|_| format!("{what} exceeds a module's 4 GiB"))
 }
 
+/// Decode each function with a direct RIP-relative data relocation once. An
+/// immediate after disp32 belongs to the PC bias even when the ELF addend also
+/// includes an offset into the target object.
+fn x86_rip_fields(code: &[u8]) -> BTreeMap<u64, u8> {
+    use iced_x86::{Decoder, DecoderOptions, Register};
+
+    let mut decoder = Decoder::new(64, code, DecoderOptions::NONE);
+    let mut fields = BTreeMap::new();
+    while decoder.can_decode() {
+        let instruction = decoder.decode();
+        if instruction.memory_base() == Register::RIP {
+            let offsets = decoder.get_constant_offsets(&instruction);
+            if offsets.displacement_size() == 4 {
+                let field = instruction.ip() + offsets.displacement_offset() as u64;
+                let bias = instruction.next_ip() - field;
+                if (4..=8).contains(&bias) {
+                    fields.insert(field, bias as u8);
+                }
+            }
+        }
+    }
+    fields
+}
+
+/// A closed fixup names a data byte or the one-past address. Use wide
+/// arithmetic so even the extreme ELF addends receive a module diagnostic.
+fn data_target(
+    offset: u64,
+    addend: i64,
+    bias: u8,
+    length: u64,
+    reloc: &str,
+) -> Result<i64, String> {
+    let target = i128::from(offset) + i128::from(addend) + i128::from(bias);
+    if !(0..=i128::from(length)).contains(&target) {
+        return refuse(format_args!(
+            "{reloc} target {target} outside data of length {length}"
+        ));
+    }
+    i64::try_from(target).map_err(|_| format!("{reloc} target exceeds a signed module addend"))
+}
+
 /// Link `objects` into an image whose entries are `roots`.
 pub(crate) fn link(
     header: Header,
@@ -347,7 +405,7 @@ pub(crate) fn link(
             }
             match (kind, band, target) {
                 (Use::Word, Band::Data, Target::Place(..) | Target::Absolute(_)) => {}
-                (Use::Branch, Band::Text, Target::Place(..)) => {}
+                (Use::Data(_) | Use::Branch, Band::Text, Target::Place(..)) => {}
                 (Use::Branch, Band::Text, Target::Row(row)) => {
                     link.rows.insert(row, 0);
                     row_stubs.insert(row, 0);
@@ -485,6 +543,7 @@ pub(crate) fn link(
             }
         }
     }
+    let mut rip_fields = BTreeMap::new();
     for (part, site, kind, target, addend) in uses {
         let band = link.bands[&part];
         let at = link.starts[&part] + site;
@@ -513,6 +572,24 @@ pub(crate) fn link(
                     data_fixups.push(abs64(to, offset)?);
                 }
             },
+            Use::Data(kind) => {
+                let (to, offset) = link.place(target)?;
+                if to != Band::Data {
+                    return refuse("AArch64 local-data relocation outside data");
+                }
+                text_fixups.push(Fixup {
+                    site: offset32(at, "text")?,
+                    kind,
+                    bias: 0,
+                    addend: data_target(
+                        offset,
+                        addend,
+                        0,
+                        slots + data.len() as u64,
+                        "AArch64 local-data",
+                    )?,
+                });
+            }
             Use::Branch => {
                 let (to, offset) = match target {
                     Target::Row(row) => (Band::Text, row_stubs[&row]),
@@ -522,29 +599,44 @@ pub(crate) fn link(
                     (Band::Data, Arch::X86_64) => {
                         // x86-64 PIC `R_X86_64_PC32` addressing local data (`[rip + disp32]`).
                         // `S + A - P = (D + offset + addend + bias) - (T + at + bias)`.
-                        let bias = if offset as i64 + addend + 4 >= 0 {
-                            4u8
-                        } else {
-                            (-(offset as i64 + addend)).clamp(4, 8) as u8
-                        };
+                        let (&start, &(length, _)) = spans
+                            .range(..=at)
+                            .next_back()
+                            .ok_or("PC32 displacement outside a text symbol")?;
+                        let end = start.checked_add(length).ok_or("PC32 text span overflow")?;
+                        let code = text
+                            .get(start as usize..end as usize)
+                            .ok_or("PC32 text span outside text")?;
+                        let fields = rip_fields
+                            .entry(start)
+                            .or_insert_with(|| x86_rip_fields(code));
+                        let bias = *fields
+                            .get(&(at - start))
+                            .ok_or("PC32 is not a RIP-relative displacement")?;
                         text_fixups.push(Fixup {
                             site: offset32(at, "text")?,
                             kind: Kind::Rel32Data,
                             bias,
-                            addend: offset as i64 + addend + i64::from(bias),
+                            addend: data_target(
+                                offset,
+                                addend,
+                                bias,
+                                slots + data.len() as u64,
+                                "PC32",
+                            )?,
                         });
                         continue;
                     }
                     (Band::Data, Arch::Aarch64) => return refuse("a branch into data"),
                     (Band::Text, Arch::X86_64) => {
-                        let distance = offset as i64 + addend - at as i64;
+                        let distance = i128::from(offset) + i128::from(addend) - i128::from(at);
                         let Ok(value) = i32::try_from(distance) else {
                             return refuse("a branch farther than 2 GiB");
                         };
                         text[field..field + 4].copy_from_slice(&value.to_le_bytes());
                     }
                     (Band::Text, Arch::Aarch64) => {
-                        let distance = offset as i64 + addend - at as i64;
+                        let distance = i128::from(offset) + i128::from(addend) - i128::from(at);
                         if distance % 4 != 0 || !(-(1 << 27)..1 << 27).contains(&distance) {
                             return refuse("a branch farther than 128 MiB");
                         }
@@ -560,7 +652,7 @@ pub(crate) fn link(
                     Arch::X86_64 => true,
                     Arch::Aarch64 => false,
                 };
-                let bias = match u8::try_from(-addend) {
+                let bias = match u8::try_from(-i128::from(addend)) {
                     Ok(bias) if x86 && (4..=8).contains(&bias) => bias,
                     Ok(0) if !x86 => 0,
                     _ => return refuse("a pointer load's addend"),

@@ -65,6 +65,7 @@ ureq = { version = "=3.5.2", default-features = false, features = ["rustls-no-pr
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "=0.8.5"
 object = { version = "=0.40.0", default-features = false, features = ["archive", "elf", "macho", "names", "read_core", "std", "write"] }
+iced-x86 = { version = "=1.21.0", default-features = false, features = ["std", "decoder"] }
 gimli = { version = "=0.33.0", default-features = false, features = ["read", "write", "std"] }
 sha2 = "0.11"
 # Git sources (packages.md GIT-9): SHA-1 with collision detection, and pack inflate.

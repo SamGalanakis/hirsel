@@ -181,8 +181,7 @@ pub fn record_scrub_round(db: Db, generation: u64, start_version: u64, end_versi
 fn scrub_estimated_bytes(tour: Scrub) -> u64 {
     let mut total = 0u64
     for pack in tour.packs {
-        let headers = int.saturating_add(72u64, int.saturating_mul(16u64, pack.frames))
-        total = int.saturating_add(total, int.saturating_add(headers, pack.payload_bytes))
+        total = int.saturating_add(total, pages.sealed_pack_bytes(pack.class, pack.frames, pack.payload_bytes))
     }
     total
 }

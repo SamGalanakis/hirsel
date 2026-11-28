@@ -158,6 +158,7 @@ store@1/store/disk_test_scrub_interleaved src=5e2098bf4439de9c sig=b6c8841425c04
 store@1/store/disk_test_scrub_lease src=31603475e9cce84d sig=854eaec71c92ef11 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_scrub_misdirected src=a8a823b3a7154c2b sig=8b7432521e7cc31b run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_scrub_paced_and_history src=9ab39a11b7231105 sig=d25c0ddb6931bc2d run=95ba7da3b1f71460 bug=- oracle=- rows=pending
+store@1/store/disk_test_scrub_paced_mixed_pack_bytes src=74679f0cc5506fbc sig=42391027738466d6 run=0fbf0f9c200aa0aa bug=278619fe4f09a303 oracle=9b241073b6f031c5 rows=pending
 store@1/store/disk_test_scrub_pack_index_names_its_frames src=ebe4858b0172b791 sig=c933a2dc720eb9d4 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/disk_test_seeded_write_faults src=a5560f773ba1286a sig=97ec30bbb13f0738 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/disk_test_typed_error_drops_frame_tail src=8829bd3b11a2975c sig=abc0d0ec03e3925c run=ea720f3846592392 bug=- oracle=- rows=pending

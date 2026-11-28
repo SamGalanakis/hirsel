@@ -531,6 +531,54 @@ fn check_detects(d: Dir, c: Clock) -> Result[(), Error] waits {
     Ok(())
 }
 
+/// bug: the pacer adds the header and frame envelopes to Tiered pack lengths twice.
+/// oracle: the leased pack files' sizes, with a one-second target and bounds on either side of their sum.
+@test
+fn disk_test_scrub_paced_mixed_pack_bytes(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let path = disk_test_directory(d)
+    let mut db = open(tasks, path, c, r, l96_tiered_options(182375272u64, 65536, 500)?)?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    l96_put_bytes(mut db, rows, 0, l96_blob_value(1, 32))?
+    l96_put_bytes(mut db, rows, 1, l96_blob_value(2, 2000))?
+    set_residency(mut db, rows.id, Tiered)?
+    let tour = begin_scrub(mut db)?
+    let mut total = 0u64
+    let mut classes: List[u8] = list.new()
+    for pack in tour.packs {
+        let name = failure_result_from_rep(manifest.paged_pack_path(pack.seq))?
+        total += failure_result_from_rep(manifest.disk_io(host.stat(path, name)))?.size
+        list.push(mut classes, pack.class)
+    }
+    if !list.contains(classes, 0u8) || !list.contains(classes, 3u8) || !list.contains(classes, 4u8) {
+        fail("paced scrub needs Memory pages and Tiered pages and blobs")
+    }
+    // At a one-second target the unclamped rate equals the sealed byte count.
+    for (min_rate, max_rate, expected_rate) in[(1u64, 2 * total, total), (total + 1, 2 * total, total + 1), (1u64, total - 1, total - 1)] {
+        let config = ScrubConfig(target_ms: 1000u64, max_rate_bps: max_rate, slice_bytes: 1u64, min_rate_bps: min_rate)
+        let mut pacer = begin_scrub_pacer(db, config, 0u64)?
+        let step = scrub_pacer_step(mut pacer, mut db, 0u64)?
+        let status = step.status
+        if !step.stepped || !status.active || status.generation != Some(tour.generation) || list.len(step.faults) != 0 {
+            fail("paced scrub must start a clean slice of the leased generation")
+        }
+        if status.estimated_bytes != total || status.rate_bps != expected_rate {
+            let mut msg = string.with_capacity(128)
+            string.push(mut msg, "paced scrub expected bytes/rate ")
+            string.push_u64(mut msg, total)
+            string.push(mut msg, "/")
+            string.push_u64(mut msg, expected_rate)
+            string.push(mut msg, ", got ")
+            string.push_u64(mut msg, status.estimated_bytes)
+            string.push(mut msg, "/")
+            string.push_u64(mut msg, status.rate_bps)
+            fail(take msg)
+        }
+    }
+    drop(take tour)
+    close(take db)
+}
+
 // CLOUD #5 + T13: paced Directory scrub with completion target, actual byte
 // debit, overdue signal, lease release on stop, and persisted SCRUB round
 // history surfaced by `describe_capture`.

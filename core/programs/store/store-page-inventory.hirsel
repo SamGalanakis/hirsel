@@ -49,6 +49,14 @@ pub type PagePack: shareable + send {
     index: u64
 }
 
+pub fn sealed_pack_bytes(class: u8, frames: u64, payload_bytes: u64) -> u64 {
+    if class >= 3 {
+        return payload_bytes
+    }
+    let headers = int.saturating_add(72u64, int.saturating_mul(16u64, frames))
+    int.saturating_add(headers, payload_bytes)
+}
+
 pub type LocatedRoots: shareable + send {
     collections: std.page.PagePtr,
     streams: std.page.PagePtr,

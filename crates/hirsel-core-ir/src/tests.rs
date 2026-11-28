@@ -2,6 +2,7 @@
 //! line in the sample file, not output of this crate.
 
 mod frame;
+mod metering;
 mod own;
 
 use crate::text::{parse, print};

@@ -33,6 +33,7 @@ b2:
   v5: u64 = const 1
   v6: u64 = add v3, v5
   v7: u64 = add v2, v6
+  step
   jump b1(v7, v6)
 b3:
   return v2

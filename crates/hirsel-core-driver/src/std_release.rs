@@ -559,8 +559,7 @@ fn lower_module(
         .values()
         .map(|unit| Cow::Borrowed(unit.module()))
         .collect();
-    // Only the roots are exports: a program lowers every other instance it
-    // reaches, so its optimiser sees the arguments it passes them.
+    // Export roots only so the program can optimize the other instances for its arguments.
     let body_keys = crate::callable_variants::prepare_inputs(
         &mut modules,
         &reached,
@@ -603,7 +602,12 @@ fn lower_module(
         .filter(|unit| functions.contains_key(unit))
         .collect();
     let ids: Vec<FuncId> = roots.iter().map(|root| functions[root]).collect();
-    let codes: Vec<ContentHash> = ids.iter().map(|&f| module.code_identity(f)).collect();
+    let emit = |message: String| NativeStop::Emit {
+        definition: first.definition.clone(),
+        message,
+    };
+    hirsel_core_ir::wf::module(&module).map_err(emit)?;
+    let codes: Vec<_> = ids.iter().map(|&f| module.code_identity(f)).collect();
     let summaries = hirsel_core_ir::step_contexts::specialize_library(&mut module, &ids);
     held::descriptors(&mut module);
     let mut exports = Vec::with_capacity(roots.len() * 2);
@@ -617,11 +621,7 @@ fn lower_module(
     }
     let target =
         hirsel_core_layout::Target::from_triple(options.target).expect("supported native target");
-    let emit = |message: String| NativeStop::Emit {
-        definition: first.definition.clone(),
-        message,
-    };
-    hirsel_core_ir::wf::module(&module).map_err(emit)?;
+    hirsel_core_ir::wf::specialized_module(&module).map_err(emit)?;
     let facts = hirsel_core_ir::roles::Facts::program(&[&module], &[]);
     // Lowering releases CoreIR and its facts before LLVM optimization.
     let lowered = hirsel_llvm_lazy::lower_program(

@@ -419,6 +419,10 @@ pub(super) fn emit_release_image(
     // capabilities, and spawn, flow, cleanup and the task entry adapters
     // call back into the same image. Drop glue calls finalizers by type.
     // The std's step summaries stand for the bodies the program calls in it.
+    hirsel_core_ir::wf::module(&joined).map_err(|message| NativeStop::Emit {
+        definition: entry.clone(),
+        message,
+    })?;
     let contained =
         closed_executable && hirsel_core_ir::step_contexts::self_contained_over(&joined, summaries);
     if contained {
@@ -462,7 +466,7 @@ pub(super) fn emit_release_image(
     if let Some(pass) = super::RELEASE_PASS.get() {
         pass(&mut joined);
     }
-    hirsel_core_ir::wf::module(&joined).map_err(|message| NativeStop::Emit {
+    hirsel_core_ir::wf::specialized_module(&joined).map_err(|message| NativeStop::Emit {
         definition: entry.clone(),
         message,
     })?;

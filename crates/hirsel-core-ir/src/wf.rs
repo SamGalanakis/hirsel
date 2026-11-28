@@ -12,6 +12,7 @@ use crate::*;
 mod available;
 mod descriptor;
 mod frame;
+mod metering;
 mod own;
 mod own_flow;
 mod own_names;
@@ -56,12 +57,10 @@ fn refs_ok(f: &hirsel_core_layout::FieldTy, n: usize) -> bool {
     }
 }
 
-pub fn module(m: &Module) -> R {
-    module_with_budget(m, &Debit::unlimited()).map_err(|e| e.to_string())
-}
+pub use metering::metering_with_budget as module_with_budget;
+pub use metering::{metering_strict_with_budget, metering_with_budget, module, specialized_module};
 
-/// Verify structural well-formedness and ownership of `m` under `budget`.
-pub fn module_with_budget(m: &Module, budget: &Debit<'_>) -> Result<(), Error> {
+fn structural(m: &Module, budget: &Debit<'_>) -> Result<(), Error> {
     let scratch = budget.scratch();
     scratch.check()?;
     scratch.allocation::<(&String, usize)>(m.types.len().saturating_mul(2))?;

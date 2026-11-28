@@ -145,6 +145,13 @@ impl ReleaseFixture {
     }
 
     fn admit_local(&self, limits: &AdmissionLimits) -> Result<(), AdmissionError> {
+        self.admit_using(|store, root| admit_local(store, root, limits, &NativeSemantics))
+    }
+
+    fn admit_using(
+        &self,
+        verify: impl FnOnce(&CodeStore, ContentHash) -> Result<super::VerifiedRelease, AdmissionError>,
+    ) -> Result<(), AdmissionError> {
         let dir = tempfile::tempdir().unwrap();
         let code = CodeStore::new(dir.path().to_path_buf());
         for (&key, bytes) in &self.objects {
@@ -152,7 +159,7 @@ impl ReleaseFixture {
         }
         let recipe_bytes = self.recipe.encode();
         let root = code.put(ObjectKind::Recipe, &recipe_bytes).unwrap().hash;
-        admit_local(&code, root, limits, &NativeSemantics).map(|_| ())
+        verify(&code, root).map(|_| ())
     }
 
     fn admit_socket(&self, limits: &AdmissionLimits) -> Result<(), AdmissionError> {
@@ -601,4 +608,125 @@ fn f2 = n2 g2 extern
         good.admit_local(&tight),
         Err(AdmissionError::Limit(Limit::DecodeBytes))
     ));
+}
+
+#[test]
+fn admission_requires_a_charge_in_a_counted_guest_loop() {
+    let entry = "app@1/main/entry";
+    let source = r#"core v1
+sig g0 = () -> ()
+inst n0 = app@1/main/entry [] []
+fn f0 = n0 g0 {
+b0:
+  v0: u64 = const 0
+  v1: u64 = const 2
+  v2: u64 = const 1
+  jump b1(v0)
+b1(v3: u64):
+  v4: bool = lt v3, v1
+  branch v4, b2, b3
+b2:
+  step
+  v5: u64 = add v3, v2
+  jump b1(v5)
+b3:
+  return
+}
+"#;
+    let paid = ReleaseFixture::from_modules(entry, &[(entry, source)]);
+    paid.admit_local(&limits()).unwrap();
+    let unpaid = source.replace("  step\n", "");
+    let invalid = ReleaseFixture::from_modules(entry, &[(entry, &unpaid)]);
+    admit_strict(&paid, &limits()).unwrap();
+    assert!(matches!(
+        admit_strict(&invalid, &limits()),
+        Err(AdmissionError::InvalidCoreIr(_))
+    ));
+    // The strict gate also checks storage-bearing cycles. This loop still
+    // terminates after two iterations and reads only an initialized local.
+    let storage_loop = unpaid
+        .replace("b0:\n", "  slot s0 = u64\n  addr a0 = s0 : u64\nb0:\n")
+        .replace(
+            "  jump b1(v0)",
+            "  live s0\n  address a0\n  store a0, v0\n  jump b1(v0)",
+        )
+        .replace("b2:\n", "b2:\n  v6: u64 = read a0\n");
+    let storage = ReleaseFixture::from_modules(entry, &[(entry, &storage_loop)]);
+    storage.admit_local(&limits()).unwrap();
+    assert!(
+        matches!(admit_strict(&storage, &limits()), Err(AdmissionError::InvalidCoreIr(ref s)) if s.contains("metering"))
+    );
+    let refusal = invalid.admit_local(&limits());
+    assert!(
+        matches!(refusal, Err(AdmissionError::InvalidCoreIr(ref s)) if s.contains("metering")),
+        "{refusal:?}"
+    );
+}
+
+fn admit_strict(fixture: &ReleaseFixture, limits: &AdmissionLimits) -> Result<(), AdmissionError> {
+    fixture.admit_using(|store, root| {
+        super::admit_local_with_verifier(
+            store,
+            root,
+            limits,
+            &NativeSemantics,
+            hirsel_core_ir::wf::metering_strict_with_budget,
+        )
+    })
+}
+
+#[test]
+fn admission_checks_repeat_precharge_against_the_loop_bound() {
+    let entry = "app@1/main/entry";
+    let source = r#"core v1
+type t0 = own "app@1/main/Array" { items: array 513 u64 }
+sig g0 = () -> ()
+sig g1 = (u64, u64, u64) -> ()
+inst n0 = app@1/main/entry [] []
+fn f0 = n0 g0 {
+  slot s0 = t0
+  addr a0 = s0 : t0
+  addr a1 = a0 field 0 element v6 : u64
+b0:
+  live s0
+  address a0
+  v0: u64 = const 4104
+  v1: u64 = const 12
+  v2: u64 = const 0
+  call rt.work_steps g1 (v0, v1, v2)
+  v3: u64 = const 0
+  v4: u64 = const 513
+  v5: u64 = const 1
+  jump b1(v3)
+b1(v6: u64):
+  v7: bool = lt v6, v4
+  branch v7, b2, b3
+b2:
+  address a1
+  store a1, v2
+  v8: u64 = wrapping_add v6, v5
+  jump b1(v8)
+b3:
+  return
+}
+"#;
+    let paid = ReleaseFixture::from_modules(entry, &[(entry, source)]);
+    paid.admit_local(&limits()).unwrap();
+    admit_strict(&paid, &limits()).unwrap();
+    for unpaid in [
+        source.replace("const 4104", "const 4096"),
+        source.replace("const 513", "const 514"),
+        source.replace("  call rt.work_steps g1 (v0, v1, v2)\n", ""),
+    ] {
+        let fixture = ReleaseFixture::from_modules(entry, &[(entry, &unpaid)]);
+        for result in [
+            fixture.admit_local(&limits()),
+            admit_strict(&fixture, &limits()),
+        ] {
+            assert!(
+                matches!(result, Err(AdmissionError::InvalidCoreIr(ref why)) if why.contains("precharge")),
+                "{result:?}"
+            );
+        }
+    }
 }

@@ -336,6 +336,25 @@ pub fn admit_local(
     limits: &AdmissionLimits,
     semantics: &impl BackendSemantics,
 ) -> Result<VerifiedRelease, AdmissionError> {
+    admit_local_with_verifier(
+        store,
+        root,
+        limits,
+        semantics,
+        hirsel_core_ir::wf::metering_with_budget,
+    )
+}
+
+type CoreVerifier =
+    fn(&hirsel_core_ir::Module, &Debit<'_>) -> Result<(), hirsel_core_ir::wf::Error>;
+
+fn admit_local_with_verifier(
+    store: &CodeStore,
+    root: ContentHash,
+    limits: &AdmissionLimits,
+    semantics: &impl BackendSemantics,
+    verify_core: CoreVerifier,
+) -> Result<VerifiedRelease, AdmissionError> {
     let budget = budget(limits, None);
     let held = budget.debit();
     let bytes = read_recipe(store, root, limits.recipe_bytes, &held)?;
@@ -347,6 +366,7 @@ pub fn admit_local(
         recipe,
         &held,
         semantics,
+        verify_core,
         |kind, object, budget| {
             let file = open_object(store, kind, object.hash)?;
             read_verified(file, kind, object, budget)
@@ -425,6 +445,7 @@ impl AdmissionStore {
             recipe,
             &held,
             semantics,
+            hirsel_core_ir::wf::metering_with_budget,
             |kind, object, budget| {
                 let key = ObjectKey {
                     kind,
@@ -451,6 +472,7 @@ fn verify_release(
     recipe: Recipe,
     budget: &Debit<'_>,
     semantics: &impl BackendSemantics,
+    verify_core: CoreVerifier,
     mut load: impl FnMut(ObjectKind, &ObjectRef, &Debit<'_>) -> Result<Vec<u8>, AdmissionError>,
 ) -> Result<VerifiedRelease, AdmissionError> {
     let groups = decode_rows(&recipe.groups, budget, |object, budget| {
@@ -478,7 +500,7 @@ fn verify_release(
     let mut bodies = bodies;
     bind_constant_slots(&recipe, &groups, &mut bodies, values, budget)?;
     for body in &bodies {
-        hirsel_core_ir::wf::module_with_budget(&body.decoded.module, &budget.scratch())?;
+        verify_core(&body.decoded.module, &budget.scratch())?;
     }
     let mut link_archives = crate::foreign_archive::LinkArchives::default();
     if recipe.has_foreign() {

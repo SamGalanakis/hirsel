@@ -1,0 +1,397 @@
+// An independent witness checks the rows, log and commit chain on each dump.
+// The fixed logical working set makes comparable post-reclaim samples possible.
+type SoakHandles: shareable + send {
+    rows: Table[u64, u64],
+    blobs: Table[u64, Bytes],
+    events: Log[u64],
+    meta: Table[u64, u64],
+    by_value: Index[u64, u64, u64, ()]
+}
+
+fn soak_bucket(_k: u64, value: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.with_capacity(1)
+    list.push(mut keys, value % 8)
+    Ok(take keys)
+}
+
+fn soak_schema(mut d: Declare) -> Result[SoakHandles, Error] {
+    let mut data = declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let by_value = index(mut d, mut data, "by_value", Many, code.describe(soak_bucket), std.codec.key_u64())?
+    let rows = finish(mut d, take data)?
+    let blob = declare_table(mut d, "blobs", std.codec.key_u64(), std.codec.of_bytes())?
+    let blobs = finish(mut d, take blob)?
+    let mark = declare_table(mut d, "meta", std.codec.key_u64(), std.codec.of_u64())?
+    let meta = finish(mut d, take mark)?
+    let events = declare_log(mut d, "events", std.codec.of_u64(), Forever)?
+    Ok(SoakHandles(rows: take rows, blobs: take blobs, events: take events, meta: take meta, by_value: take by_value))
+}
+
+fn soak_value(value: Option[u64]) -> u64 {
+    match value {
+        Some(n) => n,
+        None => 0u64,
+    }
+}
+
+fn soak_payload(op: u64) -> Bytes {
+    let mut payload: Bytes = list.with_capacity(12288)
+    for i in 0u64 .. 12288 {
+        list.push(mut payload, int.narrow((op + i * 17) % 251))
+    }
+    take payload
+}
+
+fn soak_tx(mut tx: Tx, job: (SoakHandles, u64)) -> Result[u64, Error] {
+    let h: SoakHandles = clone(job.0)
+    let op = job.1
+    if op <= soak_value(fetch(tx, h.meta, 0u64)?) {
+        fail("soak operation IDs must strictly increase")
+    }
+    let chain = int.wrapping_add(int.wrapping_mul(soak_value(fetch(tx, h.meta, 1u64)?), 1099511628211u64), op)
+    put(mut tx, h.rows, op % 64, op * 3 + 1)?
+    if op % 4 == 0 {
+        let _ = delete(mut tx, h.rows, (op + 17) % 64)?
+    }
+    put(mut tx, h.blobs, op % 8, soak_payload(op))?
+    let seq = append(mut tx, h.events, op)?
+    if seq >= 31 {
+        trim_before(mut tx, h.events, seq - 31)?
+    }
+    put(mut tx, h.meta, 0u64, op)?
+    put(mut tx, h.meta, 1u64, chain)?
+    Ok(chain)
+}
+
+fn soak_numbers(out: Stdout, tag: String, width: u64, values: Inline[u64, 10]) waits {
+    let mut line = string.from(tag)
+    for i in 0u64 .. width {
+        string.push(mut line, " ")
+        string.push_u64(mut line, values[i])
+    }
+    string.push(mut line, "\n")
+    result.unwrap(stdout.write(out, line))
+}
+
+fn soak_pair(out: Stdout, tag: String, first: u64, second: u64) waits {
+    soak_numbers(out, tag, 2,[first, second, 0, 0, 0, 0, 0, 0, 0, 0])
+}
+
+fn soak_digest(payload: Bytes) -> String {
+    let digest = std.sha256.hash(payload)
+    let mut raw: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32 {
+        list.push(mut raw, digest[i])
+    }
+    std.hex.encode(raw)
+}
+
+fn soak_dump(db: Db, handles: SoakHandles, out: Stdout) -> Result[(), Error] waits {
+    let rd = reader(db, READER_PIN_MIN)?
+    let snap = snapshot(db)
+    soak_pair(out, "META", soak_value(get(rd, snap, handles.meta, 0u64)?), soak_value(get(rd, snap, handles.meta, 1u64)?))
+    let mut rows = scan(rd, snap, handles.rows, Unbounded, Unbounded)?
+    while let Some((key, value)) = next(rd, mut rows)? {
+        soak_pair(out, "ROW", key, value)
+    }
+    let mut blobs = scan(rd, snap, handles.blobs, Unbounded, Unbounded)?
+    while let Some((key, take value)) = next(rd, mut blobs)? {
+        let mut line = string.from("BLOB ")
+        string.push_u64(mut line, key)
+        string.push(mut line, " ")
+        string.push(mut line, soak_digest(value))
+        string.push(mut line, "\n")
+        result.unwrap(stdout.write(out, line))
+    }
+    let mut events = log_scan(rd, snap, handles.events, Unbounded, Unbounded)?
+    while let Some((seq, op)) = next(rd, mut events)? {
+        soak_pair(out, "EVENT", seq, op)
+    }
+    result.unwrap(stdout.write(out, "END\n"))
+    Ok(())
+}
+
+fn soak_cut(mut db: Db) -> Result[(), Error] waits {
+    let cut = checkpoint(mut db)?
+    durable(mut db, cut)
+}
+
+fn soak_stage[T](site: String, take outcome: Result[T, Error]) -> T {
+    match take outcome {
+        Ok(take value) => take value,
+        Error(problem) => soak_error(site, problem),
+    }
+}
+
+fn soak_follow(mut db: Db, side: Branch, h: SoakHandles) waits {
+    // The separate-process Directory Follower refuses Tiered manifests.
+    // Follow this branch through the Store's native snapshot publication.
+    let subscribed = soak_stage("subscribe to fork", follow(mut db, side))
+    let before = version(latest.read(subscribed))
+    let t: Table[u64, u64] = clone(h.meta)
+    let Committed(written) = soak_stage("write fork", run_on(mut db, side, Some(10000000), copy_env(t), fn(mut tx: Tx, meta: Table[u64, u64]) -> Result[(), Error] {
+        put(mut tx, meta, 2u64, 42u64)
+    })) else {
+        fail("branch follower write did not commit")
+    }
+    soak_stage("sync fork write", durable(mut db, written.ticket))
+    let snap = latest.read(subscribed)
+    let rd = soak_stage("create branch reader", reader(db, READER_PIN_MIN))
+    if version(snap) != before + 1 || soak_stage("read followed branch", get(rd, snap, h.meta, 2u64)) != Some(42u64) {
+        fail("branch follower missed a committed publication")
+    }
+}
+
+fn soak_cycle(mut db: Db, h: SoakHandles) waits {
+    {
+        let held = snapshot(db)
+        let pinned_cut = soak_stage("pin", pin(mut db, "soak", held))
+        soak_stage("sync pin", durable(mut db, pinned_cut))
+        let (side, forked) = soak_stage("fork", fork(mut db, "soak", held))
+        soak_stage("sync fork", durable(mut db, forked))
+        soak_follow(mut db, side, h)
+        let dropped = soak_stage("delete branch", delete_branch(mut db, side))
+        soak_stage("sync branch deletion", durable(mut db, dropped))
+        let unpinned = soak_stage("unpin", unpin(mut db, "soak"))
+        soak_stage("sync unpin", durable(mut db, unpinned))
+    }
+    soak_stage("rebuild index", rebuild_index(mut db, h.by_value))
+    while let Some(_) = soak_stage("build index step", index_build_step(mut db, 64)) {}
+    soak_stage("cut before archive", soak_cut(mut db))
+    while soak_stage("ship archive", archive_step(mut db)) {}
+    // A later cut can release archive holds already acknowledged above.
+    soak_stage("cut after archive", soak_cut(mut db))
+    while soak_stage("settle archive", archive_step(mut db)) {}
+}
+
+fn soak_measure(mut db: Db, dir: Dir, out: Stdout, ship: bool) -> Result[(), Error] waits {
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        pager.prune_leases(mut state.tiered)
+        manifest.prune_pack_scrubs(mut state.packs)
+    })
+    let state = disk_state(db)
+    let a = accounts(db)
+    // An idle cut can keep the current inventory in the compaction list.
+    // Count historical inventories and live branch subscriptions.
+    let current_heads = pages.holder_heads(db.holders)
+    let current_generation = match view current_heads[0].roots.collections.paging {
+        Some(inventory) => inventory.generation,
+        None => 0u64,
+    }
+    let mut snap_leases = list.len(db.followers)
+    for inventory in pager.disk_compaction(state.tiered).held {
+        if inventory.generation != current_generation {
+            snap_leases += 1
+        }
+    }
+    let export = if export_leased(db) {
+        1u64
+    } else {
+        0u64
+    }
+    let health_report = attention(db)?
+    let mut archived_version = 0u64
+    if ship {
+        let Some(progress) = view health_report.archive else {
+            fail("missing archive lane")
+        }
+        if progress.state != ArchiveActive || progress.last_error != None {
+            fail("archive lane is unhealthy")
+        }
+        let Some(committed) = progress.archived_through else {
+            fail("archive has no durable head")
+        }
+        archived_version = committed.main_version
+        if archived_version != version(snapshot(db)) {
+            fail("archive is behind the current Store version")
+        }
+    }
+    let (_, disk) = failure_result_from_rep(manifest.read_page_manifest_file(dir))?
+    soak_numbers(out, "MEASURE", 10,[a.logical, a.resident, list.len(pages.holder_pins(db.holders)), snap_leases, export, list.len(manifest.pack_scrubs(state.packs)), disk.prev_first, disk.first_live, file_seq(db), archived_version])
+    for seq in manifest.pack_carried(state.packs) {
+        soak_numbers(out, "RETIRED", 1,[seq, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    }
+    for seq in export_lease_pack_sequences(manifest.pack_locations(state.packs)) {
+        soak_numbers(out, "PACK", 1,[seq, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    }
+    result.unwrap(stdout.write(out, "END\n"))
+    Ok(())
+}
+
+fn soak_archive(n: Net, d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, root: Secret) -> Result[Authority, Error] waits {
+    let endpoint = option.unwrap(args.get(argv, 2))
+    let cfg = std.object.Bucket(endpoint: string.from(endpoint), aws_region: string.from("us-east-1"), bucket: string.from("drill"), prefix: string.from("soak/"), style: Path)
+    let creds = std.cred.from_secret(string.from("writer"), secret.share(root), string.new())
+    let lanes = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
+    let mut cfg_archive = archive_options(1, 12000)
+    cfg_archive.archive_ms = 1000
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(c), 12000)
+    let sink = match std.object.start(n, tasks, take cfg, take creds, None, System, c, r, lanes, deadline) {
+        Ok(take client) => take client,
+        Error(_) => fail("could not start the soak archive client"),
+    }
+    archived(log_authority(d), take sink, cfg_archive)
+}
+
+fn soak_read_u64(input: Stdin, mut buf: Bytes) -> u64 waits {
+    let mut value = 0u64
+    for i in 0u64 .. 8 {
+        list.clear(mut buf)
+        if result.unwrap(stdin.read(input, mut buf, Never)) != 1 {
+            fail("incomplete operation ID")
+        }
+        let octet: u64 = int.widen(buf[0])
+        value = value | (octet << (i * 8))
+    }
+    value
+}
+
+fn soak_error(site: String, problem: Error) -> Never {
+    let mut text = string.from(site)
+    string.push(mut text, " failed: ")
+    match problem {
+        Missing(name) => {
+            string.push(mut text, "Missing ")
+            string.push(mut text, name)
+        },
+        Io(Other(code)) => {
+            string.push(mut text, "Io errno ")
+            string.push_u64(mut text, int.widen(code))
+        },
+        Poisoned(Other(code)) => {
+            string.push(mut text, "Poisoned errno ")
+            string.push_u64(mut text, int.widen(code))
+        },
+        Io(_) => string.push(mut text, "Io"),
+        Poisoned(_) => string.push(mut text, "Poisoned"),
+        Full(_) => string.push(mut text, "Full"),
+        Remote(_) => string.push(mut text, "Remote"),
+        Corrupt(_) => string.push(mut text, "Corrupt"),
+        Stale(id) => {
+            string.push(mut text, "Stale ")
+            string.push_u64(mut text, int.widen(id))
+        },
+        Undeclared(name) => {
+            string.push(mut text, "Undeclared ")
+            string.push(mut text, name)
+        },
+        Changed(name) => {
+            string.push(mut text, "Changed ")
+            string.push(mut text, name)
+        },
+        Conflict(name) => {
+            string.push(mut text, "Conflict ")
+            string.push(mut text, name)
+        },
+        Foreign => string.push(mut text, "Foreign"),
+        NotFound => string.push(mut text, "NotFound"),
+        Lost => string.push(mut text, "Lost"),
+        Unsupported(code) => {
+            string.push(mut text, "Unsupported ")
+            string.push_u64(mut text, code)
+        },
+        Tiered(reason) => string.push(mut text, tiered_refusal_text(reason)),
+        _ => string.push(mut text, "unexpected Store error"),
+    }
+    fail(take text)
+}
+
+fn soak_enospc(problem: Error) -> bool {
+    match problem {
+        Io(Other(28)) => true,
+        Poisoned(Other(28)) => true,
+        _ => false,
+    }
+}
+
+fn soak_command(mut db: Db, h: SoakHandles, d: Dir, input: Stdin, out: Stdout, command: u8, op: u64, ship: bool) -> Result[(), Error] waits {
+    if command == 1u8 {
+        let job: (SoakHandles, u64) = (clone(h), op)
+        let Committed(written) = run(mut db, Some(10000000), copy_env(job), soak_tx)? else {
+            fail("soak transaction did not commit")
+        }
+        // Used by the supervisor to inject a crash with a known in-flight ID.
+        soak_numbers(out, "INFLIGHT", 1,[op, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        let mut go: Bytes = list.with_capacity(1)
+        if result.unwrap(stdin.read(input, mut go, Never)) != 1 || go[0] != 1u8 {
+            fail("missing durability request")
+        }
+        durable(mut db, written.ticket)?
+        soak_pair(out, "ACK", op, written.value)
+    } else if command == 2u8 {
+        soak_dump(db, h, out)?
+    } else if command == 3u8 {
+        soak_cycle(mut db, h)
+        result.unwrap(stdout.write(out, "CYCLE\n"))
+    } else if command == 4u8 {
+        soak_measure(mut db, d, out, ship)?
+    } else if command == 5u8 {
+        soak_cut(mut db)?
+        result.unwrap(stdout.write(out, "CUT\n"))
+    } else {
+        fail("unknown soak command")
+    }
+    Ok(())
+}
+
+pub fn soak_place(d: Dir, n: Net, c: Clock, r: Random, tasks: Tasks, argv: Args, input: Stdin, out: Stdout, archive: Secret) -> Result[(), Exit] waits {
+    let create = option.unwrap(args.get(argv, 0)) == "create"
+    let ship = option.unwrap(args.get(argv, 1)) == "archive"
+    let mut options = result.unwrap(sized(Directory, 805306368))
+    options.create = create
+    let authority = if ship {
+        result.unwrap(soak_archive(n, d, c, r, tasks, argv, archive))
+    } else {
+        log_authority(d)
+    }
+    let mut db = match open_authority(tasks, take authority, c, r, options) {
+        Ok(take opened) => take opened,
+        Error(_) => fail("soak Store open failed"),
+    }
+    let mode = if create {
+        Migrate
+    } else {
+        Open
+    }
+    let mut decl = result.unwrap(declare(db, mode))
+    let h = result.unwrap(soak_schema(mut decl))
+    let schema_cut = result.unwrap(seal(mut db, take decl))
+    result.unwrap(durable(mut db, schema_cut))
+    if create {
+        if ship {
+            result.unwrap(set_residency(mut db, h.events.binding.id, Tiered))
+        }
+        while let Some(_) = result.unwrap(index_build_step(mut db, 64)) {}
+        result.unwrap(soak_cut(mut db))
+    }
+    let mut ready = string.from("READY ")
+    string.push(mut ready, format.archive_store_hex(store_key_to_rep(identity(db))))
+    string.push(mut ready, "\n")
+    result.unwrap(stdout.write(out, ready))
+    let mut buf: Bytes = list.with_capacity(1)
+    loop {
+        list.clear(mut buf)
+        if result.unwrap(stdin.read(input, mut buf, Never)) == 0 {
+            break
+        }
+        let command = buf[0]
+        let op = if command == 1u8 {
+            soak_read_u64(input, mut buf)
+        } else {
+            0u64
+        }
+        match soak_command(mut db, h, d, input, out, command, op, ship) {
+            Ok(()) => (),
+            Error(problem) => {
+                if soak_enospc(problem) {
+                    result.unwrap(stdout.write(out, "ENOSPC 28\n"))
+                    return Error(Exit(status: 28))
+                }
+                let mut site = string.from("Store command ")
+                string.push_u64(mut site, int.widen(command))
+                soak_error(site, problem)
+            },
+        }
+    }
+    result.unwrap(close(take db))
+    Ok(())
+}

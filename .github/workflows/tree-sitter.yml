@@ -48,10 +48,11 @@ jobs:
           git diff --exit-code -- src
           test -z "$(git ls-files --others --exclude-standard -- src)"
           tree-sitter build -o "$RUNNER_TEMP/tree-sitter/hirsel.so"
+          tree-sitter build -o "$RUNNER_TEMP/tree-sitter/hirsel_data.so" data
       - name: Check the core and spec corpus
         run: ./check-corpus --parser "$RUNNER_TEMP/tree-sitter/hirsel.so"
       - name: Check editor queries
-        run: ts_query_ls check -f queries/ --config "{\"parser_install_directories\":[\"$RUNNER_TEMP/tree-sitter\"]}"
+        run: ts_query_ls check -f queries/ data/queries/ --config "{\"parser_install_directories\":[\"$RUNNER_TEMP/tree-sitter\"]}"
       - name: Test the scanner and newline rules
         run: tree-sitter test
       - name: Test the Rust binding

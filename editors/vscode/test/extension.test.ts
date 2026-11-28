@@ -93,7 +93,7 @@ test("the configuration grammar highlights keys and constructors", async () => {
   assert.ok(manifest.contributes.languages.some(({ id, extensions }: { id: string; extensions: string[] }) =>
     id === "hirsel-data" && extensions.includes(".hcfg")));
   assert.deepEqual(await readFile(join(grammar, "data-highlights.scm")),
-    await readFile(join(__dirname, "../../../tree-sitter-hirsel/queries/data-highlights.scm")));
+    await readFile(join(__dirname, "../../../tree-sitter-hirsel/data/queries/hirsel_data/highlights.scm")));
   const { parser, query } = await createHighlighter(grammar, true);
   const source = 'pkg_v1.Package(name: "local/app", charge: ChargeV1)';
   const tree = parser.parse(source);

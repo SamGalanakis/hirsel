@@ -26,7 +26,9 @@ Neovim starts the Hirsel server for `.hirsel` and `.hcfg` buffers. It uses
 `hirsel.hcfg` as the project root marker and accepts the server's file watchers.
 Regenerate the runtime queries when the common queries change by copying
 `highlights.scm`, `injections.scm`, and `locals.scm` from
-`editors/tree-sitter-hirsel/queries/` to `queries/hirsel/`. Copy `data-highlights.scm` to `queries/hirsel_data/highlights.scm`.
+`editors/tree-sitter-hirsel/queries/` to `queries/hirsel/`. Copy
+`data/queries/hirsel_data/highlights.scm` from the grammar directory to
+`queries/hirsel_data/highlights.scm` in the Neovim adapter.
 
 ## Format on save
 

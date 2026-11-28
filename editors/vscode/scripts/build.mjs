@@ -21,16 +21,16 @@ try {
   for (const entry of ["tree-sitter.json", "src", "data/src"]) {
     cpSync(join(grammar, entry), join(staging, entry), { recursive: true });
   }
-  for (const [subdir, name, query] of [
-    ["", "hirsel", "highlights.scm"],
-    ["data", "hirsel_data", "data-highlights.scm"],
+  for (const [subdir, name, query, stagedQuery] of [
+    ["", "hirsel", "queries/highlights.scm", "highlights.scm"],
+    ["data", "hirsel_data", "data/queries/hirsel_data/highlights.scm", "data-highlights.scm"],
   ]) {
     const result = spawnSync(process.execPath, [
       cli, "build", "--wasm", "--output", join(output, `tree-sitter-${name}.wasm`), join(staging, subdir),
     ], { stdio: "inherit" });
     if (result.error) throw result.error;
     if (result.status !== 0) throw new Error(`Building the ${name} grammar failed`);
-    cpSync(join(grammar, "queries", query), join(output, query));
+    cpSync(join(grammar, query), join(output, stagedQuery));
   }
   cpSync(resolve("web-tree-sitter/tree-sitter.wasm"), join(dist, "tree-sitter.wasm"));
 } finally {

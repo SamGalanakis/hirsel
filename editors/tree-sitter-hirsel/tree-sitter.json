@@ -18,7 +18,7 @@
       "scope": "source.hirsel.data",
       "path": "data",
       "file-types": ["hcfg"],
-      "highlights": "queries/data-highlights.scm"
+      "highlights": "data/queries/hirsel_data/highlights.scm"
     }
   ],
   "metadata": {

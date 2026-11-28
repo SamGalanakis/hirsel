@@ -187,7 +187,7 @@ def check_data(library):
             raise ValueError(f"unexpected data parse for {source!r}: {root}")
 
 
-    Query(parser.language, (GRAMMAR / "queries/data-highlights.scm").read_text())
+    Query(parser.language, (GRAMMAR / "data/queries/hirsel_data/highlights.scm").read_text())
     paths = subprocess.check_output(["git", "ls-files", "-z", "--", "*.hcfg"], cwd=ROOT)
     documents = [ROOT / os.fsdecode(path) for path in paths.split(b"\0") if path]
     for path in documents:

@@ -866,7 +866,9 @@ Each dormant synchronous Place holds its checkout/identity, selected image slot 
 version, and the references needed to bind its own execution, limits and grants. It
 owns no resident registry copy, worker context, fiber stack or private dispatch maps.
 Binding checks the checkout and selects the slot once for the invocation. Activation
-publishes one coherent installation. In-flight calls, Units and Held owners complete
+publishes one coherent installation. If the binding execution ends before publication,
+the host reports its end reason and preserves the prior checkout. A fresh call on an
+ended Place reports that reason before entering the guest. In-flight calls, Units and Held owners complete
 under their original generation. H1–H4 and L1–L7 qualify the loaded runner, including
 grant disposal, metered bulk operations, stack refusal, capped compilation, lifetime,
 cause stability, stop isolation, accounting and replay. PACK-13's current single-pool

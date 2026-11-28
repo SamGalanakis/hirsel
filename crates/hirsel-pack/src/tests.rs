@@ -898,3 +898,44 @@ fn l2_cause_surviving_reuse_churn_100k() {
         rss_end.saturating_sub(rss_after_warmup)
     );
 }
+
+#[test]
+fn ended_place_refuses_registration_and_fresh_calls() {
+    let _alone = alone();
+    let loader = loader();
+    let bytes = root(61, "place", sound());
+    loader.admit_module(&bytes).unwrap();
+    let image = loader.image(&bytes, true).unwrap();
+    let code = image.code::<Root>(&IDENTITY).unwrap();
+    let entry = image.resolve::<Root>(&IDENTITY).unwrap();
+    let registered = code.register([entry.candidate()]).unwrap();
+    let slot = PlaceSlot::new(loader).unwrap();
+    let first = slot
+        .activate(0, |_| Ok::<_, ()>((registered.clone(), ())))
+        .unwrap();
+    let attempted = slot.activate(first.version(), |execution| {
+        execution.record_stop_bytes(b"RegistrationStop");
+        Ok::<_, ()>((registered.clone(), ()))
+    });
+    assert!(
+        matches!(attempted, Err(PlaceError::Ended(EndReason::RunStop(stop))) if stop.as_bytes() == b"RegistrationStop")
+    );
+
+    let mut worker = loader.worker();
+    let outcome = first.dispatch(&mut worker, 0, |root: Root, exec, _| run(exec, root.0));
+    assert_eq!(outcome.unwrap(), Some(Ok(0)));
+    first.execution().request_host_stop();
+    let later: Result<Option<()>, _> = first.dispatch(&mut worker, 0, |_: Root, _, _| {
+        panic!("entered a stopped Place")
+    });
+    assert_eq!(later, Err(DispatchError::Ended(EndReason::HostStop)));
+    let second = slot
+        .activate(first.version(), |_| Ok::<_, ()>((registered, ())))
+        .unwrap();
+    assert_eq!(
+        second
+            .dispatch(&mut worker, 0, |root: Root, exec, _| run(exec, root.0))
+            .unwrap(),
+        Some(Ok(0))
+    );
+}

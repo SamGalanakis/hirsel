@@ -16,7 +16,7 @@ use hirsel_core_rt::{
 use hirsel_mod::Mask;
 
 mod place;
-pub use place::{Place, PlaceError, PlaceSlot};
+pub use place::{DispatchError, Place, PlaceError, PlaceSlot};
 pub mod rows;
 pub mod runtime;
 

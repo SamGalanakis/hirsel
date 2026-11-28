@@ -1,6 +1,6 @@
 //! A synchronous Place's activation authority and its generation-bound invocation state.
 use hirsel_code::{Checkout, Loader, Refusal, Registered, Signature, Slot, Stop, Worker};
-use hirsel_core_rt::run_stop::Execution;
+use hirsel_core_rt::run_stop::{EndReason, Execution};
 
 /// The host retains the slot across replacements. Each activation gives its caller
 /// a checkout, an independent execution in this pool and its own launch bindings.
@@ -26,7 +26,11 @@ impl<F: Signature> PlaceSlot<F> {
     ) -> Result<Place<B>, PlaceError<E>> {
         let mut execution =
             Execution::in_pool(self.pool).ok_or(PlaceError::Slot(Stop::WrongPool))?;
-        let (registration, bindings) = bind(&execution).map_err(PlaceError::Binding)?;
+        let bound = bind(&execution);
+        if let Some(reason) = execution.end_reason() {
+            return Err(PlaceError::Ended(reason));
+        }
+        let (registration, bindings) = bound.map_err(PlaceError::Binding)?;
         execution.park();
         let checkout = self
             .slot
@@ -44,14 +48,22 @@ impl<F: Signature> PlaceSlot<F> {
 pub enum PlaceError<E> {
     Binding(E),
     Slot(Stop),
+    Ended(EndReason),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DispatchError {
+    Entry(Refusal),
+    Ended(EndReason),
 }
 
 /// A dormant synchronous instance. Worker storage is borrowed for each invocation.
 /// B contains the launch's typed arguments, limits and grant owners.
 pub struct Place<B> {
-    checkout: Checkout,
-    execution: Execution,
+    // A bound owner may need its execution custody and checkout during destruction.
     bindings: B,
+    execution: Execution,
+    checkout: Checkout,
 }
 
 impl<B> Place<B> {
@@ -68,9 +80,14 @@ impl<B> Place<B> {
         worker: &mut Worker,
         ordinal: usize,
         invoke: impl FnOnce(F, &Execution, &B) -> R,
-    ) -> Result<Option<R>, Refusal> {
-        worker.dispatch_registered(&self.checkout, ordinal, |entry| {
-            invoke(entry, &self.execution, &self.bindings)
-        })
+    ) -> Result<Option<R>, DispatchError> {
+        if let Some(reason) = self.execution.end_reason() {
+            return Err(DispatchError::Ended(reason));
+        }
+        worker
+            .dispatch_registered(&self.checkout, ordinal, |entry| {
+                invoke(entry, &self.execution, &self.bindings)
+            })
+            .map_err(DispatchError::Entry)
     }
 }

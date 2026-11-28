@@ -1,0 +1,116 @@
+type ReviewedEntryBundle {
+    id: String,
+    width: u64,
+    full_key: bool,
+    body: Bytes,
+    expected: Result[List[Bytes], ()],
+}
+
+fn entry_bundle_field(x: std.json.Json, key: String) -> View[std.json.Json] in x {
+    let Obj(members) = x else {
+        fail("C2SP corpus: expected an object")
+    }
+    option.unwrap(std.json.find(members, key))
+}
+
+fn entry_bundle_text(x: std.json.Json) -> View[String] in x {
+    let Str(value) = x else {
+        fail("C2SP corpus: expected a string")
+    }
+    text.as_string(value)
+}
+
+fn entry_bundle_hex(x: std.json.Json) -> Bytes {
+    option.unwrap(std.hex.decode(string.as_bytes(entry_bundle_text(x))))
+}
+
+fn reviewed_entry_bundle_cases(source: String) -> Result[List[ReviewedEntryBundle], String] {
+    region r {
+        let Ok(doc) = std.json.parse(r, source) else {
+            return Error("invalid C2SP corpus JSON")
+        }
+        require(std.json.as_u64(entry_bundle_field(doc, "schema_version")) == Some(1), "unsupported C2SP corpus version")?
+        let objects = entry_bundle_field(doc, "objects")
+        let Arr(cases) = entry_bundle_field(doc, "cases") else {
+            return Error("C2SP corpus has no cases")
+        }
+        require(seq.len(cases) == 5, "C2SP corpus must have five cases")?
+        let mut rows: List[ReviewedEntryBundle] = list.with_capacity(seq.len(cases))
+        for i in 0u64 .. seq.len(cases) {
+            let row = option.unwrap(indexed.get(cases, i))
+            let id = string.from(entry_bundle_text(entry_bundle_field(row, "id")))
+            require(std.json.as_u64(entry_bundle_field(row, "generator_version")) == Some(1), cat2(id, ": unsupported generator version"))?
+            let digest = entry_bundle_text(entry_bundle_field(row, "digest"))
+            let body = entry_bundle_hex(entry_bundle_field(objects, digest))
+            require(pending.sha256_hex(body) == digest, cat2(id, ": SHA-256 mismatch"))?
+            let setup = entry_bundle_field(row, "setup")
+            let width = option.unwrap(std.json.as_u64(entry_bundle_field(setup, "width")))
+            require(width > 0 && width < 256, cat2(id, ": expected partial width"))?
+            let key_source = entry_bundle_text(entry_bundle_field(setup, "registry_source"))
+            require(key_source == "full" || key_source == "partial", cat2(id, ": unknown fixture source"))?
+            let full_key = key_source == "full"
+            let observation = entry_bundle_field(entry_bundle_field(row, "expected"), "registry")
+            let kind = entry_bundle_text(entry_bundle_field(observation, "kind"))
+            let expected: Result[List[Bytes], ()] = if kind == "entries" {
+                let Arr(entries) = entry_bundle_field(observation, "entries_hex") else {
+                    return Error(cat2(id, ": expected entries"))
+                }
+                let mut decoded: List[Bytes] = list.with_capacity(seq.len(entries))
+                for j in 0u64 .. seq.len(entries) {
+                    let Some(entry) = indexed.get(entries, j) else {
+                        return Error(cat2(id, ": missing expected entry"))
+                    }
+                    list.push(mut decoded, entry_bundle_hex(entry))
+                }
+                Ok(take decoded)
+            } else {
+                require(kind == "integrity_failure", cat2(id, ": unknown expected observation"))?
+                Error(())
+            }
+            list.push(mut rows, ReviewedEntryBundle(id: take id, width: width, full_key: full_key, body: take body, expected: take expected))
+        }
+        Ok(take rows)
+    }
+}
+
+fn replay_entry_bundles(tasks: Tasks, source: String) -> Result[(), String] waits {
+    let rows = reviewed_entry_bundle_cases(source)?
+    let bucket = start_bucket(tasks, 901, list.new())
+    let mut client = connect_client(bucket.endpoint, tasks, bucket.clock, 902)
+    let mut expected_gets: List[(String, u16)] = list.new()
+    for i in 0u64 .. list.len(rows) {
+        let row = rows[i]
+        let mut full = string.from("log/tile/entries/00")
+        string.push_u64(mut full, i)
+        let mut partial = cat2(full, ".p/")
+        string.push_u64(mut partial, row.width)
+        let key = if row.full_key {
+            list.push(mut expected_gets, (take partial, 404u16))
+            list.push(mut expected_gets, (clone(full), 200u16))
+            take full
+        } else {
+            list.push(mut expected_gets, (clone(partial), 200u16))
+            take partial
+        }
+        let (stored, _) = std.object.store(mut client, key, clone(row.body), DEADLINE)
+        let Ok(_) = stored else {
+            return Error(cat2(row.id, ": store fixture"))
+        }
+        let start = i * 256
+        let actual = checkpoint.fetch_missing_entries(mut client, Release, start, start + row.width, DEADLINE)
+        match (actual, row.expected) {
+            (Ok(entries), Ok(expected)) => require(entries == expected, cat2(row.id, ": wrong entries"))?,
+            (Error(IntegrityFailure), Error(())) => (),
+            _ => return Error(cat2(row.id, ": wrong registry observation")),
+        }
+    }
+    let _ = take client
+    let report = finish_bucket(take bucket)
+    let mut gets: List[(String, u16)] = list.new()
+    for request in report.requests {
+        if request.method == "GET" {
+            list.push(mut gets, (clone(request.key), request.status))
+        }
+    }
+    require(gets == expected_gets, "C2SP corpus: wrong exact-key and fallback GET trace")
+}

@@ -10,6 +10,7 @@ hirsel.ai/registry@1/commit_laws/library_admission src=397983b93f5953c7 sig=2e45
 hirsel.ai/registry@1/commit_laws/original_release_receipt_after_restart src=c6564af0f8e6664c sig=f90b02844540bce4 run=6779e2cf5a45ab26 bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/publish_lifecycle src=5a13769e318993ee sig=94b9555ad2b8d280 run=0f4870ceb550a467 bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/rejected_proposal_is_atomic src=5a694f7ade810132 sig=81efcad49c35040e run=6779e2cf5a45ab26 bug=- oracle=- rows=pending
+hirsel.ai/registry@1/commit_laws/reviewed_entry_bundles src=36afcc3362c7c049 sig=ef5bbed503a5c58f run=4979b05f25e5f02b bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/stale_rebind_writes_nothing src=24b01d3e72f9402e sig=8a71c26e867e017b run=6779e2cf5a45ab26 bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/status_admission_binds_evidence_and_key src=e49dbd007d5d8c16 sig=2a766ee8f8f51d6a run=6779e2cf5a45ab26 bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/witness_configuration src=bf5bf05bf7f60e14 sig=aff5f0c753bc94d5 run=1ddd99282e86b5b8 bug=- oracle=- rows=pending

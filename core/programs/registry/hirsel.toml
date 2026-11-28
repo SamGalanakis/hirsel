@@ -25,5 +25,7 @@ grants = ["Clock", "Random", "Tasks", "Compiler"]
 
 [tests.sources]
 "commit_laws.hirsel" = "commit_laws"
+"entry_bundle_fixture.hirsel" = "commit_laws"
+"entry_bundle_laws.hirsel" = "commit_laws"
 "sequencer_laws.hirsel" = "commit_laws"
 "publish_laws.hirsel" = "commit_laws"

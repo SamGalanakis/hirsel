@@ -984,3 +984,8 @@ fn g14_fault_matrix(tasks: Tasks, random: Random) -> Result[(), String] waits {
     case_takedown_and_static_plane(tasks, random)?
     Ok(())
 }
+
+@test
+fn reviewed_entry_bundles(tasks: Tasks) -> Result[(), String] waits {
+    replay_entry_bundles(tasks, C2SP_BUNDLE_JSON)
+}

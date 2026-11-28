@@ -3,6 +3,7 @@ use super::status::{Disposition, StatusReplay};
 use super::*;
 use crate::call::base64;
 use hirsel_core_net::key_wrap::{SignAlg, SigningRandom, ed25519_public, sign};
+use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -221,6 +222,122 @@ fn g6_signed_vectors() {
     witness_quorum_freshness_and_heartbeats_are_per_log();
     full_and_incremental_status_replay_refuse_omission();
     status_advisory_is_bound_to_release_and_withdrawal_keeps_other_advisories();
+}
+
+#[derive(Deserialize)]
+struct EntryBundleCorpus {
+    schema_version: u64,
+    objects: BTreeMap<String, String>,
+    cases: Vec<EntryBundleCase>,
+}
+
+#[derive(Deserialize)]
+struct EntryBundleCase {
+    id: String,
+    digest: String,
+    generator_version: u64,
+    setup: EntryBundleSetup,
+    expected: EntryBundleExpected,
+}
+
+#[derive(Deserialize)]
+struct EntryBundleSetup {
+    width: u64,
+    rust_source: BundleSource,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BundleSource {
+    Partial,
+    Full,
+}
+
+#[derive(Deserialize)]
+struct EntryBundleExpected {
+    rust: RustBundleExpected,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RustBundleExpected {
+    Entries { entries_hex: Vec<String> },
+    Bundle,
+    MissingObject,
+}
+
+#[test]
+fn reviewed_entry_bundles() {
+    use hirsel_core_ids::hex::{decode, encode};
+
+    let reviewed = include_str!("../../../../core/tests/decoder-corpus/c2sp-bundle.json");
+    let projection = include_str!("../../../../core/programs/registry/entry_bundle_fixture.hirsel");
+    let literal = projection
+        .lines()
+        .find_map(|line| line.strip_prefix("const C2SP_BUNDLE_JSON: String = "))
+        .expect("C2SP corpus projection contains its JSON literal");
+    let projected: String = serde_json::from_str(literal).unwrap();
+    assert_eq!(
+        projected.as_bytes(),
+        reviewed.as_bytes(),
+        "stale C2SP corpus projection"
+    );
+    let corpus: EntryBundleCorpus = serde_json::from_str(reviewed).unwrap();
+    assert_eq!(corpus.schema_version, 1, "unsupported C2SP corpus version");
+    assert_eq!(corpus.cases.len(), 5);
+    assert!(corpus.cases.windows(2).all(|pair| pair[0].id < pair[1].id));
+    let objects: BTreeMap<_, _> = corpus
+        .objects
+        .into_iter()
+        .map(|(digest, hex)| {
+            let bytes = decode(&hex).unwrap();
+            assert_eq!(
+                encode(&Sha256::digest(&bytes)),
+                digest,
+                "C2SP object digest"
+            );
+            (digest, bytes)
+        })
+        .collect();
+    for case in corpus.cases {
+        let id = &case.id;
+        assert_eq!(
+            case.generator_version, 1,
+            "{id}: unsupported generator version"
+        );
+        let width = case.setup.width;
+        assert!((1..tiles::WIDTH).contains(&width), "{id}: partial width");
+        let partial = format!("tile/entries/000.p/{width}");
+        let stored = match case.setup.rust_source {
+            BundleSource::Partial => &partial,
+            BundleSource::Full => "tile/entries/000",
+        };
+        let bytes = &objects[&case.digest];
+        let expected = match case.expected.rust {
+            RustBundleExpected::Entries { entries_hex } => Ok(entries_hex
+                .iter()
+                .map(|hex| decode(hex).unwrap())
+                .collect::<Vec<_>>()),
+            RustBundleExpected::Bundle => Err(Error::Bundle),
+            RustBundleExpected::MissingObject => Err(Error::MissingObject),
+        };
+        let entries = expected.as_deref().unwrap_or(&[]);
+        let mut requests = Vec::new();
+        let included = tiles::included_bundle(width, reference_root(entries), 0, &mut |path| {
+            requests.push(path.to_owned());
+            if path == stored {
+                Ok(bytes.clone())
+            } else {
+                Err(Error::MissingObject)
+            }
+        });
+        let actual = included.and_then(|body| {
+            tiles::bundle_entries(&body, width, 0)
+                .map(|entries| entries.into_iter().map(<[u8]>::to_vec).collect())
+        });
+        assert_eq!(actual, expected, "{id}");
+        assert_eq!(requests, [partial], "{id}: Rust reads only the exact key");
+    }
 }
 
 fn release_hint_bundle_and_tile_membership() {

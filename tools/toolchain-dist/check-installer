@@ -10,6 +10,7 @@ export HOME="$work/home" PATH="$work/bin:$PATH"
 export HIRSEL_INSTALL_DIR="$work/home/.hirsel" HIRSEL_DOWNLOAD_BASE='' HIRSEL_VERSION=''
 export GH_TOKEN='' GITHUB_TOKEN='' EXPECTED_API_AUTH=''
 export RELEASES="$work/releases" NEXT_RELEASES="$work/next-releases" EXPECTED_TAG=''
+export RELEASE_ASSETS='' FETCH_LOG="$work/requests"
 export HOST_OS=Linux HOST_ARCH=x86_64 HOST_GLIBC=2.28 HOST_MACOS=26.0 TRANSLATED=0
 
 cat > "$work/bin/uname" <<'EOF'
@@ -52,6 +53,7 @@ for arg do
     prev=$arg
     url=$arg
 done
+printf '%s\n' "$url" >> "$FETCH_LOG"
 case "$url" in
     'https://api.github.com/repos/SamGalanakis/hirsel/releases?per_page=100&page=1')
         [ "$auth" = "${EXPECTED_API_AUTH:-}" ] || exit 1
@@ -59,9 +61,16 @@ case "$url" in
     'https://api.github.com/repos/SamGalanakis/hirsel/releases?per_page=100&page=2')
         [ "$auth" = "${EXPECTED_API_AUTH:-}" ] || exit 1
         cat "$NEXT_RELEASES" ;;
-    "https://github.com/SamGalanakis/hirsel/releases/download/$EXPECTED_TAG/SHA256SUMS")
+    "https://github.com/SamGalanakis/hirsel/releases/download/$EXPECTED_TAG/"*)
         [ -z "$auth" ] || exit 1
-        printf '%064d  hirsel-%s-x86_64-unknown-linux-gnu.tar.gz\n' 0 "$EXPECTED_TAG" ;;
+        asset=${url##*/}
+        if [ -n "$RELEASE_ASSETS" ]; then
+            [ -f "$RELEASE_ASSETS/$asset" ] || exit 22
+            cat "$RELEASE_ASSETS/$asset"
+        else
+            [ "$asset" = SHA256SUMS ] || exit 22
+            printf '%064d  hirsel-%s-x86_64-unknown-linux-gnu.tar.gz\n' 0 "$EXPECTED_TAG"
+        fi ;;
     *) exit 1 ;;
 esac
 EOF
@@ -86,7 +95,7 @@ check_error() {
 
 check_tag() {
     EXPECTED_TAG=$1
-    check_error "cannot download hirsel-$EXPECTED_TAG-x86_64-unknown-linux-gnu.tar.gz"
+    check_error "cannot download https://github.com/SamGalanakis/hirsel/releases/download/$EXPECTED_TAG/hirsel-$EXPECTED_TAG-x86_64-unknown-linux-gnu.tar.gz"
 }
 
 # The public releases list on 2026-11-22, reduced to the fields relevant here.
@@ -157,5 +166,56 @@ make_bundle "$darwin_asset" "$darwin_llvm"
 run_installer
 [ "$("$HIRSEL_INSTALL_DIR/bin/hirsel")" = 'bundle v1.2.3' ]
 HOST_ARCH=x86_64 TRANSLATED=1 HOST_MACOS=26.0.1 run_installer
+
+validate_install() {
+    HOME="$work/home/$2"
+    export HOME
+    mkdir "$HOME"
+    sh "$root/tools/toolchain-dist/validate-install" "$1"
+}
+
+# Model a published prerelease alongside an older stable release.
+export HOST_OS=Linux HOST_ARCH=x86_64 RELEASE_ASSETS="$work"
+printf '%s\n' '[{"tag_name":"v0.4.0-pre"}, {"tag_name":"v0.3.0"}]' > "$RELEASES"
+EXPECTED_TAG=v0.4.0-pre
+asset=hirsel-v0.4.0-pre-x86_64-unknown-linux-gnu.tar.gz
+asset_base=https://github.com/SamGalanakis/hirsel/releases/download/v0.4.0-pre
+printf '%s\n' '#!/bin/sh' 'printf "%s\n" "hirsel 0.4.0-pre" "compiler fixture"' > "$work/bundle/hirsel"
+make_bundle "$asset" "$linux_llvm"
+: > "$FETCH_LOG"
+tag=$(validate_install v0.4.0-pre pinned-linux)
+[ "$tag" = v0.4.0-pre ]
+printf '%s\n' "$asset_base/SHA256SUMS" "$asset_base/$asset" | cmp - "$FETCH_LOG"
+
+make_bundle hirsel-v0.4.0-pre-aarch64-apple-darwin.tar.gz "$darwin_llvm"
+tag=$(HOST_OS=Darwin HOST_ARCH=arm64 validate_install v0.4.0-pre pinned-darwin)
+[ "$tag" = v0.4.0-pre ]
+
+# Keep the manifest but remove its archive. Only the exact URL may be tried.
+make_bundle "$asset" "$linux_llvm"
+rm "$work/$asset"
+: > "$FETCH_LOG"
+if (validate_install v0.4.0-pre missing) > "$work/stdout" 2> "$work/stderr"; then
+    printf '%s\n' 'validation accepted a missing prerelease archive' >&2
+    exit 1
+fi
+[ ! -e "$work/home/missing/.hirsel/current" ]
+grep -Fx "hirsel installer: cannot download $asset_base/$asset" "$work/stderr"
+printf '%s\n' "$asset_base/SHA256SUMS" "$asset_base/$asset" "$asset_base/$asset" | cmp - "$FETCH_LOG"
+
+# A valid archive checksum and current link cannot pass with a stale executable.
+printf '%s\n' '#!/bin/sh' 'printf "%s\n" "hirsel 0.3.0" "compiler fixture"' > "$work/bundle/hirsel"
+make_bundle "$asset" "$linux_llvm"
+if (validate_install v0.4.0-pre mismatch) > "$work/stdout" 2> "$work/stderr"; then
+    printf '%s\n' 'validation accepted a mismatched executable version' >&2
+    exit 1
+fi
+grep -Fx 'release validation: expected hirsel 0.4.0-pre, got hirsel 0.3.0' "$work/stderr"
+[ ! -s "$work/stdout" ]
+
+EXPECTED_TAG=v0.3.0
+make_bundle hirsel-v0.3.0-x86_64-unknown-linux-gnu.tar.gz "$linux_llvm"
+tag=$(validate_install '' latest)
+[ "$tag" = v0.3.0 ]
 
 printf '%s\n' 'Installer release resolution and platform checks passed.'

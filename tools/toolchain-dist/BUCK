@@ -15,4 +15,4 @@ export_file(name = "product.toml", mode = "reference", visibility = ["PUBLIC"])
 
 # The distribution gates read these at their repository paths.
 [export_file(name = path, src = path, mode = "reference", visibility = ["PUBLIC"])
- for path in ["build", "check-installer", "darwin_host.py", "install.sh.in", "product.py", "notice-sources.json"] + glob(["licenses/**"])]
+ for path in ["build", "check-installer", "darwin_host.py", "install.sh.in", "product.py", "notice-sources.json", "validate-install"] + glob(["licenses/**"])]

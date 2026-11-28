@@ -1,0 +1,30 @@
+#!/bin/sh
+# Run with a fresh HOME. Write the validated release tag to stdout.
+set -eu
+
+fail() {
+    printf 'release validation: %s\n' "$*" >&2
+    exit 1
+}
+
+requested_tag=$1
+prefix=$HOME/.hirsel
+tools=$(dirname -- "$0")
+installer=$(mktemp "${TMPDIR:-/tmp}/hirsel-validate.XXXXXXXX")
+trap 'rm -f "$installer"' EXIT
+python3 "$tools/product.py" installer > "$installer"
+HIRSEL_VERSION=$requested_tag HIRSEL_INSTALL_DIR=$prefix HIRSEL_DOWNLOAD_BASE='' \
+    sh "$installer" --no-modify-path >&2
+
+current=$(readlink "$prefix/current") || fail 'installation has no current version link'
+case "$current" in
+    versions/*) tag=v${current#versions/} ;;
+    *) fail "unexpected current version link: $current" ;;
+esac
+if [ -n "$requested_tag" ] && [ "$tag" != "v${requested_tag#v}" ]; then
+    fail "requested $requested_tag but installed $tag"
+fi
+reported=$("$prefix/bin/hirsel" --version) || fail "cannot read the installed Hirsel version for $tag"
+version_line=$(printf '%s\n' "$reported" | sed -n '1p')
+[ "$version_line" = "hirsel ${tag#v}" ] || fail "expected hirsel ${tag#v}, got $version_line"
+printf '%s\n' "$tag"

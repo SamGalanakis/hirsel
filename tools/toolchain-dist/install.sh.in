@@ -265,7 +265,7 @@ printf '%s\n' "$version" |
     fail 'expected a release version such as v1.2.3'
 base=${HIRSEL_DOWNLOAD_BASE:-"$release_url/download/v$version"}
 archive=@ARCHIVE@
-fetch "${base%/}/SHA256SUMS" "$download_dir/SHA256SUMS" || fail 'cannot download SHA256SUMS'
+fetch "${base%/}/SHA256SUMS" "$download_dir/SHA256SUMS" || fail "cannot download ${base%/}/SHA256SUMS"
 expected=$(LC_ALL=C awk -v asset="$archive" '
     $2 == asset || $2 == "*" asset {
         if (NF != 2 || $1 !~ /^[0-9a-fA-F]+$/ || length($1) != 64) { invalid = 1; exit }
@@ -292,7 +292,7 @@ elif command -v openssl >/dev/null 2>&1; then
 else
     fail 'install sha256sum, shasum, or openssl to verify the release'
 fi
-fetch "${base%/}/$archive" "$download_dir/$archive" || fail "cannot download $archive"
+fetch "${base%/}/$archive" "$download_dir/$archive" || fail "cannot download ${base%/}/$archive"
 actual=$(hash_command "$download_dir/$archive") || fail 'cannot compute SHA-256'
 [ "${actual%% *}" = "$expected" ] || fail "SHA-256 mismatch for $archive"
 

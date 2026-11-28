@@ -2,38 +2,40 @@ name: Release validation
 on:
   schedule:
     - cron: '17 5 * * *'
-  workflow_run:
-    workflows: [Release]
-    types: [completed]
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact release tag (leave blank to validate latest)
+        type: string
 permissions:
   contents: read
 jobs:
   linux:
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     outputs:
-      version: ${{ steps.latest.outputs.version }}
+      version: ${{ steps.install.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Resolve and install the latest release on Linux
-        id: latest
+      - name: Install and verify the release on Linux
+        id: install
         env:
           GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
         run: |
           export HOME="$RUNNER_TEMP/install-home"
           mkdir "$HOME"
-          python3 tools/toolchain-dist/product.py installer > "$RUNNER_TEMP/install.sh"
-          dash "$RUNNER_TEMP/install.sh" --no-modify-path
-          version=$(readlink "$HOME/.hirsel/current")
-          version=v${version#versions/}
-          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?(\+[A-Za-z0-9.-]+)?$ ]]
+          version=$(dash tools/toolchain-dist/validate-install "$REQUESTED_TAG")
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Run the Linux smoke and cross-build the Mac witness
         env:
-          RELEASE_TAG: ${{ steps.latest.outputs.version }}
+          RELEASE_TAG: ${{ steps.install.outputs.version }}
         run: |
           export HOME="$RUNNER_TEMP/install-home"
           mkdir "$RUNNER_TEMP/smoke" "$RUNNER_TEMP/witness"
@@ -52,7 +54,7 @@ jobs:
     if: ${{ !cancelled() && needs.linux.outputs.version != '' }}
     runs-on: ubuntu-24.04
     steps:
-      - name: Compare the served installer with the released asset
+      - name: Verify the published installer checksum
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.linux.outputs.version }}
@@ -60,9 +62,12 @@ jobs:
           mkdir "$RUNNER_TEMP/witness"
           cd "$RUNNER_TEMP/witness"
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" -p install.sh -p SHA256SUMS
-          curl --proto '=https' --tlsv1.2 -fsSL https://hirsel.ai/install.sh -o "$RUNNER_TEMP/served-installer"
-          cmp install.sh "$RUNNER_TEMP/served-installer"
           awk '$2 == "install.sh" {print}' SHA256SUMS | sha256sum --check --strict -
+      - name: Compare the served installer with the latest release
+        if: inputs.tag == ''
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL https://hirsel.ai/install.sh -o "$RUNNER_TEMP/served-installer"
+          cmp "$RUNNER_TEMP/witness/install.sh" "$RUNNER_TEMP/served-installer"
 
   darwin:
     needs: linux
@@ -72,18 +77,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Install the latest release on macOS
+      - name: Install and verify the release on macOS
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.linux.outputs.version }}
         run: |
           export HOME="$RUNNER_TEMP/install-home"
           mkdir "$HOME"
-          python3 tools/toolchain-dist/product.py installer > "$RUNNER_TEMP/install.sh"
-          sh "$RUNNER_TEMP/install.sh" --no-modify-path
-          test "$(readlink "$HOME/.hirsel/current")" = "versions/${RELEASE_TAG#v}"
-          reported=$("$HOME/.hirsel/bin/hirsel" --version)
-          test "$(printf '%s\n' "$reported" | sed -n '1p')" = "hirsel ${RELEASE_TAG#v}"
+          sh tools/toolchain-dist/validate-install "$RELEASE_TAG"
       - if: needs.linux.result == 'success'
         uses: actions/download-artifact@v4
         with:

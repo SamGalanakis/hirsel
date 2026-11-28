@@ -330,6 +330,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -340,6 +342,7 @@ jobs:
           merge-multiple: true
           path: ${{ runner.temp }}/release
       - name: Publish the tagged release
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -358,3 +361,10 @@ jobs:
           manifest=$("$GITHUB_WORKSPACE/tools/toolchain-dist/release-assets" "$RELEASE_TAG" "$PROFDATA" "$FDATA")
           mapfile -t assets <<< "$manifest"
           gh release create "$RELEASE_TAG" --verify-tag "${release_flags[@]}" -- "${assets[@]}"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+  validate:
+    needs: publish
+    uses: ./.github/workflows/release-validate.yml
+    with:
+      tag: ${{ needs.publish.outputs.tag }}

@@ -22,6 +22,7 @@ class ArchiveServer(ThreadingHTTPServer):
         self.objects = {key: b64decode(value, validate=True)
                         for key, value in json.loads(fixture.read_bytes()).items()}
         self.requests = []
+        self.denied = []
         self.lose_head_reply = None
         self.thread = Thread(target=self.serve_forever, daemon=True)
 
@@ -86,9 +87,11 @@ class ArchiveHandler(BaseHTTPRequestHandler):
         role = self.role = self.principal(body)
         target = urlsplit(self.path)
         key = unquote(target.path.removeprefix("/drill/"))
-        self.server.requests.append((role, self.command, key, self.headers.get("Range")))
+        request = (role, self.command, key, self.headers.get("Range"))
         if not role or (role == "reader" and self.command not in ("HEAD", "GET")):
+            self.server.denied.append(request)
             return self.answer(403)
+        self.server.requests.append(request)
         objects = self.server.objects
         query = dict(parse_qsl(target.query, keep_blank_values=True))
         if self.command == "GET" and "location" in query:

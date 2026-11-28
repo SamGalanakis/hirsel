@@ -1,12 +1,12 @@
 [package]
-name = "drill"
+name = "hirsel.ai/recovery_drill"
 version = "1.0.0"
 charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
-store = { package = "store", major = 1, authority = ["Dir", "Clock", "Random", "Tasks"] }
-runner = { package = "runner", major = 1, authority = ["Dir", "Net", "Clock", "Random", "Stderr", "Process", "Tasks", "Args", "Secret", "Cred"] }
+store = { major = 1 }
+runner = { major = 1 }
 
 [sources]
 "main.hirsel" = "main"

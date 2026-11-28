@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 from store_index_recovery import check_index_repair
+from store_gap_recovery import check_archive_gap
 from store_archive_server import ArchiveServer, KEYS
 
 
@@ -21,9 +22,11 @@ PARENT = "5ecfd92b020e2a1e0a6d81c54c6fdbda"
 
 def drill(hirsel, server, work, release):
     env = dict(os.environ, TMPDIR=str(work), XDG_STATE_HOME=str(work / "state"))
-    for role, user in [("READ", "reader"), ("EXPIRY", "expiry")]:
-        env[f"HIRSEL_ARCHIVE_{role}_ACCESS_KEY_ID"] = user
-        env[f"HIRSEL_ARCHIVE_{role}_SECRET_ACCESS_KEY"] = KEYS[user].decode()
+    for key in list(env):
+        if key.startswith(("HIRSEL_ARCHIVE_", "HIRSEL_RESTORE_BUCKET_")):
+            del env[key]
+    env["HIRSEL_ARCHIVE_READ_ACCESS_KEY_ID"] = "reader"
+    env["HIRSEL_ARCHIVE_READ_SECRET_ACCESS_KEY"] = KEYS["reader"].decode()
     descriptor = {"endpoint": f"http://127.0.0.1:{server.server_port}", "region": "us-east-1",
                   "bucket": "drill", "prefix": "fixture/", "parent": PARENT}
     path = work / "archive.json"
@@ -95,6 +98,9 @@ def drill(hirsel, server, work, release):
     assert server.objects == original
     unexpected = [req for req in server.requests if req[:2] != ("reader", "GET")]
     assert not unexpected, unexpected
+    assert all(req == (None, "GET", "/", None) for req in server.denied), server.denied
+    env["HIRSEL_ARCHIVE_EXPIRY_ACCESS_KEY_ID"] = "expiry"
+    env["HIRSEL_ARCHIVE_EXPIRY_SECRET_ACCESS_KEY"] = KEYS["expiry"].decode()
     answer = decide(advance)
     assert answer["outcome"]["effect"] == "expired" and int(answer["result"]["deleted"]) > 0
     surviving = server.objects.copy()
@@ -163,11 +169,12 @@ if __name__ == "__main__":
             shutil.copytree(FIXTURE.parent / "store-recovery-release", package)
             release, indexed = root / "recovery-release", root / "indexed-release"
             for artifact, entry in [(release, "main"), (indexed, "indexed")]:
-                subprocess.run([compiler, "build", package, "--entry", f"drill@1/main/{entry}",
+                subprocess.run([compiler, "build", package, "--backend", "llvm", "--entry", f"hirsel.ai/recovery_drill@1/main/{entry}",
                                 "--grant", "Net=Listen 127.0.0.1/32 0-65535", "--dir", "/proc/self/cwd",
                                 "--grant", "Clock", "--grant", "Random", "--grant", "Tasks",
                                 "--grant", "Process", "--grant", "Stderr", "--limit", "2147483648",
                                 "-o", artifact], cwd=root, check=True)
         check_index_repair(compiler, indexed, root, FIXTURE.parent / "store-index-damage-format14.json")
+        check_archive_gap(compiler, release, root, FIXTURE.parent / "store-archive-gap-format14.json")
         with ArchiveServer(FIXTURE) as archive:
             drill(compiler, archive, root, release)

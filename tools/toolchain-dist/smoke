@@ -39,10 +39,7 @@ case "$mode" in
         ;;
     *) echo "Unknown smoke mode: $mode" >&2; exit 2 ;;
 esac
-sed '/^\[dependencies\]/a\
-store = { major = 1 }
-' hirsel.hcfg > hirsel.hcfg.tmp
-mv hirsel.hcfg.tmp hirsel.hcfg
+hirsel add store@1
 sed '/^pub fn main/a\
     let _ = result.unwrap(store.sized(Directory, 2147483648u64))
 ' main.hirsel > main.hirsel.tmp

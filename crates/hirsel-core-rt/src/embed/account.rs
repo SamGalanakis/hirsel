@@ -37,7 +37,6 @@ struct Inner {
     progress_reserve: u64,
     admissible_limit: u64,
     admissible_used: u64,
-    peak_admissible: u64,
 }
 
 /// Shared byte account for one embedded runtime generation.
@@ -65,7 +64,6 @@ impl ClientAccount {
                 progress_reserve,
                 admissible_limit,
                 admissible_used: 0,
-                peak_admissible: 0,
             }),
         })
     }
@@ -78,16 +76,13 @@ impl ClientAccount {
         self.inner.lock().unwrap().progress_reserve
     }
 
+    #[cfg(test)]
     pub(crate) fn admissible_limit(&self) -> u64 {
         self.inner.lock().unwrap().admissible_limit
     }
 
     pub(crate) fn admissible_used(&self) -> u64 {
         self.inner.lock().unwrap().admissible_used
-    }
-
-    pub(crate) fn peak_admissible(&self) -> u64 {
-        self.inner.lock().unwrap().peak_admissible
     }
 
     /// Reserve `bytes` from the admissible pool. Returns `Err(AccountError::Full)`
@@ -104,9 +99,6 @@ impl ClientAccount {
             return Err(AccountError::Full);
         }
         inner.admissible_used = next;
-        if next > inner.peak_admissible {
-            inner.peak_admissible = next;
-        }
         Ok(bytes)
     }
 

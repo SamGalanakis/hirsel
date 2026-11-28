@@ -86,7 +86,7 @@ fn with_cohort_packs(d: Dir, tasks: Tasks, counts: Inline[u64, 4], trace: scoped
     }
     let funding = pager.TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 4096, pager_task_bytes: 1048576, cut_pins: true)
     let (take requests, take worker) = failure_result_from_rep(object_writer.start_tiered_pager(tasks, store_key_to_rep(owner), 0, PagerDirectory(fixtures), funding, 4))?
-    let source = pager.TieredPageSource(pager: take requests, packs: take packs, next_stamp: 100, deadline: 0)
+    let source = pager.TieredPageSource(pager: Some(take requests), packs: take packs, next_stamp: 100, deadline: 0)
     let checked = trace(source, mut state)
     let _ = take source
     let _ = result.unwrap(task.join(take worker))

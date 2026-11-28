@@ -7,7 +7,7 @@ pub type FollowCapture: shareable + send {
     watermark: u64
 }
 
-pub type FollowerTransport: send = DirectoryFollow(Dir, Clock) | ObjectFollow(std.object.Requests, u8, Option[String], Option[pager.ObjectsCache])
+pub type FollowerTransport: send = DirectoryFollow(Dir, Clock, u64) | ObjectFollow(std.object.Requests, u8, Option[String], Option[pager.ObjectsCache])
 
 pub type FollowerRequest: send = Bind(FollowerTransport, Option[types.StoreKey], u64) | Apply(Arc[FollowCapture], u64) | Floor(Arc[FollowCapture], u64, u64, u64) | Fresh(Arc[FollowCapture], u64, u64) | Await(Arc[FollowCapture], types.PositionRep, u64, Option[u64])
 

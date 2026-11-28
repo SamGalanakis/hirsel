@@ -485,7 +485,7 @@ fn follower_provision_charge(plan: FollowerPlan) -> u64 {
 fn follower_request_charge(d: Dir, c: Clock) -> u64 {
     let room = follower_law_room()
     let (outlet, inbox): (Sender[Result[FollowerResponse, Error]], Receiver[Result[FollowerResponse, Error]]) = channel.new(1)
-    let command = FollowerCommand(request: box.new(Bind(DirectoryFollow(d, c), None, 0)), reply: take outlet)
+    let command = FollowerCommand(request: box.new(Bind(DirectoryFollow(d, c, 0), None, 0)), reply: take outlet)
     let charge = room - follower_law_room()
     let _ = take command
     let _ = take inbox

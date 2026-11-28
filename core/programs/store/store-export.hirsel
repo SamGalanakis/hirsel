@@ -312,7 +312,7 @@ fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool)
             return Error(Missing("cache_bytes"))
         }
         if tiered {
-            let paging = failure_result_from_rep(manifest.manifest_tiered_inventory(inventory, selected.generation, selected.next_stamp))?
+            let paging = failure_result_from_rep(manifest.manifest_tiered_inventory(None, inventory, selected.generation, selected.next_stamp))?
             for slot in 0u64 .. list.len(holders) {
                 if pages.tiered_collections(holders[slot].collections.root) {
                     holders[slot].collections.paging = Some(arc.share(paging))

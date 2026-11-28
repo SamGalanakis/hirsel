@@ -47,12 +47,23 @@ pub fn read_access(r: ReaderState, store: types.StoreKey, opened: u64) -> Result
 }
 
 pub fn snapshot_pager(r: ReaderState, inventory: pages.TieredReadInventory, opened: u64, branch: u32, root_stamp: u64) -> Result[(pager.TieredPageSource, Arc[pager.TieredReaderGrant], pager.TieredPinRoot), types.Failure] {
-    let Some(pool) = view r.pool else {
-        return Error(Io(Closed))
+    let (take requests, take grant): (Option[Sender[pager.TieredPagerMessage]], Arc[pager.TieredReaderGrant]) = match r.pool {
+        Some(pool) => (Some(channel.sender(pool.requests)), arc.share(pool.grant)),
+        None => {
+            // A follower with an empty Tiered root can read its journal overlay
+            // before it needs a pager. Only a demand requires a request sender.
+            if let None = inventory.directory {
+                return Error(Io(Closed))
+            }
+            let empty = manifest.disk_allocation(scoped fn() -> Result[Arc[pager.TieredReaderGrant], types.Failure] {
+                Ok(arc.new(pager.TieredReaderGrant(store: r.access.store, opened, pin_bytes: 0)))
+            })?
+            (None, take empty)
+        },
     }
-    let source = pager.TieredPageSource(pager: channel.sender(pool.requests), packs: std.omap.snapshot(inventory.packs), next_stamp: inventory.next_stamp, deadline: 0)
+    let source = pager.TieredPageSource(pager: take requests, packs: std.omap.snapshot(inventory.packs), next_stamp: inventory.next_stamp, deadline: 0)
     let root = pager.TieredPinRoot(domain: opened, branch, generation: inventory.generation, root_stamp, tails: list.new())
-    Ok((take source, arc.share(pool.grant), root))
+    Ok((take source, take grant, root))
 }
 
 pub scoped type ByteLimit = NoLimit | IncludeKey(View[Bytes]) | ExcludeKey(View[Bytes])

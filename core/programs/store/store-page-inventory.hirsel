@@ -4,6 +4,7 @@ pub type TieredPagerPack: shareable + send {
 }
 
 pub type TieredReadInventory: shareable + send {
+    directory: Option[(types.StoreKey, Inline[u8, 32])],
     packs: std.omap.OMap[u64, TieredPagerPack],
     generation: u64,
     // The generation's MANIFEST `next_stamp`: every frame its packs hold is

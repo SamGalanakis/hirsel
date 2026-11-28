@@ -29,7 +29,10 @@ pub fn fold_frame_at(source: TieredPageSource, target: format.TieredTarget) -> R
     let (answer, delivered) = manifest.disk_allocation(fn() -> Result[(Sender[Result[Arc[format.TieredFrame], types.Failure]], Receiver[Result[Arc[format.TieredFrame], types.Failure]]), types.Failure] {
         Ok(channel.new(1))
     })?
-    channel.send(source.pager, PagerRead(take request, take answer)) ?=> |_| Io(Closed)
+    let Some(requests) = view source.pager else {
+        return Error(Io(Closed))
+    }
+    channel.send(requests, PagerRead(take request, take answer)) ?=> |_| Io(Closed)
     channel.receive(delivered) ?=> |_| Io(Closed)
 }
 

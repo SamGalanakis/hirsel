@@ -193,7 +193,7 @@ pub fn promotion_resolve_page(cut: TieredPromotion, collection: u32, root: std.p
 }
 
 pub fn share_page_source(source: TieredPageSource) -> TieredPageSource {
-    TieredPageSource(pager: channel.sender(source.pager), packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline)
+    TieredPageSource(pager: share_page_requests(source), packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline)
 }
 
 // Each Tiered collection of a collection map, with its root slot.

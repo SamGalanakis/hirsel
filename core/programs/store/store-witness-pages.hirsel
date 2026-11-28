@@ -143,7 +143,7 @@ fn witness_unpack_tree(wire: WitnessTree, domain: std.page.Domain) -> Result[pag
     let mut tree = pages.new_page_tree(domain, wire.inline)
     tree.root = take root
     if let Some((gen, next_stamp)) = wire.inventory {
-        tree.paging = Some(arc.new(pages.TieredReadInventory(packs: std.omap.new(), generation: gen, next_stamp)))
+        tree.paging = Some(arc.new(pages.TieredReadInventory(directory: None, packs: std.omap.new(), generation: gen, next_stamp)))
     }
     Ok(take tree)
 }

@@ -135,7 +135,7 @@ fn drain_cut(db: Db, pager_link: Option[View[Sender[pager.TieredPagerMessage]]],
     let kept = list.len(queue.added)
     let drained = match failure_result_from_rep(history.recovered_tiered_inventory(manifest.pack_locations(installed), cut_locator(db), db.accounting.checkpointed, next_stamp)) {
         Ok(paging) => {
-            let source = pager.TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
+            let source = pager.TieredPageSource(pager: Some(channel.sender(requests)), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
             failure_result_from_rep(pager.drain_cut_queue(source, manifest.pack_lists(installed).deferred, manifest.pack_lists(installed).deferred_next, mut queue, moving, budget))
         },
         Error(take problem) => Error(take problem),

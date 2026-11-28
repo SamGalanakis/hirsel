@@ -94,7 +94,7 @@ fn test_l88_promotion_converges_tiered_stamps(d: Dir, tasks: Tasks) -> Result[()
     let (take with_probe, _) = std.omap.insert(mut ids, packs, 7u64, pages.TieredPagerPack(inventory: probe_pack, object: None))
     let funding = pager.TieredPagerFunding(cache_bytes: 89, writer_pin_bytes: 89, pager_task_bytes: 1048576, cut_pins: true)
     let (take requests, take worker) = failure_result_from_rep(object_writer.start_tiered_pager(tasks, store_key_to_rep(owner), 0, PagerDirectory(fixtures), funding, 4))?
-    let captured = pager.TieredPageSource(pager: take requests, packs: take with_probe, next_stamp: 43, deadline: 0)
+    let captured = pager.TieredPageSource(pager: Some(take requests), packs: take with_probe, next_stamp: 43, deadline: 0)
     let first_check = l88_converges_locations(captured, parent, old, moved, sibling)
     let checked = match take first_check {
         Ok(()) => l88_probe_keeps_progress(captured, probe_pack, probed_leaf),

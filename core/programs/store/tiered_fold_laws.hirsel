@@ -150,7 +150,7 @@ fn l64_fold_with_writer_pin(source: pager.TieredPageSource, base: std.page.PageP
     // The fixture's leaf frame occupies all writer room:
     // 16 + 24 + 7 + 3 * (2 + 1 + 1 + 2 + 6 + 2) = 89.
     let demand = pager.TieredPointDemand(target: TieredPage(base), key: types.key_word(2), values: ValuesNone, room: 0, direction: TieredPoint, paths: list.new(), siblings: list.new(), ahead: NoAhead, packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: None)
-    let held = failure_result_from_rep(pager.tiered_point_delivery(source.pager, take demand))?
+    let held = failure_result_from_rep(pager.tiered_point_delivery(option.unwrap(pager.share_page_requests(source)), take demand))?
     l79_fold_checks(source, base)?
     let empty = std.page.empty(0, 0, Collection)
     let mut stamp = 43u64
@@ -198,7 +198,7 @@ fn test_l79_fold_checks_cold_evidence(d: Dir, tasks: Tasks) -> Result[(), Error]
     let (take all_packs, _) = std.omap.insert(mut ids, packs, 7u64, pages.TieredPagerPack(inventory: blob_pack, object: None))
     let funding = pager.TieredPagerFunding(cache_bytes: 89, writer_pin_bytes: 89, pager_task_bytes: 1048576, cut_pins: true)
     let (take requests, take worker) = failure_result_from_rep(object_writer.start_tiered_pager(tasks, store_key_to_rep(owner), 0, PagerDirectory(fixtures), funding, 4))?
-    let source = pager.TieredPageSource(pager: take requests, packs: take all_packs, next_stamp: 43, deadline: 0)
+    let source = pager.TieredPageSource(pager: Some(take requests), packs: take all_packs, next_stamp: 43, deadline: 0)
     let checked = l79_fold_and_emit(source, base, parent, right, queued_blob, owner)
     let _ = take source
     let _ = result.unwrap(task.join(take worker))

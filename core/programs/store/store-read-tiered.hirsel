@@ -1,5 +1,5 @@
 pub fn read_tiered_point[R](source: pager.TieredPageSource, root_grant: Arc[pager.TieredReaderGrant], root: pager.TieredPinRoot, tree: pages.PageTree, logical: Bytes, decode_row: scoped[view] fn(Option[View[Bytes]]) -> Result[R, types.Failure]) -> Result[R, types.Failure] waits {
-    read_tiered_point_with(PagerTask(channel.sender(source.pager)), source.packs, source.next_stamp, source.deadline, root_grant, root, tree, logical, decode_row)
+    read_tiered_point_with(pager.page_backend(source), source.packs, source.next_stamp, source.deadline, root_grant, root, tree, logical, decode_row)
 }
 
 pub fn read_tiered_point_with[R](take backend: pager.TieredPageBackend, packs: std.omap.OMap[u64, pages.TieredPagerPack], next_stamp: u64, deadline: u64, root_grant: Arc[pager.TieredReaderGrant], root: pager.TieredPinRoot, tree: pages.PageTree, logical: Bytes, decode_row: scoped[view] fn(Option[View[Bytes]]) -> Result[R, types.Failure]) -> Result[R, types.Failure] waits {
@@ -42,7 +42,7 @@ pub fn read_tiered_point_with[R](take backend: pager.TieredPageBackend, packs: s
 }
 
 pub fn retry_tiered_read[R](source: pager.TieredPageSource, root_grant: Arc[pager.TieredReaderGrant], root: pager.TieredPinRoot, key: Bytes, upper: Option[View[Bytes]], direction: pager.TieredDirection, read: scoped[view] fn(core.Cell[pager.TieredTouchSet], Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[R, types.Failure]) -> Result[R, types.Failure] waits {
-    retry_tiered_read_with(PagerTask(channel.sender(source.pager)), source.packs, source.next_stamp, source.deadline, root_grant, root, key, upper, direction, read)
+    retry_tiered_read_with(pager.page_backend(source), source.packs, source.next_stamp, source.deadline, root_grant, root, key, upper, direction, read)
 }
 
 pub fn retry_tiered_read_with[R](take backend: pager.TieredPageBackend, packs: std.omap.OMap[u64, pages.TieredPagerPack], next_stamp: u64, deadline: u64, root_grant: Arc[pager.TieredReaderGrant], root: pager.TieredPinRoot, key: Bytes, upper: Option[View[Bytes]], direction: pager.TieredDirection, read: scoped[view] fn(core.Cell[pager.TieredTouchSet], Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[R, types.Failure]) -> Result[R, types.Failure] waits {

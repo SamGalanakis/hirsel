@@ -52,7 +52,7 @@ fn compact_cut(db: Db, pager_link: Option[View[Sender[pager.TieredPagerMessage]]
         Error(Full(Allocation(_))) => return Ok(take unchanged),
         Error(take problem) => return Error(take problem),
     }
-    let source = pager.TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
+    let source = pager.TieredPageSource(pager: Some(channel.sender(requests)), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
     // A refusal restores these, so no root keeps a move whose old ancestors
     // were never charged dead.
     let shared = disk_allocation(scoped fn() -> Result[List[pages.Roots], Error] {

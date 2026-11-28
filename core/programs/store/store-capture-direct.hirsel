@@ -107,7 +107,7 @@ pub fn open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Er
             restarted = false
             continue
         }
-        let mut initial = read_only_checkpoint(d, id, take page_record)?
+        let mut initial = read_only_checkpoint(validate_page_manifest(d, id, take page_record)?, None)?
         initial.immutable = true
         let captured = capture_scan(d, id, None, take walk, take initial)
         if failure_result_from_rep(manifest.read_page_manifest_bytes(d))? != raw {
@@ -182,7 +182,7 @@ fn seed_direct_snapshots(disk: manifest.PackDiskState, checkpoint_inventory: Opt
         let (take revised, _) = std.omap.insert_owned(mut ids, take packs, seq, clone(row.pack))
         packs = take revised
     }
-    let lease = arc.new(pages.TieredReadInventory(packs: take packs, generation, next_stamp: failure_result_from_rep(catalog.stamp_after(next_node))?))
+    let lease = arc.new(pages.TieredReadInventory(directory: None, packs: take packs, generation, next_stamp: failure_result_from_rep(catalog.stamp_after(next_node))?))
     failure_result_from_rep(pager.reserve_direct_lease(mut tiered))?
     pager.hold_direct_lease(mut tiered, lease)
     for i in 0u64 .. list.len(state.tips) {

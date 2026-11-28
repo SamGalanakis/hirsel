@@ -9,7 +9,14 @@ pub fn tiered_replayed_row(tree: pages.PageTree, logical: Bytes) -> Option[View[
     replay_overlay_at(overlay, logical)
 }
 
-pub type TieredPageBackend = PagerTask(Sender[TieredPagerMessage]) | PagerDirect(Dir, types.StoreKey)
+pub type TieredPageBackend = PagerTask(Sender[TieredPagerMessage]) | PagerDirect(Dir, types.StoreKey) | NoPager
+
+pub fn page_backend(source: TieredPageSource) -> TieredPageBackend {
+    match source.pager {
+        Some(requests) => PagerTask(channel.sender(requests)),
+        None => NoPager,
+    }
+}
 
 // The demand for a latched miss, or the failure an earlier delivery of the
 // same target recorded.
@@ -87,5 +94,5 @@ pub fn tx_page_source(pager: Option[View[Sender[TieredPagerMessage]]], tree: pag
     let Some(inventory) = view tree.paging else {
         fail("store: a Cold edge has no pack inventory")
     }
-    Ok(TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(inventory.packs), next_stamp: inventory.next_stamp, deadline: 0))
+    Ok(TieredPageSource(pager: Some(channel.sender(requests)), packs: std.omap.snapshot(inventory.packs), next_stamp: inventory.next_stamp, deadline: 0))
 }

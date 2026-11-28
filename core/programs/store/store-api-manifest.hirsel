@@ -1,3 +1,4 @@
+// Standalone read-only opens have no apply worker to fund a pager.
 fn validate_page_manifest(d: Dir, id: StoreId, take page_record: manifest.PageManifest) -> Result[manifest.ValidatedPageManifest, Error] waits {
     if page_record.account_tiered != 0 {
         return Error(Unsupported(0x0031))
@@ -110,7 +111,7 @@ fn walk_directory_preview(d: Dir, id: StoreId, take page_record: manifest.PageMa
     Ok(manifest.ValidatedPageManifest(manifest: take page_record, inventory: take inventory, lineage: take lineage, graph: take resolved, allow_tiered: allow_tiered))
 }
 
-// A store's own open and its cut's check accept Tiered roots: the walk reads
+// A writer or follower accepts Tiered roots. The walk reads
 // the collection map and the pack list, never a Cold page (§13.8). Whether the
 // open can fund them is checked once the holders are attached.
 fn validate_store_manifest(d: Dir, id: StoreId, take page_record: manifest.PageManifest) -> Result[manifest.ValidatedPageManifest, Error] waits {
@@ -165,6 +166,8 @@ fn validate_new_preview_manifest(d: Dir, id: StoreId, raw: Bytes, target: manife
     }
     let requested = page_record.account_memory
     let validated = walk_directory_preview(d, id, take page_record, true, true, settled, preview)?
+    // An install charges the writer's Tiered reserve. Follower admission
+    // charges its actual pager reservation to the worker instead (§12.9).
     let admitted = if validated.manifest.account_tiered != 0 || target.has_tiered {
         int.saturating_add(requested, target.tiered_reserve)
     } else {

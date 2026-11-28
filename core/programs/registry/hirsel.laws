@@ -2,7 +2,7 @@ hirsel.laws 1
 hirsel.ai/registry@1/commit_laws/canonical_entry_bytes src=39c3d9319ef17c75 sig=e135d045a8024d46 run=1ddd99282e86b5b8 bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/checked_signature_wildcard src=b5736ab1041ab814 sig=94b601ed9201c725 run=1ddd99282e86b5b8 bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/cold_version_hints src=6b6ee0e1e6c3b2ff sig=752b78131f2bd981 run=6779e2cf5a45ab26 bug=- oracle=- rows=pending
-hirsel.ai/registry@1/commit_laws/directory_bucket_rebuild src=8a3ddcdd7a3f82c5 sig=6d805c9ac2c49ece run=f18fbf7e7d442a4f bug=- oracle=- rows=pending
+hirsel.ai/registry@1/commit_laws/directory_bucket_rebuild src=8a3ddcdd7a3f82c5 sig=cdde7c77905dc973 run=f18fbf7e7d442a4f bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/directory_search_latency src=2b9ca3d2405ae8da sig=b355b257ebc5ee49 run=fc79b891a384257c bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/discovery_public_preview src=8d5ec225fda7b284 sig=3b11eea205eec54e run=0193af350f8739ca bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/frame_reservation src=cdf238161d859c89 sig=ede09e128951dcaa run=1ddd99282e86b5b8 bug=- oracle=- rows=pending

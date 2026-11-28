@@ -279,7 +279,7 @@ fn l62_read_point_bytes(source: pager.TieredPageSource, grant: Arc[pager.TieredR
 }
 
 fn l62_read_replayed_point(source: pager.TieredPageSource, base: std.page.PagePtr) -> Result[(), Error] waits {
-    let grant = failure_result_from_rep(pager.pager_reader_grant(source.pager, VALUE_LIMIT + 1048576))?
+    let grant = failure_result_from_rep(pager.pager_reader_grant(option.unwrap(pager.share_page_requests(source)), VALUE_LIMIT + 1048576))?
     let mut tree = l62_replay_read_tree(base)?
     let key = failure_result_from_rep(pager.log_key(9, 1))?
     let mut root = pager.TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: pages.tree_stamp(tree), tails: list.new())
@@ -297,7 +297,7 @@ fn l62_read_replayed_point(source: pager.TieredPageSource, base: std.page.PagePt
     let put_op = format.JournalOp(key: clone(key), value: Some(string.into_bytes(string.from("second"))), direct: None, prior: 7, trim: None)
     replay_tiered_op("j-1", mut tree, mut ids, mut account, before, put_op)?
     root.root_stamp = pages.tree_stamp(tree)
-    let overlay_only = pager.TieredPageSource(pager: channel.sender(source.pager), packs: std.omap.new(), next_stamp: source.next_stamp, deadline: source.deadline)
+    let overlay_only = pager.TieredPageSource(pager: pager.share_page_requests(source), packs: std.omap.new(), next_stamp: source.next_stamp, deadline: source.deadline)
     let Some(replayed) = l62_read_point_bytes(overlay_only, grant, root, tree, key)? else {
         fail("L62: a replay put did not answer without the Cold inventory")
     }
@@ -330,7 +330,7 @@ fn test_l62_pager_reads_replayed_points(d: Dir, tasks: Tasks) -> Result[(), Erro
     let empty: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
     let (take packs, _) = std.omap.insert(mut ids, empty, 8u64, pages.TieredPagerPack(inventory: inventory, object: None))
     let (take pager_link, take worker) = failure_result_from_rep(object_writer.start_tiered_pager(tasks, store_key_to_rep(owner), 0, PagerDirectory(fixtures), pager.TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4))?
-    let source = pager.TieredPageSource(pager: take pager_link, packs: take packs, next_stamp: 41, deadline: 0)
+    let source = pager.TieredPageSource(pager: Some(take pager_link), packs: take packs, next_stamp: 41, deadline: 0)
     let checked = l62_read_replayed_point(source, base)
     let _ = take source
     let _ = result.unwrap(task.join(take worker))
@@ -373,7 +373,7 @@ fn test_l62_batch_error_follows_touch(d: Dir, tasks: Tasks) -> Result[(), Error]
     let empty: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
     let (take packs, _) = std.omap.insert(mut ids, empty, 9u64, pages.TieredPagerPack(inventory: inventory, object: None))
     let (take pager_link, take worker) = failure_result_from_rep(object_writer.start_tiered_pager(tasks, store_key_to_rep(owner), 1, PagerDirectory(fixtures), pager.TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4))?
-    let source = pager.TieredPageSource(pager: take pager_link, packs: take packs, next_stamp: 51, deadline: 0)
+    let source = pager.TieredPageSource(pager: Some(take pager_link), packs: take packs, next_stamp: 51, deadline: 0)
     let checked = l62_check_batch_error_order(source, owner, base)
     let _ = take source
     let _ = result.unwrap(task.join(take worker))
@@ -755,7 +755,7 @@ fn test_l62_replayed_log_masks_cold_rows() -> Result[(), Error] waits {
     // the new descriptor masks it. A retained row still needs the pager.
     let (requests, receiver): (Sender[pager.TieredPagerMessage], Receiver[pager.TieredPagerMessage]) = channel.new(1)
     let _ = take receiver
-    let source = pager.TieredPageSource(pager: take requests, packs: std.omap.new(), next_stamp: ids, deadline: 0)
+    let source = pager.TieredPageSource(pager: Some(take requests), packs: std.omap.new(), next_stamp: ids, deadline: 0)
     let grant = arc.new(pager.TieredReaderGrant(store: store_key_to_rep(owner), opened: 1, pin_bytes: VALUE_LIMIT + 1048576))
     let root = pager.TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: pages.tree_stamp(tree), tails: list.new())
     let Ok(None) = l62_read_point_bytes(source, grant, root, tree, failure_result_from_rep(pager.log_key(9, 1))?) else {

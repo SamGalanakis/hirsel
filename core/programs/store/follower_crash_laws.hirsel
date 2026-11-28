@@ -51,7 +51,7 @@ fn disk_crash_live_read_write(d: Dir, c: Clock, tasks: Tasks, out: Stdout, scena
     let (_, store, take page_record) = failure_result_from_rep(capture.read_only_manifest(d))?
     let id = store_key_from_rep(store)
     let first = page_record.first_live
-    let initial = read_only_checkpoint(d, id, take page_record)?
+    let initial = read_only_checkpoint(validate_page_manifest(d, id, take page_record)?, None)?
     let journal.JournalRecovered(replay: take known, seq: seq, end: end, ..) = journal_recover(d, id, first, c, take initial)?
     let wanted = known.state.tips[0u64].head + 1
     if scenario == "read-only-creation" {

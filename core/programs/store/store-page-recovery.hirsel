@@ -70,7 +70,7 @@ pub fn attach_manifest_holders(manifest: PageManifest, page_nodes: Map[u64, Arc[
     take all
 }
 
-pub fn manifest_tiered_inventory(inventory: Map[u64, pages.PagePack], generation: u64, next_stamp: u64) -> Result[Arc[pages.TieredReadInventory], types.Failure] {
+pub fn manifest_tiered_inventory(directory: Option[(types.StoreKey, Inline[u8, 32])], inventory: Map[u64, pages.PagePack], generation: u64, next_stamp: u64) -> Result[Arc[pages.TieredReadInventory], types.Failure] {
     let mut packs: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
     let mut ids = 0u64
     for (seq, pack) in inventory {
@@ -80,7 +80,7 @@ pub fn manifest_tiered_inventory(inventory: Map[u64, pages.PagePack], generation
         let (take revised, _) = std.omap.insert_owned(mut ids, take packs, seq, pages.TieredPagerPack(inventory: clone(pack), object: None))
         packs = take revised
     }
-    Ok(arc.new(pages.TieredReadInventory(packs: take packs, generation: generation, next_stamp: next_stamp)))
+    Ok(arc.new(pages.TieredReadInventory(directory, packs: take packs, generation: generation, next_stamp: next_stamp)))
 }
 
 pub type PackObjectRef = pages.HistoryRef

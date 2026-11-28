@@ -23,7 +23,10 @@ fn pin_tiered_index(cut: TieredPageSource, pack: u64, offset: u64, listed: pages
     let (answer, delivered) = manifest.disk_allocation(fn() -> Result[(Sender[Result[Arc[Bytes], types.Failure]], Receiver[Result[Arc[Bytes], types.Failure]]), types.Failure] {
         Ok(channel.new(1))
     })?
-    channel.send(cut.pager, PagerIndex(take request, take answer)) ?=> |_| Io(Closed)
+    let Some(requests) = view cut.pager else {
+        return Error(Io(Closed))
+    }
+    channel.send(requests, PagerIndex(take request, take answer)) ?=> |_| Io(Closed)
     channel.receive(delivered) ?=> |_| Io(Closed)
 }
 

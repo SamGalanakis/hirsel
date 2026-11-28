@@ -43,7 +43,7 @@ pub fn child_cut_tiered(mut tree: pages.PageTree, d: Dir, id: types.StoreKey, mu
         Some(inv) => order.max(inv.next_stamp, next_stamp + 1),
         None => next_stamp + 1,
     }
-    sealed.paging = Some(arc.new(pages.TieredReadInventory(packs: take existing, generation: gen, next_stamp: highest)))
+    sealed.paging = Some(arc.new(pages.TieredReadInventory(directory: None, packs: take existing, generation: gen, next_stamp: highest)))
     tree = take sealed
     next_pack = page_run.next_pack
     Ok(())
@@ -199,6 +199,7 @@ pub fn apply_queued_rewrites(take backend: pager.TieredPageBackend, writer_pin_b
 
 pub fn clone_pager_backend(backend: pager.TieredPageBackend) -> pager.TieredPageBackend {
     match backend {
+        NoPager => NoPager,
         PagerTask(sender) => PagerTask(channel.sender(sender)),
         PagerDirect(d, id) => PagerDirect(d, id),
     }

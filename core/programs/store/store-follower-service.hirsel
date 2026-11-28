@@ -28,7 +28,9 @@ type FollowerServiceStart: send {
 type FollowerApplyStart: send {
     commands: Receiver[FollowerCommand],
     service: Sender[FollowerServiceMessage],
-    ceiling: u64
+    ceiling: u64,
+    tasks: Tasks,
+    funding: pager.TieredPagerFunding
 }
 
 fn follower_startup_reply_bytes() -> u64 {
@@ -130,7 +132,8 @@ fn provision_follower(tasks: Tasks, wake: Sender[FollowerServiceMessage], plan: 
     }
     let (take slot, take commands, take reserved) = failure_result_from_rep(types.capacity(take admitted))?
     let mut node = take reserved
-    let job = FollowerApplyStart(commands: take commands, service: channel.sender(wake), ceiling: plan.options.resident_limit)
+    let funding = pager.TieredPagerFunding(cache_bytes: plan.options.cache_bytes, writer_pin_bytes: 0, pager_task_bytes: plan.options.pager_task_bytes, cut_pins: false)
+    let job = FollowerApplyStart(commands: take commands, service: channel.sender(wake), ceiling: plan.options.resident_limit, tasks, funding)
     match task.try_spawn(tasks, bytes plan.root, take job, follower_apply_task) {
         Ok(take running) => {
             node.entry.worker = Some(take running)
@@ -143,6 +146,89 @@ fn provision_follower(tasks: Tasks, wake: Sender[FollowerServiceMessage], plan: 
 }
 
 fn follower_apply_task(take initial: FollowerApplyStart) waits {
-    follower_apply(initial.commands, initial.ceiling)
+    follower_apply(initial.commands, initial.ceiling, initial.tasks, initial.funding)
     let _ = channel.try_send(initial.service, Sweep)
+}
+
+fn follower_pager_store(response: FollowerResponse) -> Option[types.StoreKey] {
+    match response {
+        Captured(Some(held)) => follower_pager_capture(held),
+        Observed(FollowerReached(Some(held), _, _)) => follower_pager_capture(held),
+        Historical(Some(snap)) => {
+            if follower_needs_pager(snap.roots.collections) {
+                return Some(store_key_to_rep(snap.store))
+            }
+            if let Some(bases) = snap.bases {
+                for i in 0u64 .. list.len(bases) {
+                    if follower_needs_pager(bases[i].roots.collections) {
+                        return Some(store_key_to_rep(snap.store))
+                    }
+                }
+            }
+            None
+        },
+        _ => None,
+    }
+}
+
+fn follower_needs_pager(tree: pages.PageTree) -> bool {
+    if let Some(_) = tree.paging {
+        return pages.cold_collection_root(tree.root)
+    }
+    false
+}
+
+fn follower_reply(source: object_writer.FollowerSource, tasks: Tasks, funding: pager.TieredPagerFunding, opened: u64, mut local: Option[(Sender[pager.TieredPagerMessage], Task[()])], outlet: Sender[Result[FollowerResponse, Error]], take candidate: Result[FollowerResponse, Error]) -> bool waits {
+    let response = match take candidate {
+        Ok(take ready) => take ready,
+        Error(take problem) => {
+            let _ = channel.send(outlet, Error(take problem))
+            return false
+        },
+    }
+    if let None = local {
+        if let DirectorySource(d, _) = source {
+            if let Some(id) = follower_pager_store(response) {
+                let started: Result[(Sender[pager.TieredPagerMessage], Task[()]), Error] = if funding.cache_bytes == 0 {
+                    Error(Missing("cache_bytes"))
+                } else {
+                    failure_result_from_rep(object_writer.start_tiered_pager(tasks, id, opened, PagerDirectory(d), funding, pager.TIERED_PAGER_QUEUE))
+                }
+                match take started {
+                    Ok(take link) => {
+                        local = Some(take link)
+                    },
+                    Error(take problem) => {
+                        let _ = channel.send(outlet, Error(take problem))
+                        return false
+                    },
+                }
+            }
+        }
+    }
+    // Both messages use the caller's single reply slot. The sender does not
+    // enlarge the §12.5 request charge, including for a resident follower.
+    if let Some(pair) = local {
+        if let Error(_) = channel.send(outlet, Ok(PagerReady(channel.sender(pair.0)))) {
+            return false
+        }
+    }
+    if let Ok(()) = channel.send(outlet, Ok(take response)) {
+        return true
+    }
+    false
+}
+
+fn follower_pager_capture(held: object_writer.FollowCapture) -> Option[types.StoreKey] {
+    for tip in held.state.tips {
+        if follower_needs_pager(tip.roots.collections) {
+            return Some(held.store)
+        }
+    }
+    for kept in held.state.pins {
+        if follower_needs_pager(kept.roots.collections) {
+            return Some(held.store)
+        }
+    }
+    None
 }

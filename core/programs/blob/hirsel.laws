@@ -1,5 +1,5 @@
 hirsel.laws 1
-hirsel.ai/blob@1/laws/blob_http_aborts_and_checks_authority src=09d3435016527867 sig=fc168c48a25ac985 run=e13a00cc3f8c84c9 bug=- oracle=- rows=pending
-hirsel.ai/blob@1/laws/blob_http_expiry_cuts_off_open_body src=e097ee4c20d2dde8 sig=43156d0e65fef581 run=db4e4334fc7b99e2 bug=- oracle=- rows=pending
-hirsel.ai/blob@1/laws/blob_http_round_trip src=65f0f13710ef5235 sig=20a46c3a00a2e58e run=e13a00cc3f8c84c9 bug=- oracle=- rows=pending
+hirsel.ai/blob@1/laws/blob_http_aborts_and_checks_authority src=09d3435016527867 sig=55faa4e8e0544878 run=e13a00cc3f8c84c9 bug=- oracle=- rows=pending
+hirsel.ai/blob@1/laws/blob_http_expiry_cuts_off_open_body src=e097ee4c20d2dde8 sig=1ccfcc7368156274 run=db4e4334fc7b99e2 bug=- oracle=- rows=pending
+hirsel.ai/blob@1/laws/blob_http_round_trip src=65f0f13710ef5235 sig=8592a7f9171cf95b run=e13a00cc3f8c84c9 bug=- oracle=- rows=pending
 hirsel.ai/blob@1/laws/content_disposition_sanitizes_filename src=e7351ee36fb24828 sig=2df79b3bd856ade4 run=5ffc56bae06a36d7 bug=- oracle=- rows=pending

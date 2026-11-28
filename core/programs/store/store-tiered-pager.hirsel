@@ -20,7 +20,7 @@ pub type TieredPagerTarget: send {
 }
 
 pub type TieredPageSource {
-    pager: Sender[TieredPagerMessage],
+    pager: Option[Sender[TieredPagerMessage]],
     packs: std.omap.OMap[u64, pages.TieredPagerPack],
     next_stamp: u64,
     deadline: u64
@@ -241,4 +241,11 @@ fn tiered_pager_target(packs: std.omap.OMap[u64, pages.TieredPagerPack], next_st
         return Error(format.disk_fault(manifest.paged_pack_path(facts.pack)?, facts.offset, Dangling(facts.stamp)))
     }
     Ok(TieredPagerTarget(edge: clone(edge), direction: direction, inventory: pack.inventory, object: pack.object, next_stamp: next_stamp, deadline: deadline))
+}
+
+pub fn share_page_requests(source: TieredPageSource) -> Option[Sender[TieredPagerMessage]] {
+    match source.pager {
+        Some(requests) => Some(channel.sender(requests)),
+        None => None,
+    }
 }

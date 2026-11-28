@@ -244,3 +244,19 @@ pub fn needs_read_inventory(root: Arc[std.page.Page], listed: scoped fn(u64) -> 
     }
     false
 }
+
+// Recovery attaches a Memory collection (including its direct chunks) Hot.
+// An empty Tiered collection also has a Hot, empty root.
+pub fn cold_collection_root(root: Arc[std.page.Page]) -> bool {
+    let image = std.page.image_of(root)
+    for slot in 0u64 .. std.page.count(image) {
+        if std.page.level(image) == 0 {
+            if let Some(ColdPage(_)) = std.page.child_slot(root, slot) {
+                return true
+            }
+        } else if cold_collection_root(option.unwrap(std.page.child(root, slot))) {
+            return true
+        }
+    }
+    false
+}

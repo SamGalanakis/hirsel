@@ -36,7 +36,7 @@ fn l62_prepare_count_snapshot(mut db: Db, d: Dir, collection: u32) -> Result[(),
     list.push(mut children, ColdPage(ptr))
     let mut roots = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
     roots.root = failure_result_from_rep(pages.page_result(std.page.attach(take map_image, take children, list.new())))?
-    roots.paging = Some(arc.new(pages.TieredReadInventory(packs: take packs, generation: 1, next_stamp: 1u64 << 62)))
+    roots.paging = Some(arc.new(pages.TieredReadInventory(directory: None, packs: take packs, generation: 1, next_stamp: 1u64 << 62)))
     let mut draw = failure_result_from_rep(catalog.stamp_after(map_stamp))?
     let mut account = pager.ReplayTieredAccount(total: 172, exact: true)
     let inserted = format.JournalOp(key: failure_result_from_rep(pager.log_key(collection, 2))?, value: Some(string.into_bytes(string.from("insert"))), direct: None, prior: 0, trim: None)

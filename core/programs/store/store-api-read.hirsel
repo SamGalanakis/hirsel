@@ -8,7 +8,7 @@ fn plain_reader(id: StoreId, opened: u64) -> Result[Reader, Error] {
 }
 
 fn wrap_reader(take inner: read.ReaderState) -> Result[Reader, Error] {
-    match Reader(inner: take inner) {
+    match Reader(inner: take inner, retiring: None) {
         Ok(take opened_reader) => Ok(take opened_reader),
         Error((problem, _)) => Error(Full(Allocation(problem))),
     }
@@ -68,7 +68,8 @@ pub fn table_identity[K, V](t: Table[K, V]) -> (StoreId, u32) {
 }
 
 pub opaque resource type Reader: send {
-    inner: read.ReaderState
+    inner: read.ReaderState,
+    retiring: Option[Sender[()]]
 } drop(owned_reader) {}
 
 pub fn reader(db: Db, pin_bytes: u64) -> Result[Reader, Error] waits {
@@ -76,7 +77,11 @@ pub fn reader(db: Db, pin_bytes: u64) -> Result[Reader, Error] waits {
 }
 
 pub fn follower_reader(f: Follower, pin_bytes: u64) -> Result[Reader, Error] waits {
-    open_reader(store_key_from_rep(f.capture.store), f.open, f.pager, pin_bytes)
+    let mut reading = open_reader(store_key_from_rep(f.capture.store), f.open, f.pager, pin_bytes)?
+    if let Some(_) = f.pager {
+        reading.retiring = Some(channel.sender(f.slot.retiring))
+    }
+    Ok(take reading)
 }
 
 pub fn read_only_reader(source: ReadOnly, pin_bytes: u64) -> Result[Reader, Error] waits {

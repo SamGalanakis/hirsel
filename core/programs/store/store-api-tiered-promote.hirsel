@@ -28,13 +28,13 @@ fn promote_cut_holder(db: Db, pager_link: Option[View[Sender[pager.TieredPagerMe
     }
     let installed = disk_state(db).packs
     let paging = failure_result_from_rep(history.recovered_tiered_inventory(manifest.pack_locations(installed), cut_locator(db), db.accounting.checkpointed, next_stamp))?
-    let source = pager.TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
+    let source = pager.TieredPageSource(pager: Some(channel.sender(requests)), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
     // A Snapshot whose Tiered roots are all Hot reads nothing it captured.
     let captured_packs = match view roots[at].collections.paging {
         Some(inventory) => std.omap.snapshot(inventory.packs),
         None => std.omap.snapshot(paging.packs),
     }
-    let captured = pager.TieredPageSource(pager: channel.sender(requests), packs: captured_packs, next_stamp: next_stamp, deadline: 0)
+    let captured = pager.TieredPageSource(pager: Some(channel.sender(requests)), packs: captured_packs, next_stamp: next_stamp, deadline: 0)
     let mut probed_through: Map[u64, u64] = map.new()
     for (seq, cursor) in pager.disk_compaction(disk_state(db).tiered).probes {
         failure_result_from_rep(types.capacity(map.try_reserve(mut probed_through, 1)))?

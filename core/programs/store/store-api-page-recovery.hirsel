@@ -4,7 +4,7 @@ pub fn recovered_tiered_inventory(locations: manifest.PageLocations, locator: Op
         None => None,
     }
     let manifest.LoadedPackInventory(packs: take packs, generation: loaded_generation, next_stamp: loaded_next_stamp) = manifest.recovered_pack_inventory(locations, rows, generation, next_stamp)
-    Ok(arc.new(pages.TieredReadInventory(packs: take packs, generation: loaded_generation, next_stamp: loaded_next_stamp)))
+    Ok(arc.new(pages.TieredReadInventory(directory: None, packs: take packs, generation: loaded_generation, next_stamp: loaded_next_stamp)))
 }
 
 pub fn rebuild_page_store(take validated: manifest.ValidatedPageManifest, locator: Option[View[HistoryLocator]]) -> Result[manifest.LoadedPageStore, types.Failure] {

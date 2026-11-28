@@ -20,18 +20,42 @@ fn check_arg[A](ca: std.codec.Codec[A], arg: Bytes, n: u64) -> Option[Refusal] {
     }
 }
 
-// The store's entry bound covers decoding, execution and reply encoding.
-fn adapt_transact[H: shareable + inert + send, A, R, E](f: StaticFn[fn(mut store.Tx, H, Caller, take A) -> Result[R, E]], ca: std.codec.Codec[A], cr: std.codec.Codec[R], ce: std.codec.Codec[E], mut tx: store.Tx, h: H, author: Caller, arg: Bytes) -> Ran {
-    let body = code.callable(f)
-    match std.codec.decode(ca, arg) {
+type TransactAdapters[H: shareable + inert + send]: send {
+    key: Bytes,
+    serve: own[send] fn(mut store.Db, take store.Completion, store.Plan, take Option[store.CallRecord], H, Caller, mut Bytes) -> Result[store.Served, store.ServeError] waits,
+    // A parked served call's next attempt, with the request's bytes decoded afresh (STORE-SPEC §13.3a).
+    resume: own[send] fn(mut store.Db, take store.Parked, H, Caller, Bytes) -> Result[store.Served, store.ServeError] waits,
+    trigger: own[send] fn(mut store.Db, H, Caller, triggers.Tables, triggers.Pending) -> Result[store.Outcome[(), TriggerBodyError], store.Error] waits,
+    attempt: own[send] fn(mut store.Db, H, Caller, triggers.Tables, triggers.Attempt, Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits,
+    replay: own[send] fn(store.Db, store.ReplaySource, take store.Declare, store.Plan, H, Caller, Bytes) -> Result[store.Verdict, store.Error] waits
+}
+
+type TransactEntry[H, Env: inert + send, A, R, E]: send {
+    run: fn(mut store.Tx, H, Caller, take A, Env) -> Result[R, E],
+    env: Env,
+    args: std.codec.Codec[A],
+    reply: std.codec.Codec[R],
+    error: std.codec.Codec[E]
+}
+
+type TransactBody[H, Env: inert + send, A, R, E] {
+    entry: TransactEntry[H, Env, A, R, E],
+    handles: H,
+    caller: Caller,
+    raw: Bytes
+}
+
+// The store entry bound covers decoding, the adapter and reply encoding.
+fn transact_body[H: shareable + inert + send, Env: inert + send, A, R, E](mut tx: store.Tx, env: TransactBody[H, Env, A, R, E]) -> Ran {
+    match std.codec.decode(env.entry.args, env.raw) {
         Ok(take a) => {
-            let res = body(mut tx, h, author, take a)
+            let res = (env.entry.run)(mut tx, env.handles, env.caller, take a, env.entry.env)
             let kept = match res {
                 Ok(_) => true,
                 Error(_) => false
             }
             let mut out: Bytes = list.new()
-            match std.codec.put_result(res, cr, ce, mut out) {
+            match std.codec.put_result(res, env.entry.reply, env.entry.error, mut out) {
                 Ok(()) => {
                     let length = list.len(out)
                     if length > MAX_RETURNED_BYTES {
@@ -49,44 +73,16 @@ fn adapt_transact[H: shareable + inert + send, A, R, E](f: StaticFn[fn(mut store
     }
 }
 
-type TransactAdapters[H: shareable + inert + send]: send {
-    key: Bytes,
-    serve: own[send] fn(mut store.Db, take store.Completion, store.Plan, take Option[store.CallRecord], H, Caller, mut Bytes) -> Result[store.Served, store.ServeError] waits,
-    // A parked served call's next attempt, with the request's bytes decoded afresh (STORE-SPEC §13.3a).
-    resume: own[send] fn(mut store.Db, take store.Parked, H, Caller, Bytes) -> Result[store.Served, store.ServeError] waits,
-    trigger: own[send] fn(mut store.Db, H, Caller, triggers.Tables, triggers.Pending) -> Result[store.Outcome[(), TriggerBodyError], store.Error] waits,
-    attempt: own[send] fn(mut store.Db, H, Caller, triggers.Tables, triggers.Attempt, Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits,
-    replay: own[send] fn(store.Db, store.ReplaySource, take store.Declare, store.Plan, H, Caller, Bytes) -> Result[store.Verdict, store.Error] waits
-}
-
-type TransactEntry[H, A, R, E] {
-    run: StaticFn[fn(mut store.Tx, H, Caller, take A) -> Result[R, E]],
-    args: std.codec.Codec[A],
-    reply: std.codec.Codec[R],
-    error: std.codec.Codec[E]
-}
-
-type TransactBody[H, A, R, E] {
-    entry: TransactEntry[H, A, R, E],
-    handles: H,
-    caller: Caller,
-    raw: Bytes
-}
-
-fn transact_body[H: shareable + inert + send, A, R, E](mut tx: store.Tx, env: TransactBody[H, A, R, E]) -> Ran {
-    adapt_transact(env.entry.run, env.entry.args, env.entry.reply, env.entry.error, mut tx, env.handles, env.caller, env.raw)
-}
-
-fn transact_reply[H: shareable + inert + send, A, R, E](mut tx: store.Tx, env: TransactBody[H, A, R, E]) -> Result[Bytes, Bytes] {
+fn transact_reply[H: shareable + inert + send, Env: inert + send, A, R, E](mut tx: store.Tx, env: TransactBody[H, Env, A, R, E]) -> Result[Bytes, Bytes] {
     let value = transact_body(mut tx, env)
     encode_entry_reply(mut tx, take value)
 }
 
-fn transact_replay[H: shareable + inert + send, A, R, E](record: store.Recorded, mut tx: store.Tx, env: TransactBody[H, A, R, E]) -> Result[Bytes, Bytes] {
+fn transact_replay[H: shareable + inert + send, Env: inert + send, A, R, E](record: store.Recorded, mut tx: store.Tx, env: TransactBody[H, Env, A, R, E]) -> Result[Bytes, Bytes] {
     transact_reply(mut tx, env)
 }
 
-fn run_trigger_body[H: shareable + inert + send, A, R, E](mut tx: store.Tx, env: (TransactBody[H, A, R, E], triggers.Tables, triggers.Pending, u64)) -> Result[(), TriggerBodyError] {
+fn run_trigger_body[H: shareable + inert + send, Env: inert + send, A, R, E](mut tx: store.Tx, env: (TransactBody[H, Env, A, R, E], triggers.Tables, triggers.Pending, u64)) -> Result[(), TriggerBodyError] {
     // The wall can move backwards between the scheduler's sample and this transaction.
     if store.info(mut tx).at < triggers.due_time(env.2) {
         return Error(NotDue)
@@ -114,7 +110,7 @@ fn check_attempt(mut tx: store.Tx, tables: triggers.Tables, attempt: triggers.At
     }
 }
 
-fn run_transact_attempt[H: shareable + inert + send, A, R, E](mut tx: store.Tx, env: (TransactBody[H, A, R, E], triggers.Tables, triggers.Attempt, u64)) -> Result[Outcome, FencedRefusal] {
+fn run_transact_attempt[H: shareable + inert + send, Env: inert + send, A, R, E](mut tx: store.Tx, env: (TransactBody[H, Env, A, R, E], triggers.Tables, triggers.Attempt, u64)) -> Result[Outcome, FencedRefusal] {
     check_attempt(mut tx, env.1, env.2)?
     let ran = bound bytes env.3 {
         transact_body(mut tx, env.0)
@@ -129,15 +125,25 @@ fn run_transact_attempt[H: shareable + inert + send, A, R, E](mut tx: store.Tx, 
 }
 
 pub fn transact[G: send, H: shareable + inert + send, A: codec, R: codec, E: codec](mut r: Registry[G, H], f: StaticFn[fn(mut store.Tx, H, Caller, take A) -> Result[R, E]], n: u64, s: u64) -> Result[(), RegisterError] {
+    transact_via(mut r, f, f, plain_transact, n, s)
+}
+
+fn plain_transact[H, A, R, E](mut tx: store.Tx, handles: H, author: Caller, take arg: A, f: StaticFn[fn(mut store.Tx, H, Caller, take A) -> Result[R, E]]) -> Result[R, E] {
+    (code.callable(f))(mut tx, handles, author, take arg)
+}
+
+/// Registers the described entry under its wire identity. Each execution calls
+/// run inside the writer transaction with the original Caller and environment.
+pub fn transact_via[G: send, H: shareable + inert + send, F, Env: inert + send, A: codec, R: codec, E: codec](mut r: Registry[G, H], definition: StaticFn[F], descriptor: Env, run: fn(mut store.Tx, H, Caller, take A, Env) -> Result[R, E], n: u64, s: u64) -> Result[(), RegisterError] {
     check_call_reserve(n, s)?
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
     let ce: std.codec.Codec[E] = std.codec.of()
     let carried: std.codec.Codec[Result[R, E]] = std.codec.of()
-    let (take key, take d) = entry_described(r, code.identity(f), scoped fn() -> Result[(Bytes, Exported), RegisterError] {
-        Ok(described(code.identity(f), code.revision(f), Transact, ca, carried) ?=> |_| Bounds)
+    let (take key, take d) = entry_described(r, code.identity(definition), scoped fn() -> Result[(Bytes, Exported), RegisterError] {
+        Ok(described(code.identity(definition), code.revision(definition), Transact, ca, carried) ?=> |_| Bounds)
     })?
-    let revision: Option[Bytes] = match code.revision(f) {
+    let revision: Option[Bytes] = match code.revision(definition) {
         Some(digest) => {
             let mut copied: Bytes = list.new()
             list.append(mut copied, digest)
@@ -153,24 +159,28 @@ pub fn transact[G: send, H: shareable + inert + send, A: codec, R: codec, E: cod
     let check = fn(arg: Bytes) -> Option[Refusal] {
         check_arg(ca, arg, n)
     }
-    let entry = TransactEntry(run: f, args: ca, reply: cr, error: ce)
+    let entry = TransactEntry(run: run, env: store.copy_env(descriptor), args: ca, reply: cr, error: ce)
+    let serve_entry_descriptor = store.copy_env(entry)
     let serve_entry = fn(mut db: store.Db, take complete: store.Completion, plan: store.Plan, take rec: Option[store.CallRecord], h: H, author: Caller, mut arg: Bytes) -> Result[store.Served, store.ServeError] waits {
-        let env = TransactBody(entry: store.copy_env(entry), handles: store.copy_env(h), caller: clone(author), raw: replace(mut arg, list.new()))
+        let env = TransactBody(entry: store.copy_env(serve_entry_descriptor), handles: store.copy_env(h), caller: clone(author), raw: replace(mut arg, list.new()))
         let served = store.serve(mut db, take complete, plan, take rec, env, transact_reply)
         let TransactBody(raw: take held, ..) = take env
         arg = take held
         take served
     }
+    let resume_entry_descriptor = store.copy_env(entry)
     let resume_entry = fn(mut db: store.Db, take parked: store.Parked, h: H, author: Caller, arg: Bytes) -> Result[store.Served, store.ServeError] waits {
-        let env = TransactBody(entry: store.copy_env(entry), handles: store.copy_env(h), caller: clone(author), raw: clone(arg))
+        let env = TransactBody(entry: store.copy_env(resume_entry_descriptor), handles: store.copy_env(h), caller: clone(author), raw: clone(arg))
         store.resume_parked(mut db, take parked, env, transact_reply)
     }
+    let trigger_descriptor = store.copy_env(entry)
     let trigger = fn(mut db: store.Db, h: H, author: Caller, tables: triggers.Tables, pending: triggers.Pending) -> Result[store.Outcome[(), TriggerBodyError], store.Error] waits {
-        let body = TransactBody(entry: store.copy_env(entry), handles: store.copy_env(h), caller: clone(author), raw: clone(triggers.argument(pending)))
+        let body = TransactBody(entry: store.copy_env(trigger_descriptor), handles: store.copy_env(h), caller: clone(author), raw: clone(triggers.argument(pending)))
         store.run(mut db, Some(s), (take body, store.copy_env(tables), store.copy_env(pending), n), run_trigger_body)
     }
+    let attempt_descriptor = store.copy_env(entry)
     let attempt = fn(mut db: store.Db, h: H, author: Caller, tables: triggers.Tables, active: triggers.Attempt, arg: Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits {
-        let body = TransactBody(entry: store.copy_env(entry), handles: store.copy_env(h), caller: clone(author), raw: clone(arg))
+        let body = TransactBody(entry: store.copy_env(attempt_descriptor), handles: store.copy_env(h), caller: clone(author), raw: clone(arg))
         store.run(mut db, Some(s), (take body, store.copy_env(tables), store.copy_env(active), n), run_transact_attempt)
     }
     let replay = fn(db: store.Db, source: store.ReplaySource, take declaration: store.Declare, plan: store.Plan, h: H, author: Caller, arg: Bytes) -> Result[store.Verdict, store.Error] waits {
@@ -178,7 +188,7 @@ pub fn transact[G: send, H: shareable + inert + send, A: codec, R: codec, E: cod
         store.reexecute_with(db, source, take declaration, plan, replay_fault, env, transact_replay)
     }
     let adapters = TransactAdapters(key: clone(key), serve: take serve_entry, resume: take resume_entry, trigger: take trigger, attempt: take attempt, replay: take replay)
-    insert_exported(mut r, take key, code.identity(f), take d, Transact(n, s, take revision, check, take adapters))
+    insert_exported(mut r, take key, code.identity(definition), take d, Transact(n, s, take revision, check, take adapters))
 }
 
 pub fn attempt_key[F, A, R](definition: StaticFn[F], arg: std.codec.Codec[A], reply: std.codec.Codec[R]) -> Result[Bytes, std.codec.EncodeError] {

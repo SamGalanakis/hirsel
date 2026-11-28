@@ -1,0 +1,25 @@
+pub opaque scoped type Proof {
+    subject: View[Bytes]
+}
+
+pub fn subject(proof: Proof) -> View[Bytes] in proof {
+    proof.subject
+}
+
+type Rows = store.Table[Bytes, u64]
+
+type Env: send {
+    handler: StaticFn[fn(mut store.Tx, Rows, Proof, take u64) -> Result[u64, u64]]
+}
+
+fn adapt(mut tx: store.Tx, rows: Rows, caller: runner.Caller, take arg: u64, env: Env) -> Result[u64, u64] {
+    if caller.issuer != 7u8 || result.unwrap(store.fetch(tx, rows, caller.subject)) != Some(1u64) {
+        return Error(13u64)
+    }
+    let owner: Bytes = clone(caller.subject)
+    (code.callable(env.handler))(mut tx, rows, Proof(subject: view owner), take arg)
+}
+
+pub fn register(mut r: runner.Registry[(), Rows], f: StaticFn[fn(mut store.Tx, Rows, Proof, take u64) -> Result[u64, u64]], n: u64, s: u64) -> Result[(), runner.RegisterError] {
+    runner.transact_via(mut r, f, Env(handler: f), adapt, n, s)
+}

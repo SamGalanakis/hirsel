@@ -254,7 +254,7 @@ type DateCache {
 }
 
 fn date_cache() -> DateCache {
-    DateCache(second: None, length: 0, data:[0; 48])
+    DateCache(second: None, length: 0, data: [0; 48])
 }
 
 fn append_date(mut out: Bytes, wall_ms: u64, mut cache: DateCache) -> Result[(), ResponseError] {
@@ -1363,17 +1363,17 @@ fn handle[S: send](input: Bytes, h: View[http1.Head], meta: RequestHead, frame: 
             } else {
                 router.select(routes, verb, normalized)
             }
+            let body_max = match selected {
+                Some(router.Entry(route: router.Route(body_max: Some(limit), ..), ..)) => limit,
+                _ => cfg.body_max,
+            }
+            if let ContentLength(n) = frame {
+                if n > body_max {
+                    break 'exchange error_step(mut b.writer, 413, b.clock, clock.deadline_after_ms(host.mono_ns(b.clock), cfg.write_ms), b.stop)
+                }
+            }
+            b.decoder.body_max = body_max
             let result = if let Some(entry) = selected {
-                let body_max = match entry.route.body_max {
-                    Some(n) => order.min(n, cfg.body_max),
-                    None => cfg.body_max,
-                }
-                if let ContentLength(n) = frame {
-                    if n > body_max {
-                        break 'exchange error_step(mut b.writer, 413, b.clock, clock.deadline_after_ms(host.mono_ns(b.clock), cfg.write_ms), b.stop)
-                    }
-                }
-                b.decoder.body_max = body_max
                 let inline = match frame {
                     ContentLength(n) => if n <= cfg.body_inline && n <= list.len(input) - h.end && !meta.expect_continue {
                         Some(list.slice(input, h.end, h.end + n))
@@ -1411,12 +1411,15 @@ fn handle[S: send](input: Bytes, h: View[http1.Head], meta: RequestHead, frame: 
                     b.input_at += remaining
                     advance_body_payload(mut b.decoder, remaining)
                 }
+                if b.output_failed {
+                    break 'exchange CloseConnection
+                }
+                if let Some(BodyError(status: 413u16, ..)) = b.fault {
+                    break 'exchange error_step(mut b.writer, 413, b.clock, clock.deadline_after_ms(host.mono_ns(b.clock), cfg.write_ms), b.stop)
+                }
                 match take handled {
                     Ok(Upgrade(take spec)) => {
                         let returned = host.mono_ns(b.clock)
-                        if b.output_failed {
-                            break 'exchange CloseConnection
-                        }
                         if returned >= clamp_deadline(b.stop, b.handler_deadline) {
                             break 'exchange error_step(mut b.writer, 503, b.clock, clock.deadline_after_ms(returned, cfg.write_ms), b.stop)
                         }
@@ -1428,9 +1431,6 @@ fn handle[S: send](input: Bytes, h: View[http1.Head], meta: RequestHead, frame: 
                     },
                     Ok(Stream(take spec)) => {
                         let returned = host.mono_ns(b.clock)
-                        if b.output_failed {
-                            break 'exchange CloseConnection
-                        }
                         if let Some(e) = b.fault {
                             break 'exchange error_step(mut b.writer, e.status, b.clock, clock.deadline_after_ms(returned, cfg.write_ms), b.stop)
                         }
@@ -1470,9 +1470,6 @@ fn handle[S: send](input: Bytes, h: View[http1.Head], meta: RequestHead, frame: 
 
 fn handle_reply[S: send](mut b: Body, mut out: Bytes, take result: Result[Response, HandlerError], version: u8, suppress: bool, request_close: bool, cfg: Config, mut cache: DateCache, finished: Option[fn(S)], state: S) -> Step waits {
     let returned = host.mono_ns(b.clock)
-    if b.output_failed {
-        return CloseConnection
-    }
     if let Some(e) = b.fault {
         if e.status == 408 || e.status == 503 {
             return error_step(mut b.writer, e.status, b.clock, clock.deadline_after_ms(returned, cfg.write_ms), b.stop)
@@ -1829,7 +1826,9 @@ fn run_connection[S: send](take r: ReadHalf, take w: WriteHalf, c: Clock, cfg: C
                 break
             },
         }
-        let framed = frame_fields(input, parsed, fields, cfg.body_max)
+        // Framing validates the wire length. handle selects the route limit
+        // before exposing inline bytes, reading the body or sending Continue.
+        let framed = frame_fields(input, parsed, fields, 18446744073709551615u64)
         let wire: Result[Framing, BodyError] = if policy.upgrade_requested {
             match framed {
                 Ok(Empty) => Ok(Empty),

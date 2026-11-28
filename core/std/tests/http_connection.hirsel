@@ -253,7 +253,7 @@ fn client_write(take job: ClientJob) waits {
     let _ = client_send(mut output, raw, until)
 }
 
-fn pipelined(n: Net, c: Clock, tasks: Tasks, take requests: Bytes, count: u64, last_body: u64) -> bool waits {
+fn pipelined(n: Net, c: Clock, tasks: Tasks, take requests: Bytes, count: u64, status: u16, last_body: u64) -> bool waits {
     let (server, addr) = listen_for_law(n, c, tasks, test_config())
     let socket = result.unwrap(host.connect(n, addr, Never))
     let (r, w) = net.split(take socket)
@@ -268,7 +268,7 @@ fn pipelined(n: Net, c: Clock, tasks: Tasks, take requests: Bytes, count: u64, l
     let mut offset: u64 = 0
     for _ in 0u64 .. count {
         let mut h = http1.head()
-        if http1.response(list.slice(received, offset, nbytes), mut h) != Complete || h.status != 200 {
+        if http1.response(list.slice(received, offset, nbytes), mut h) != Complete || h.status != status {
             return false
         }
         offset += h.end
@@ -281,7 +281,7 @@ fn pipelined(n: Net, c: Clock, tasks: Tasks, take requests: Bytes, count: u64, l
 // expect: run http_request_scratch(network) = true
 fn http_request_scratch(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let requests = b"GET /scratch HTTP/1.1\r\nHost: a\r\n\r\nGET /scratch HTTP/1.1\r\nHost: a\r\n\r\nGET /scratch HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"
-    pipelined(n, c, tasks, take requests, 3, 0)
+    pipelined(n, c, tasks, take requests, 3, 200, 0)
 }
 
 fn capture_reply(req: http.Request, scratch: Region, mut out: http.Responder, state: EchoState) -> Result[http.Outcome, http.HandlerError] {
@@ -872,10 +872,10 @@ fn http_stop_upgrade(n: Net, c: Clock, tasks: Tasks) -> bool waits {
 
 // L5. When ignoring a one-byte body the next head is preserved. An unread
 // 24-byte body is over the 16-byte drain limit. An invalid chunk caught by the
-// handler also closes, even though the handler returns a 200.
+// handler closes. An over-limit chunk forces a 413 even if the handler returns 200.
 // expect: run http_drain_and_sticky_failure(network) = true
 fn http_drain_and_sticky_failure(n: Net, c: Clock, tasks: Tasks) -> bool waits {
-    pipelined(n, c, tasks, b"POST /skip HTTP/1.1\r\nHost: a\r\nContent-Length: 1\r\n\r\nxGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n", 2, 0) && pipelined(n, c, tasks, b"POST /skip HTTP/1.1\r\nHost: a\r\nContent-Length: 24\r\n\r\nabcdefghijklmnopqrstuvwxGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n", 1, 0) && pipelined(n, c, tasks, b"POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\nQ\r\nGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n", 1, 0) && pipelined(n, c, tasks, b"POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n4001\r\nGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n", 1, 0)
+    pipelined(n, c, tasks, b"POST /skip HTTP/1.1\r\nHost: a\r\nContent-Length: 1\r\n\r\nxGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n", 2, 200, 0) && pipelined(n, c, tasks, b"POST /skip HTTP/1.1\r\nHost: a\r\nContent-Length: 24\r\n\r\nabcdefghijklmnopqrstuvwxGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n", 1, 200, 0) && pipelined(n, c, tasks, b"POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\nQ\r\nGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n", 1, 200, 0) && pipelined(n, c, tasks, b"POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n4001\r\nGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n", 1, 413, 0)
 }
 
 // L5. With an eight-byte model queue, an unread 160-byte response cannot
@@ -905,7 +905,7 @@ fn http_output_deadline(n: Net, c: Clock, tasks: Tasks) -> bool waits {
 // Exactly three responses must arrive in order, with the long body last.
 // expect: run http_pipeline_order(network) = true
 fn http_pipeline_order(n: Net, c: Clock, tasks: Tasks) -> bool waits {
-    pipelined(n, c, tasks, b"GET / HTTP/1.1\r\nHost: a\r\n\r\nGET / HTTP/1.1\r\nHost: a\r\n\r\nGET /large HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n", 3, 160)
+    pipelined(n, c, tasks, b"GET / HTTP/1.1\r\nHost: a\r\n\r\nGET / HTTP/1.1\r\nHost: a\r\n\r\nGET /large HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n", 3, 200, 160)
 }
 
 // L11a. Completing a first response releases its first-phase slot, but

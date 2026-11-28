@@ -29,11 +29,8 @@ fn replay_missing_members(mut _declaration: store.Declare) -> Result[ReplayMembe
     Error(Missing("replay opened handles before checking code"))
 }
 
-fn replay_member(mut tx: store.Tx, h: ReplayMembers, caller: Caller, take arg: u64) -> Result[u64, u64] {
-    if caller.issuer != 7u8 || result.unwrap(store.fetch(tx, h, caller.subject)) != Some(1u64) {
-        return Error(13u64)
-    }
-    result.unwrap(store.put(mut tx, h, caller.subject, arg))
+fn replay_member(mut tx: store.Tx, h: ReplayMembers, proof: proof_entry.Proof, take arg: u64) -> Result[u64, u64] {
+    result.unwrap(store.put(mut tx, h, proof_entry.subject(proof), arg))
     if arg == 4u64 {
         fail("replay member fault")
     }
@@ -41,7 +38,7 @@ fn replay_member(mut tx: store.Tx, h: ReplayMembers, caller: Caller, take arg: u
 }
 
 fn replay_place(mut r: ReplayRegistry) -> Result[(), RegisterError] {
-    transact(mut r, code.describe(replay_member), REPLAY_BYTES, REPLAY_STEPS)
+    proof_entry.register(mut r, code.describe(replay_member), REPLAY_BYTES, REPLAY_STEPS)
 }
 
 fn replay_seed(mut db: store.Db, h: ReplayMembers, value: u64) -> () waits {
@@ -133,7 +130,7 @@ fn test_replay_caller(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -
     let unidentified = replay_record(mut db, registered, h, list.new(), 14u32, "alice", 2u64)
     replay_seed(mut db, h, 1u64)
     let mut shorter: ReplayRegistry = registry()
-    result.unwrap(transact(mut shorter, code.describe(replay_member), REPLAY_BYTES, REPLAY_STEPS - 1u64))
+    result.unwrap(proof_entry.register(mut shorter, code.describe(replay_member), REPLAY_BYTES, REPLAY_STEPS - 1u64))
     let bounds = replay_record(mut db, shorter, h, identity, 15u32, "alice", 2u64)
     replay_seed(mut db, other, 1u64)
     let other_commit = replay_record(mut db, registered, other, other_identity, 16u32, "alice", 2u64)

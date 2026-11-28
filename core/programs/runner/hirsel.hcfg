@@ -54,6 +54,7 @@ pkg_v1.Package(
         ("runner-keyed-recovery.hirsel", "runner"),
         ("runner-http-arguments.hirsel", "runner"),
         ("runner-http-response.hirsel", "runner"),
+        ("runner-http-stream.hirsel", "runner"),
         ("runner-http-router.hirsel", "runner"),
         ("runner-http-openapi.hirsel", "runner"),
         ("runner-http-projection.hirsel", "runner"),
@@ -88,6 +89,8 @@ pkg_v1.Package(
     tests: Some(Tests(
         sources: [
             ("runner-http-trigger-law.hirsel", "runner"),
+            ("runner-stream-route-law.hirsel", "runner"),
+            ("tests/proof-entry.hirsel", "proof_entry"),
             ("runner-restore-trigger-law.hirsel", "runner"),
             ("runner-dev-identity-law.hirsel", "runner"),
             ("runner-backup-law.hirsel", "runner"),

@@ -1,0 +1,99 @@
+const STREAM_LAW_TOTAL: u64 = 32768u64
+
+fn stream_law_next(mut remaining: u64) -> Result[Option[Bytes], ()] {
+    if remaining == 0u64 {
+        return Ok(None)
+    }
+    let count = order.min(remaining, 256u64)
+    let mut block: Bytes = list.with_capacity(count)
+    list.fill(mut block, count, int.narrow((remaining / 256u64) % 251u64))
+    remaining -= count
+    Ok(Some(take block))
+}
+
+fn stream_law_handler(req: std.http.Request, _scratch: Region, mut body: std.http.Responder, _state: HttpConnection[(), SseLawTables]) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+    let mut block: Bytes = list.with_capacity(256u64)
+    let mut length = 0u64
+    loop {
+        let count = match http_fill_chunk(mut body, mut block) {
+            Ok(n) => n,
+            Error(e) => return Ok(Reply(std.http.response(e.status, b"", true)?)),
+        }
+        if count == 0u64 {
+            break
+        }
+        for byte in block {
+            if byte != int.narrow((length / 256u64) % 251u64) {
+                return Ok(Reply(std.http.response(422u16, b"", true)?))
+            }
+            length += 1u64
+        }
+    }
+    let producer = fn(take seed: std.stream.Seed, _clock: Clock) waits {
+        std.stream.produce_owned(take seed, length, stream_law_next)
+    }
+    let bounds = std.stream.Bounds(event_max: 256u64, producer_bytes: 8192u64, producer_steps: 16384u64)
+    let stream = http_stream_response(req, 200u16, bounds, None, take producer)?
+    Ok(Stream(take stream))
+}
+
+@test
+fn http_stream_route_round_trip(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    let (take listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
+    let mut cfg = operate_http_law_http()
+    cfg.body_max = 512u64
+    cfg.handler_bytes = 16384u64
+    let mut place = operate_http_law_config(c, r, tasks, cfg, take listener)
+    result.unwrap(std.router.add(mut place.raw, "POST", "/transfer", http_stream_route(stream_law_handler, Some(STREAM_LAW_TOTAL), 65536u64)))
+    result.unwrap(std.router.add(mut place.raw, "POST", "/small", http_stream_route(stream_law_handler, Some(32u64), 65536u64)))
+    let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let server = task.spawn(tasks, bytes 50331648u64, HttpOperateLaw(config: take place, stop: take stopping), operate_http_law_run)
+    let req = std.http_client.Request(method: "POST", target: "/transfer", headers: list.new(), body: Chunked)
+    let mut client = result.unwrap(std.http_client.dial(n, addr, "a", c, req, std.clock.deadline_after_ms(host.mono_ns(c), 4000u64)))
+    let mut block: Bytes = list.with_capacity(256u64)
+    for i in 0u64 .. STREAM_LAW_TOTAL / 256u64 {
+        list.clear(mut block)
+        list.fill(mut block, 256u64, int.narrow(i % 251u64))
+        result.unwrap(std.http_client.write(mut client, block))
+    }
+    result.unwrap(std.http_client.finish_request(mut client, STREAM_LAW_TOTAL))
+    if std.http_client.status(std.http_client.head(client)) != 200u16 {
+        fail("stream route refused its exact chunked body limit")
+    }
+    let mut received = 0u64
+    loop {
+        list.clear(mut block)
+        if result.unwrap(std.http_client.read(mut client, mut block)) == 0u64 {
+            break
+        }
+        for byte in block {
+            if received >= STREAM_LAW_TOTAL || byte != int.narrow(((STREAM_LAW_TOTAL - received + 255u64) / 256u64) % 251u64) {
+                fail("stream route returned an incorrect byte")
+            }
+            received += 1u64
+        }
+    }
+    if received != STREAM_LAW_TOTAL {
+        fail("stream route truncated the response")
+    }
+    std.http_client.close(take client)
+    let over = http_law_exchange(n, c, addr, b"POST /transfer HTTP/1.1\r\nHost: a\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n8001\r\n")
+    if over.status != 413u16 {
+        fail("stream route read beyond its last permitted chunk")
+    }
+    let sibling = http_law_exchange(n, c, addr, b"GET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\nContent-Length: 513\r\n\r\n")
+    if sibling.status != 413u16 {
+        fail("raw sibling inherited the stream override")
+    }
+    let unmatched = http_law_exchange(n, c, addr, b"POST /absent HTTP/1.1\r\nHost: a\r\nConnection: close\r\nContent-Length: 513\r\n\r\n")
+    if unmatched.status != 413u16 {
+        fail("unmatched path inherited the stream override")
+    }
+    let tight = http_law_exchange(n, c, addr, b"POST /small HTTP/1.1\r\nHost: a\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n21\r\n")
+    if tight.status != 413u16 {
+        fail("tight stream route accepted a 33-byte chunk at its 32-byte limit")
+    }
+    result.unwrap(channel.send(stop, ()))
+    result.unwrap(result.unwrap(task.join(take server)))
+    Ok(())
+}

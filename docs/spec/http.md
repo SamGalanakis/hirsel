@@ -173,7 +173,7 @@ Module `std.http` of package `std`. It replaces every other HTTP/1.1 server path
 | `head_max`, `fields_max` | One head with its trailers, and its fields. `head_max` may only lower `http1.HEAD_MAX`, the shared 32 KiB ceiling for the parser, server, client and WebSocket upgrade. On the server, the chunked decoder uses the configured `head_max` for trailer accounting. `fields_max` may only lower the 64 fields of `http1.Head`'s inline storage. | 32 KiB, 64 |
 | `pipeline_max` | Unread bytes kept after the current request | 8192 B |
 | `body_inline` | Largest body held in the read buffer | 16384 B |
-| `body_max` | Largest body for any route; a route may set less | 1 MiB |
+| `body_max` | Default decoded body limit. A matched route may set a higher or lower limit | 1 MiB |
 | `out_cap` | Writer buffer | 8192 B |
 | `handler_bytes` | Each request's `bound bytes` | 256 KiB |
 | `first_head_ms` | Accept to complete first head (WIRE `upgrade_ms`, unchanged) | 5000 |
@@ -273,7 +273,7 @@ Framing runs once per request over the parsed `Head`. Each failure below closes 
    - Each trailer line ends in CRLF, and the section ends with an empty CRLF line.
    - They are parsed with the head's field syntax and count toward `fields_max` and `head_max` with the head.
    - They are syntax-checked and discarded. They are never merged into the head, so the handler's `Request` is unchanged by them (law L2).
-7. **Sticky failure.** A chunk error or a body-limit hit found during a body read is returned to the handler as `BodyError`. It also latches the connection as not reusable, even if the handler catches it and returns a `Response`.
+7. **Sticky failure.** A chunk error or a body-limit hit found during a body read is returned to the handler as `BodyError`. It also latches the connection as not reusable, even if the handler catches it and returns a `Response`. An observed body-limit failure forces a 413 before the final response or protocol handoff.
 
 **Host, target and Expect**
 8. **Host.**

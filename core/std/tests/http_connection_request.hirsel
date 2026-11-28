@@ -166,3 +166,35 @@ fn peer_and_relay_fields(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let mut head = http1.head()
     http1.response(response, mut head) == Complete && head.status == 204 && head.end == list.len(response)
 }
+
+// expect: run http_route_body_limits(tasks) = true
+fn http_route_body_limits(tasks: Tasks) -> bool waits {
+    coalesced_wire(tasks, route_body_limits)
+}
+
+fn route_body_limits(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let mut cfg = request_config()
+    cfg.body_max = 3
+    let mut routes: router.Builder[()] = router.builder()
+    let mut raised = router.raw(read_buffered_post)
+    raised.body_max = Some(5)
+    result.unwrap(router.add(mut routes, "POST", "/up", take raised))
+    result.unwrap(router.add(mut routes, "POST", "/default", router.raw(skip_body)))
+    let mut tight = router.raw(skip_body)
+    tight.body_max = Some(1)
+    result.unwrap(router.add(mut routes, "POST", "/tight", take tight))
+    let (_server, addr) = listen_requests(n, c, tasks, take cfg, take routes)
+    for (path, length, status) in[("/up", 5u64, 200u16), ("/up", 6u64, 413u16), ("/default", 3u64, 204u16), ("/default", 4u64, 413u16), ("/absent", 4u64, 413u16), ("/tight", 1u64, 204u16), ("/tight", 2u64, 413u16)] {
+        let mut head = string.from("POST ")
+        string.push(mut head, path)
+        string.push(mut head, " HTTP/1.1\r\nHost: a\r\nConnection: close\r\nContent-Length: ")
+        string.push_u64(mut head, length)
+        string.push(mut head, "\r\n\r\n")
+        let reply = exchange(n, c, addr, string.as_bytes(head), list.slice(b"abcdef", 0, length))
+        let mut parsed = http1.head()
+        if http1.response(reply, mut parsed) != Complete || parsed.status != status {
+            return false
+        }
+    }
+    true
+}

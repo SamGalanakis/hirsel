@@ -100,7 +100,7 @@ fn sse_law_bind(_seed: (), credential: Bytes) -> Result[BoundCaller, BindRefusal
     http_op_bind_original((), credential)
 }
 
-fn sse_law_raw_producer(take seed: std.stream.Seed, c: Clock, _directory: Option[Dir]) waits {
+fn sse_law_raw_producer(take seed: std.stream.Seed, c: Clock) waits {
     let next = fn(mut state: (u64, Clock)) -> Result[Option[Bytes], Capacity] waits {
         if state.0 != 0u64 {
             host.sleep_until(state.1, 1000000000u64)
@@ -121,8 +121,7 @@ fn sse_law_raw(req: std.http.Request, _scratch: Region, mut _out: std.http.Respo
         Error(Unavailable) => return Ok(Reply(http_binding_unavailable()?)),
     }
     let bounds = std.stream.Bounds(event_max: 128u64, producer_bytes: 16384u64, producer_steps: 256u64)
-    let mut spec = std.stream.spec_owned(req, 200u16, bounds, None, sse_law_raw_producer)?
-    std.stream.expire_at(mut spec, identity.expires_at_ms)
+    let spec = http_stream_response(req, 200u16, bounds, identity.expires_at_ms, sse_law_raw_producer)?
     Ok(Stream(take spec))
 }
 

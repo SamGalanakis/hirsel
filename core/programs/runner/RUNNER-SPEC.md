@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.92: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.93: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -21,6 +21,12 @@ Evidence marks:
 **v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.93 (transaction adapters and HTTP streams)
+
+A package registers a wrapped transaction with `transact_via(r, definition, descriptor, run, n, s)`. The entry key uses the identity of `definition` and the wire schemas of `A` and `Result[R, E]`. The CALL record carries that definition's revision and the usual bounds and launch identity. Serving, resuming, trigger dispatch and replay all invoke `run(mut tx, handles, caller, take arg, descriptor)`. The registry rebuilds the inert descriptor at placement. A wrapper can carry its handler's `StaticFn` in that descriptor and mint a concrete opaque scoped proof over a local owner after checking the caller in the transaction. OWN-19 excludes the proof from owned fields. Ordinary `transact` uses the same execution path.
+
+A raw route mounted in `HttpPlaceConfig.raw` can use `http_stream_route(handler, body_max, stream_bytes)`. A matched explicit cap applies to both Content-Length and the cumulative decoded chunk sizes. Other requests inherit the listener cap. `http_fill_chunk` fills a reusable nonempty buffer to capacity or EOF and clears it on a body fault. `http_stream_response` returns a stream spec for setting headers before promotion. Its producer retains any captured snapshot while producing chunks and can open a cursor on that snapshot. A producer returns at EOF. Peer disconnect, listener stop, lease end and the optional exclusive wall-clock expiry end the stream and release its producer state. Expiry fences the response head and data writes.
 
 ## CHANGES-v2.92 (adopting a restored child)
 
@@ -1374,6 +1380,7 @@ pub const DEFAULT_STEPS: u64 = 1 << 30
 pub const DONE_MAX: u64 = store.CLAIM_DONE_MAX // v2.11: an encoded `Done` row's bound (§1.3)
 pub fn compute[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(take A) -> Result[R, Capacity]], n: u64, s: u64) -> Result[(), RegisterError]
 pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[G, H], f: StaticFn[fn(mut Tx, H, Caller, take A) -> Result[R, E]], n: u64, s: u64) -> Result[(), RegisterError]
+pub fn transact_via[G: send, H: shareable + inert + send, F, Env: inert + send, A: codec, R: codec, E: codec](mut r: Registry[G, H], definition: StaticFn[F], descriptor: Env, run: fn(mut store.Tx, H, Caller, take A, Env) -> Result[R, E], n: u64, s: u64) -> Result[(), RegisterError]
 pub fn slots[H]() -> Slots[H]
 pub fn slot[H, K: codec, V: codec](mut s: Slots[H], name: String, select: StaticFn[fn(H) -> store.Table[K, V]]) -> Result[(), RegisterError]   // v2.46 (astra 1995 #11): schemas from key_of[K]() and of[V](); the slot id is its registration index; a repeated name is AlreadyRegistered, a 65,537th slot is Bounds
 pub fn slot_cell[H, V: codec](mut s: Slots[H], name: String, select: StaticFn[fn(H) -> store.Cell[V]]) -> Result[(), RegisterError]   // v2.46 (W3B-O1): a Cell slot; its one key is the Cell's id (STORE-SPEC §14.9)

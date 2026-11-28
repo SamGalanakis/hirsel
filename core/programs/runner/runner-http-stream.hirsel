@@ -1,0 +1,36 @@
+/// Builds a route with a stream reservation and an optional decoded body limit.
+/// Mount it in HttpPlaceConfig.raw.
+pub fn http_stream_route[G: send, H: shareable + inert + send](handler: fn(std.http.Request, Region, mut std.http.Responder, HttpConnection[G, H]) -> Result[std.http.Outcome, std.http.HandlerError] waits, body_max: Option[u64], stream_bytes: u64) -> std.router.Route[HttpConnection[G, H]] {
+    std.router.Route(handler: handler, body_max: body_max, upgrade_bytes: None, stream_bytes: Some(stream_bytes), steps: None)
+}
+
+/// Reuses the caller's buffer. A short chunk ends at EOF. A body fault discards
+/// the partial chunk, so callers can publish a chunk only after a successful fill.
+pub fn http_fill_chunk(mut body: std.http.Responder, mut chunk: Bytes) -> Result[u64, std.http.BodyError] waits {
+    list.clear(mut chunk)
+    loop {
+        match std.http.read(mut body, mut chunk) {
+            Ok(0) => return Ok(list.len(chunk)),
+            Ok(_) => {
+                if list.len(chunk) == list.capacity(chunk) {
+                    return Ok(list.len(chunk))
+                }
+            },
+            Error(e) => {
+                list.clear(mut chunk)
+                return Error(e)
+            },
+        }
+    }
+}
+
+/// The admitted producer owns its captured read state through completion or
+/// cancellation. The writer checks expiry before the head and each data unit.
+pub fn http_stream_response(req: std.http.Request, status: u16, bounds: std.stream.Bounds, expires_at_ms: Option[u64], take producer: own[send] fn(take std.stream.Seed, Clock) waits) -> Result[std.stream.Spec, std.http.HandlerError] {
+    let driver = fn(take seed: std.stream.Seed, clock: Clock, _dir: Option[Dir]) waits {
+        producer(take seed, clock)
+    }
+    let mut spec = std.stream.spec_owned(req, status, bounds, None, take driver)?
+    std.stream.expire_at(mut spec, expires_at_ms)
+    Ok(take spec)
+}

@@ -349,6 +349,13 @@ core@1/log/Log
 core@1/log/append
 core@1/log/finish
 core@1/log/new
+# DECISIONS.md 2026-11-28 17:45Z (3500b, Store's witness and re-execution
+# sampling, only under a caller-supplied Some(samples) sink).
+core@1/log/SampleBuffer
+core@1/log/Samples
+core@1/log/append_sampled
+core@1/log/finish_samples
+core@1/log/samples
 core@1/map/$key_equal
 core@1/map/$key_fold
 core@1/map/$key_hash

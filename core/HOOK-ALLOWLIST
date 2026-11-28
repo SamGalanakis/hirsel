@@ -233,6 +233,8 @@ core@1/heap/slots_put
 core@1/heap/slots_shift
 core@1/heap/slots_take
 core@1/heap/slots_view
+# DECISIONS.md 2026-11-28 (3500, Store's buffered scrub fallback).
+core@1/host/DEVICE_READ_UNAVAILABLE
 core@1/host/close
 core@1/host/entries
 core@1/host/mkdir

@@ -566,28 +566,30 @@ pub unsafe fn record(context: &mut Context, mut cause: Cause) {
     } else {
         context.site_owner
     };
-    let (literal_owner, literal_retained) = if cause.kind() == FAIL && cause.message.capacity == 0 {
+    let (literal_owner, literal_retained) = if cause.kind() != FAIL {
+        (ptr::null(), false)
+    } else if let Some(owner) = owner::string_owner(cause.message.capacity) {
+        crate::code::custody::Owner::Literal.transfer(owner);
+        cause.message.capacity = 0;
         if cause.message.len == 0 {
-            if let Some(owner) = CauseData::find_literal_owner(cause.message.data) {
-                // SAFETY: a truncated-to-empty loaded static string transfers its CauseData count.
-                crate::code::custody::Owner::Literal.transfer(owner);
-                unsafe { CauseData::release(owner) };
-            }
+            // SAFETY: even a truncated carrier transfers its retained count.
+            unsafe { CauseData::release(owner) };
             cause.message.data = ptr::null_mut();
             (ptr::null(), false)
-        } else if let Some(hit) =
-            crate::code::locate_literal(cause.message.data.addr(), cause.message.len as usize)
-        {
-            cause.message.data = hit.relocated.cast_mut();
-            (hit.owner, true)
-        } else if let Some(owner) = CauseData::find_literal_owner(cause.message.data) {
-            // Owned loaded static String already holds +1 count on `owner`; move it into the cell.
-            crate::code::custody::Owner::Literal.transfer(owner);
-            (owner, true)
         } else {
-            (ptr::null(), false)
+            (owner, true)
         }
+    } else if cause.message.capacity == 0
+        && cause.message.len != 0
+        && let Some(hit) =
+            crate::code::locate_literal(cause.message.data.addr(), cause.message.len as usize)
+    {
+        cause.message.data = hit.relocated.cast_mut();
+        (hit.owner, true)
     } else {
+        if cause.message.capacity == 0 && cause.message.len == 0 {
+            cause.message.data = ptr::null_mut();
+        }
         (ptr::null(), false)
     };
     let cell = take_cell(context);

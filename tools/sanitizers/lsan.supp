@@ -1,0 +1,3 @@
+# iced-x86 builds its decoder tables once per process and never frees the
+# handlers its deserializer drops along the way (module_link x86_rip_fields).
+leak:iced_x86::decoder::table_de

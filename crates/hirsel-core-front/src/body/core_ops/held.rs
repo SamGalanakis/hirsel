@@ -75,29 +75,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         )
     }
 
-    pub(in crate::body) fn release_static_bytes_if_u8(
-        &mut self,
-        item: TyId,
-        old_data: ValueId,
-        null: ValueId,
-        success: BlockId,
-        n: NodeId,
-    ) -> Option<()> {
-        if item == scalar(Scalar::U8) {
-            let had_static = self.list_compare(CompareOp::Ne, old_data, null, n);
-            let release_static = self.new_block(&[]);
-            self.list_branch(had_static, release_static, success, n);
-            self.start(release_static);
-            self.runtime_row(
-                hirsel_core_ir::RtOp::ReleaseStaticBytes,
-                &[Arg::Value(old_data)],
-                n,
-            )?;
-        }
-        self.jump(success, &[], n);
-        Some(())
-    }
-
     pub(in crate::body) fn static_string(
         &mut self,
         data: &[u8],
@@ -113,23 +90,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let u64t = Ty::Scalar(Scalar::U64);
         let length = self.konst(u64t, data.len() as u64, n)?;
         let zero = self.konst(u64t, 0, n)?;
-        let start = if data.is_empty() {
-            self.konst(Ty::Ptr, 0, n)?
+        let (start, capacity) = if data.is_empty() {
+            (self.konst(Ty::Ptr, 0, n)?, zero)
         } else {
             let d = self.e.static_bytes(data);
             let v = self.value(Ty::Ptr);
             self.inst(Inst::ReadStatic { result: v, data: d }, n);
             if owned {
-                self.runtime_row(
+                let [ptr, capacity, ..] = self.runtime_row(
                     hirsel_core_ir::RtOp::StaticString,
                     &[Arg::Value(v), Arg::Value(length)],
                     n,
-                )?[0]
+                )?;
+                (ptr, capacity)
             } else {
-                v
+                (v, zero)
             }
         };
-        for (k, (value, t)) in [(start, Ty::Ptr), (length, u64t), (zero, u64t)]
+        for (k, (value, t)) in [(start, Ty::Ptr), (length, u64t), (capacity, u64t)]
             .into_iter()
             .enumerate()
         {

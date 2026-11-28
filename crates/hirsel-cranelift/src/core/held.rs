@@ -89,17 +89,16 @@ impl Function<'_, '_, '_> {
                 1
             }
             RtOp::StaticString => {
-                outputs[0] = if self.input.pack_module {
-                    self.c_call(
-                        "hirsel_core_static_string",
-                        &[P, U],
-                        &[P],
-                        &[args[0], args[1]],
-                    )?[0]
+                if self.input.pack_module {
+                    let pair =
+                        self.c_call("hirsel_core_static_string", &[P, U], &[P, U], &args[..2])?;
+                    outputs[0] = pair[0];
+                    outputs[1] = pair[1];
                 } else {
-                    args[0]
-                };
-                1
+                    outputs[0] = args[0];
+                    outputs[1] = self.b.ins().iconst(types::I64, 0);
+                }
+                2
             }
             RtOp::StaticFrozen => {
                 if self.input.pack_module {
@@ -117,8 +116,44 @@ impl Function<'_, '_, '_> {
                 }
                 2
             }
+            RtOp::ByteCapacity { carrier } => {
+                let bytes = self.input.track_pack_owners
+                    && hirsel_core_ir::byte_carrier(&self.input.types, carrier);
+                outputs[0] = if bytes {
+                    let tagged = self.b.ins().icmp_imm_s(
+                        cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+                        args[0],
+                        hirsel_core_layout::STRING_LITERAL_TAG as i64,
+                    );
+                    let zero = self.b.ins().iconst(types::I64, 0);
+                    self.b.ins().select(tagged, zero, args[0])
+                } else {
+                    args[0]
+                };
+                1
+            }
+            RtOp::ShareStaticFrozen => {
+                outputs[0] = if self.input.track_pack_owners {
+                    self.c_call("hirsel_core_share_static_frozen", &[U], &[B], &args[..1])?[0]
+                } else {
+                    self.b.ins().icmp_imm_s(
+                        cranelift_codegen::ir::condcodes::IntCC::Equal,
+                        args[0],
+                        hirsel_core_layout::FROZEN_STATIC_UNCHARGED as i64,
+                    )
+                };
+                1
+            }
             RtOp::ReleaseStaticBytes => {
-                self.c_call("hirsel_core_release_static_bytes", &[P], &[], &[args[0]])?;
+                if self.input.track_pack_owners {
+                    self.c_call("hirsel_core_release_static_bytes", &[U], &[], &args[..1])?;
+                }
+                0
+            }
+            RtOp::DropStaticStrings => {
+                if self.input.pack_module {
+                    self.c_call("hirsel_core_drop_static_strings", &[P, U], &[], &args[..2])?;
+                }
                 0
             }
             _ => return Ok(None),

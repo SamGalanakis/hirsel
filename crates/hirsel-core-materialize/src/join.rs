@@ -122,6 +122,7 @@ impl Remap {
                     }
                     RtOp::Join { r } => *r = self.types[r.index()],
                     RtOp::LaunchTarget { view } => *view = self.types[view.index()],
+                    RtOp::ByteCapacity { carrier } => *carrier = self.types[carrier.index()],
                     RtOp::ChannelNew { item }
                     | RtOp::HeldNew { item }
                     | RtOp::HeldTake { item }

@@ -546,6 +546,9 @@ def run_suite(suite: Suite, target_dir: Path, tmp_dir: Path, seeds: int) -> dict
             f"quarantine_size_mb={suite.quarantine_mb}:"
             "abort_on_error=1:halt_on_error=1:allocator_may_return_null=1"
         )
+        base_env["LSAN_OPTIONS"] = (
+            f"suppressions={ROOT / 'tools/sanitizers/lsan.supp'}:print_suppressions=0"
+        )
     elif suite.tool == "tsan":
         base_env["RUSTFLAGS"] = "-Zsanitizer=thread"
         base_env["TSAN_OPTIONS"] = (

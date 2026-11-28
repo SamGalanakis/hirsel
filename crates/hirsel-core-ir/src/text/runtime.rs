@@ -37,6 +37,11 @@ pub(super) fn parse_pack(
         "resource_origin" => RtOp::ResourceOrigin { item: tys(1)?[0] },
         "static_string" => RtOp::StaticString,
         "static_frozen" => RtOp::StaticFrozen,
+        "byte_capacity" => RtOp::ByteCapacity {
+            carrier: tys(1)?[0],
+        },
+        "share_static_frozen" => RtOp::ShareStaticFrozen,
+        "drop_static_strings" => RtOp::DropStaticStrings,
         "release_static_bytes" => RtOp::ReleaseStaticBytes,
         _ => return Ok(None),
     }))
@@ -68,6 +73,9 @@ pub(super) fn rt(op: RtOp) -> String {
         RtOp::ResourceOrigin { item } => format!("rt.resource_origin[t{}]", item.0),
         RtOp::StaticString => "rt.static_string".into(),
         RtOp::StaticFrozen => "rt.static_frozen".into(),
+        RtOp::ByteCapacity { carrier } => format!("rt.byte_capacity[t{}]", carrier.0),
+        RtOp::ShareStaticFrozen => "rt.share_static_frozen".into(),
+        RtOp::DropStaticStrings => "rt.drop_static_strings".into(),
         RtOp::ReleaseStaticBytes => "rt.release_static_bytes".into(),
         RtOp::ChannelNew { item } => format!("rt.channel_new[t{}]", item.0),
         RtOp::ChannelSender => "rt.channel_sender".into(),

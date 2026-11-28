@@ -259,23 +259,9 @@ impl Glue<'_, '_, '_> {
         let cap = self.load(carrier, 16);
         let allocated = self.b.ins().icmp_imm_s(IntCC::NotEqual, cap, 0);
         let byte_seq = matches!(field, FieldTy::Seq(e) if **e == FieldTy::Scalar(Scalar::U8));
-        if byte_seq {
-            let static_check = self.b.create_block();
-            self.b
-                .ins()
-                .brif(allocated, present, &[], static_check, &[]);
-            self.b.switch_to_block(static_check);
-            let static_release = self.b.create_block();
-            self.b.set_cold_block(static_release);
-            let non_null = self.b.ins().icmp_imm_s(IntCC::NotEqual, node, 0);
-            self.b.ins().brif(non_null, static_release, &[], done, &[]);
-            self.b.switch_to_block(static_release);
-            self.call("hirsel_core_release_static_bytes", &[P], &[], &[node])?;
-            self.b.ins().jump(done, &[]);
-        } else {
-            self.b.ins().brif(allocated, present, &[], done, &[]);
-        }
+        self.b.ins().brif(allocated, present, &[], done, &[]);
         self.b.switch_to_block(present);
+        self.release_literal_or_continue(cap, byte_seq, done)?;
         let bytes = self.b.ins().imul_imm_s(cap, logical as i64);
         let charge = self.round8(bytes);
         if hirsel_core_layout::terminal(&self.tables.input.types, self.tables.layouts, field) {
@@ -689,6 +675,35 @@ impl Glue<'_, '_, '_> {
         Ok(())
     }
 
+    fn release_literal_or_continue(
+        &mut self,
+        cap: Value,
+        byte_seq: bool,
+        done: cranelift_codegen::ir::Block,
+    ) -> Result<()> {
+        if byte_seq && self.tables.input.track_pack_owners {
+            let literal = self.b.create_block();
+            let heap = self.b.create_block();
+            self.b.set_cold_block(literal);
+            let tagged = self.b.ins().icmp_imm_s(
+                IntCC::UnsignedGreaterThanOrEqual,
+                cap,
+                hirsel_core_layout::STRING_LITERAL_TAG as i64,
+            );
+            self.b.ins().brif(tagged, literal, &[], heap, &[]);
+            self.b.switch_to_block(literal);
+            self.call(
+                "hirsel_core_release_static_bytes",
+                &[Ty::Scalar(Scalar::U64)],
+                &[],
+                &[cap],
+            )?;
+            self.b.ins().jump(done, &[]);
+            self.b.switch_to_block(heap);
+        }
+        Ok(())
+    }
+
     pub(super) fn free_buffer(
         &mut self,
         p: Value,
@@ -701,21 +716,9 @@ impl Glue<'_, '_, '_> {
         let done = self.b.create_block();
         let free = self.b.create_block();
         let present = self.b.ins().icmp_imm_s(IntCC::NotEqual, cap, 0);
-        if byte_seq {
-            let static_check = self.b.create_block();
-            self.b.ins().brif(present, free, &[], static_check, &[]);
-            self.b.switch_to_block(static_check);
-            let static_release = self.b.create_block();
-            self.b.set_cold_block(static_release);
-            let non_null = self.b.ins().icmp_imm_s(IntCC::NotEqual, p, 0);
-            self.b.ins().brif(non_null, static_release, &[], done, &[]);
-            self.b.switch_to_block(static_release);
-            self.call("hirsel_core_release_static_bytes", &[P], &[], &[p])?;
-            self.b.ins().jump(done, &[]);
-        } else {
-            self.b.ins().brif(present, free, &[], done, &[]);
-        }
+        self.b.ins().brif(present, free, &[], done, &[]);
         self.b.switch_to_block(free);
+        self.release_literal_or_continue(cap, byte_seq, done)?;
         fast::free(
             &mut self.b,
             &mut self.calls,

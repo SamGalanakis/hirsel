@@ -502,16 +502,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         (result, flag)
     }
 
-    pub(super) fn list_with_capacity(
-        &mut self,
-        item: TyId,
-        count: ValueId,
-        result: TyId,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        self.list_with_capacity_at(item, count, result, AllocPlace::Current, 8, n)
-    }
-
     pub(super) fn list_with_capacity_at(
         &mut self,
         item: TyId,
@@ -1023,9 +1013,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         self.jump(commit, &[], n);
         self.start(commit);
+        if item == scalar(Scalar::U8) || self.e.generic_names.contains_key(&carrier) {
+            let capacity = self.read_sequence_word(header, 16, Ty::Scalar(Scalar::U64), n);
+            self.runtime_row(
+                hirsel_core_ir::RtOp::ReleaseStaticBytes,
+                &[Arg::Value(capacity)],
+                n,
+            )?;
+        }
         self.set_carrier_word(header, carrier, SeqWord::Data, block, n);
         self.set_carrier_word(header, carrier, SeqWord::Cap, new_cap, n);
-        self.release_static_bytes_if_u8(item, old_data, null, success, n)?;
+        self.jump(success, &[], n);
         // Owned storage is replaced by one `grow` (crate docs, "Growth"), which
         // admits like the old block and refunds its charge after the install.
         self.start(like);

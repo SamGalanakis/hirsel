@@ -1207,67 +1207,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         }
     }
-    /// A word of an own `List` or `String` carrier, addressed through the carrier's
-    /// row so its type names the element (FORM #113): the evaluator checks
-    /// `len <= capacity <= charge::seq_len_bound(size(T))` at it, and LLVM ranges it.
-    pub(super) fn carrier_word(
-        &mut self,
-        header: ValueId,
-        carrier: TypeId,
-        word: SeqWord,
-        n: NodeId,
-    ) -> ValueId {
-        let ty = word.ty();
-        if !self.live() {
-            return self.value(ty);
-        }
-        let address = self.carrier_word_at(header, carrier, word, n);
-        let result = self.value(ty);
-        self.inst(
-            Inst::Read {
-                result,
-                address,
-                mode: ReadMode::Bits,
-            },
-            n,
-        );
-        result
-    }
-    pub(super) fn set_carrier_word(
-        &mut self,
-        header: ValueId,
-        carrier: TypeId,
-        word: SeqWord,
-        value: ValueId,
-        n: NodeId,
-    ) {
-        if !self.live() {
-            return;
-        }
-        let address = self.carrier_word_at(header, carrier, word, n);
-        self.inst(Inst::Store { address, value }, n);
-    }
-    fn carrier_word_at(
-        &mut self,
-        header: ValueId,
-        carrier: TypeId,
-        word: SeqWord,
-        n: NodeId,
-    ) -> AddressId {
-        let row = self.address(
-            AddressBase::Value(header),
-            &[],
-            PlaceTy::Declared(carrier),
-            n,
-        );
-        self.address(
-            AddressBase::Address(row),
-            &[Step::Field(0), Step::Seq(word)],
-            PlaceTy::Value(word.ty()),
-            n,
-        )
-    }
-
     /// FORM's Seq carrier is data/length/capacity; a word read does not copy storage.
     pub(super) fn read_sequence_word(
         &mut self,

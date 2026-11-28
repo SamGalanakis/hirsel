@@ -111,6 +111,9 @@ fn runtime_probes() -> Module {
         RtOp::ResourceOrigin { item: TypeId(1) },
         RtOp::StaticString,
         RtOp::StaticFrozen,
+        RtOp::ByteCapacity { carrier: ITEM },
+        RtOp::ShareStaticFrozen,
+        RtOp::DropStaticStrings,
         RtOp::ReleaseStaticBytes,
         RtOp::DataDecode {
             witness: ITEM,

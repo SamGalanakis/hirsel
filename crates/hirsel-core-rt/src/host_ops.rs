@@ -45,7 +45,7 @@ unsafe fn carrier(operand: *mut Buffer) -> Buffer {
         }
     } else {
         // SAFETY: copy the carrier so borrowed bytes remain immutable.
-        unsafe { *operand }
+        unsafe { *operand }.appendable()
     }
 }
 

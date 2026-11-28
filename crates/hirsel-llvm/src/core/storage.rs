@@ -1069,7 +1069,7 @@ impl FunctionEmitter<'_> {
                             ..Memory::aligned(1)
                         };
                         let capacity = self.load_with(&Type::I64, &at, &memory);
-                        let needs_drop = self.carrier_needs_drop(ty, &p, &capacity, &memory);
+                        let needs_drop = self.cmp(Predicate::Ne, &Type::I64, &capacity, &int(0));
                         let drop = Label::new("carrier_drop", n);
                         let done = Label::new("carrier_done", n);
                         self.cond(&needs_drop, drop, done);

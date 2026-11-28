@@ -88,6 +88,24 @@ pub(super) fn collect(field: &FieldTy, collections: &mut Vec<FieldTy>) {
     }
 }
 impl FunctionEmitter<'_> {
+    fn release_literal_or_continue(&mut self, byte_seq: bool, cap: &Value, done: Label, n: usize) {
+        if byte_seq && self.module.track_pack_owners {
+            let literal = Label::new("buffer_literal", n);
+            let heap = Label::new("buffer_heap", n);
+            let is_heap = self.cmp(
+                Predicate::Ult,
+                &Type::I64,
+                cap,
+                &int(hirsel_core_layout::STRING_LITERAL_TAG),
+            );
+            self.likely(&is_heap, heap, literal);
+            self.block(literal);
+            self.runtime_void("hirsel_core_release_static_bytes", &[word(cap.clone())]);
+            self.br(done);
+            self.block(heap);
+        }
+    }
+
     fn carrier_word(&mut self, carrier: &Value, offset: u64) -> Value {
         let at = self.offset(carrier, offset);
         self.load(&Type::I64, &at, 1)
@@ -125,29 +143,9 @@ impl FunctionEmitter<'_> {
             self.store(&Type::I8, &int(0), &status, 0);
             status
         });
-        if byte_seq {
-            let static_check = Label::new("buffer_static_check", n);
-            let static_release = Label::new("buffer_static_release", n);
-            self.cond(&allocated, present, static_check);
-            self.block(static_check);
-            let is_null = self.cmp(Predicate::Eq, &Type::Ptr, &buffer, &Value::Null);
-            self.likely(&is_null, done, static_release);
-            self.block(static_release);
-            self.call_declared(
-                "hirsel_core_release_static_bytes",
-                Type::Void,
-                &[ptr(buffer.clone())],
-                FnAttrs::default(),
-                &CallAttrs {
-                    cold: true,
-                    ..CallAttrs::default()
-                },
-            );
-            self.br(done);
-        } else {
-            self.cond(&allocated, present, done);
-        }
+        self.cond(&allocated, present, done);
         self.block(present);
+        self.release_literal_or_continue(byte_seq, &capacity, done, n);
         let charge = self.collection_charge(&capacity, entries.logical);
         // A List of direct elements: cleaned here from index 0 up (SEM-9), each
         // element as its own ordinary release, then freed as the drain frees it.
@@ -231,6 +229,8 @@ impl FunctionEmitter<'_> {
         let empty = Label::new("empty", n);
         self.cond(&allocated, present, empty);
         self.block(present);
+        let byte_seq = matches!(field, FieldTy::Seq(e) if **e == FieldTy::Scalar(Scalar::U8));
+        self.release_literal_or_continue(byte_seq, &capacity, empty, n);
         let charge = self.collection_charge(&capacity, entries.logical);
         if hirsel_core_layout::terminal(&self.module.types, self.recipes, field) {
             self.free_block(&buffer, &charge);
@@ -254,22 +254,6 @@ impl FunctionEmitter<'_> {
         }
         self.br(Label::plain("resume"));
         self.block(empty);
-        if matches!(field, FieldTy::Seq(e) if **e == FieldTy::Scalar(Scalar::U8)) {
-            let static_release = Label::new("buffer_static_release", n);
-            let is_null = self.cmp(Predicate::Eq, &Type::Ptr, &buffer, &Value::Null);
-            self.likely(&is_null, Label::plain("resume"), static_release);
-            self.block(static_release);
-            self.call_declared(
-                "hirsel_core_release_static_bytes",
-                Type::Void,
-                &[ptr(buffer)],
-                FnAttrs::default(),
-                &CallAttrs {
-                    cold: true,
-                    ..CallAttrs::default()
-                },
-            );
-        }
         self.br(Label::plain("resume"));
     }
 }

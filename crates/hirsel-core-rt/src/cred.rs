@@ -816,7 +816,7 @@ fn expiry(text: &[u8]) -> Result<u64, Outcome> {
 }
 
 fn spare(buffer: &Buffer) -> usize {
-    buffer.capacity.saturating_sub(buffer.len)
+    buffer.appendable().capacity.saturating_sub(buffer.len)
 }
 
 /// # Safety

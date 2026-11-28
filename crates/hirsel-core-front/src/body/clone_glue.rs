@@ -339,8 +339,9 @@ impl Derive<'_> {
                     let meta = c.read(at, u);
                     // A native static carrier is immutable and owns no charge.
                     // The evaluator's charged static carrier takes the copy path.
-                    let uncharged = c.constant(hirsel_core_layout::FROZEN_STATIC_UNCHARGED);
-                    let shareable = c.compare(CompareOp::Eq, meta, uncharged);
+                    let shareable = self
+                        .runtime(c, hirsel_core_ir::RtOp::ShareStaticFrozen, &[meta])
+                        .expect("share returns a bool");
                     let (share, copy) = (c.block(&[]), c.block(&[]));
                     c.branch(shareable, share, copy);
                     c.start(share);

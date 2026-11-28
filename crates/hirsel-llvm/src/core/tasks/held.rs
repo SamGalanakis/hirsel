@@ -1,7 +1,7 @@
 //! PACK-16 `Held`, resource-origin, and loaded static-literal LLVM lowering.
 
 use super::super::*;
-use hirsel_core_layout::{FieldTy, Repr, Scalar};
+use hirsel_core_layout::Scalar;
 
 const P: Ty = Ty::Ptr;
 const U: Ty = Ty::Scalar(Scalar::U64);
@@ -57,11 +57,11 @@ impl FunctionEmitter<'_> {
                 if self.module.pack_module {
                     self.native_call(
                         "hirsel_core_static_string",
-                        &[P],
+                        &[P, U],
                         &[p(&args[0]), u(&args[1])],
                     )
                 } else {
-                    vec![args[0].clone()]
+                    vec![args[0].clone(), int(0)]
                 }
             }
             RtOp::StaticFrozen => {
@@ -75,36 +75,42 @@ impl FunctionEmitter<'_> {
                     vec![args[0].clone(), args[1].clone()]
                 }
             }
-            RtOp::ReleaseStaticBytes => {
-                self.native_call("hirsel_core_release_static_bytes", &[], &[p(&args[0])])
+            RtOp::ByteCapacity { carrier }
+                if !(self.module.track_pack_owners
+                    && hirsel_core_ir::byte_carrier(&self.module.types, carrier)) =>
+            {
+                vec![args[0].clone()]
             }
+            RtOp::ByteCapacity { .. } => {
+                let tagged = self.cmp(
+                    Predicate::Uge,
+                    &Type::I64,
+                    &args[0],
+                    &int(hirsel_core_layout::STRING_LITERAL_TAG),
+                );
+                vec![self.select(&Type::I64, &tagged, &int(0), &args[0])]
+            }
+            RtOp::ShareStaticFrozen if !self.module.track_pack_owners => vec![self.cmp(
+                Predicate::Eq,
+                &Type::I64,
+                &args[0],
+                &int(hirsel_core_layout::FROZEN_STATIC_UNCHARGED),
+            )],
+            RtOp::ShareStaticFrozen => {
+                self.native_call("hirsel_core_share_static_frozen", &[B], &[u(&args[0])])
+            }
+            RtOp::ReleaseStaticBytes if !self.module.track_pack_owners => vec![],
+            RtOp::ReleaseStaticBytes => {
+                self.native_call("hirsel_core_release_static_bytes", &[], &[u(&args[0])])
+            }
+            RtOp::DropStaticStrings if !self.module.pack_module => vec![],
+            RtOp::DropStaticStrings => self.native_call(
+                "hirsel_core_drop_static_strings",
+                &[],
+                &[p(&args[0]), u(&args[1])],
+            ),
             _ => return None,
         };
         Some(out)
-    }
-
-    pub(in crate::core) fn carrier_needs_drop(
-        &mut self,
-        ty: TypeId,
-        p: &Value,
-        capacity: &Value,
-        memory: &Memory,
-    ) -> Value {
-        let owned = self.cmp(Predicate::Ne, &Type::I64, capacity, &int(0));
-        let byte_seq = matches!(
-            self.module.types.get(ty.index()).map(|s| (&s.repr, &s.body)),
-            Some((Repr::Own, hirsel_core_layout::Body::Record(fields)))
-                if matches!(
-                    &fields[..],
-                    [f] if matches!(&f.ty, FieldTy::Seq(e) if **e == FieldTy::Scalar(Scalar::U8))
-                )
-        );
-        if byte_seq {
-            let data = self.load_with(&Type::Ptr, p, memory);
-            let non_null = self.cmp(Predicate::Ne, &Type::Ptr, &data, &Value::Null);
-            self.bin(Binary::Or, &Type::I1, &owned, &non_null)
-        } else {
-            owned
-        }
     }
 }

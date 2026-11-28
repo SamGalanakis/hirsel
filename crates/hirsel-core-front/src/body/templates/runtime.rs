@@ -79,6 +79,9 @@ impl Substitution<'_> {
             RtOp::TryReceive { item } => RtOp::TryReceive {
                 item: self.ty(item),
             },
+            RtOp::ByteCapacity { carrier } => RtOp::ByteCapacity {
+                carrier: self.ty(carrier),
+            },
             op => op,
         }
     }

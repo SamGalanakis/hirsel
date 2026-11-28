@@ -1,4 +1,4 @@
-use super::{PlaceTy, ValueId};
+use super::{PlaceTy, TypeId, ValueId};
 use hirsel_core_layout::{Cleanup, FieldTy, RecipeRow, Row, TypeRef, cleanup_class};
 use std::sync::Arc;
 
@@ -76,6 +76,15 @@ pub fn sequence_edge(shapes: &[Row], place: PlaceTy) -> Option<&FieldTy> {
         },
         hirsel_core_layout::Body::Variant(_) => None,
     }
+}
+
+/// Whether `carrier` is the row of a `String` or `List[u8]`, the only carriers
+/// whose capacity word can hold a loaded literal's owner tag.
+pub fn byte_carrier(shapes: &[Row], carrier: TypeId) -> bool {
+    matches!(
+        sequence_edge(shapes, PlaceTy::Declared(carrier)),
+        Some(FieldTy::Seq(element)) if **element == FieldTy::Scalar(hirsel_core_layout::Scalar::U8)
+    )
 }
 
 /// Which limit an `Alloc` is charged to.

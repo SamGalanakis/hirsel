@@ -1,6 +1,16 @@
 use super::*;
 
 impl Cx<'_, '_, '_> {
+    pub(in crate::body) fn list_with_capacity(
+        &mut self,
+        item: TyId,
+        count: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        self.list_with_capacity_at(item, count, result, AllocPlace::Current, 8, n)
+    }
+
     pub(in crate::body) fn paired_bytes(
         &mut self,
         file: bool,

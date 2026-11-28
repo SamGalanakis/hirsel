@@ -47,6 +47,80 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn pointer_address(&self, value: ValueId) -> Option<AddressId> {
         self.growth.pointers.get(&value).copied()
     }
+    /// A word of an own `List` or `String` carrier, addressed through the carrier's
+    /// row so its type names the element (FORM #113): the evaluator checks
+    /// `len <= capacity <= charge::seq_len_bound(size(T))` at it, and LLVM ranges it.
+    pub(super) fn carrier_word(
+        &mut self,
+        header: ValueId,
+        carrier: TypeId,
+        word: SeqWord,
+        n: NodeId,
+    ) -> ValueId {
+        let ty = word.ty();
+        if !self.live() {
+            return self.value(ty);
+        }
+        let address = self.carrier_word_at(header, carrier, word, n);
+        let result = self.value(ty);
+        self.inst(
+            Inst::Read {
+                result,
+                address,
+                mode: ReadMode::Bits,
+            },
+            n,
+        );
+        // A generic body's carrier is a byte carrier in its `u8` instance.
+        if word == SeqWord::Cap
+            && (self.e.generic_names.contains_key(&carrier)
+                || hirsel_core_ir::byte_carrier(&self.e.module.types, carrier))
+        {
+            return self
+                .runtime_row(
+                    hirsel_core_ir::RtOp::ByteCapacity { carrier },
+                    &[Arg::Value(result)],
+                    n,
+                )
+                .expect("live capacity read")[0];
+        }
+        result
+    }
+    pub(super) fn set_carrier_word(
+        &mut self,
+        header: ValueId,
+        carrier: TypeId,
+        word: SeqWord,
+        value: ValueId,
+        n: NodeId,
+    ) {
+        if !self.live() {
+            return;
+        }
+        let address = self.carrier_word_at(header, carrier, word, n);
+        self.inst(Inst::Store { address, value }, n);
+    }
+    fn carrier_word_at(
+        &mut self,
+        header: ValueId,
+        carrier: TypeId,
+        word: SeqWord,
+        n: NodeId,
+    ) -> AddressId {
+        let row = self.address(
+            AddressBase::Value(header),
+            &[],
+            PlaceTy::Declared(carrier),
+            n,
+        );
+        self.address(
+            AddressBase::Address(row),
+            &[Step::Field(0), Step::Seq(word)],
+            PlaceTy::Value(word.ty()),
+            n,
+        )
+    }
+
     /// Read the used or capacity word of the sequence or map whose header
     /// `header` points at; an own List's (its row `carrier`) is a typed carrier
     /// word (FORM #113), a Map's two raw words.

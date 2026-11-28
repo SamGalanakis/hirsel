@@ -45,10 +45,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
         );
         let (full, empty) = (self.new_block(&[]), self.new_block(&[]));
-        let join = self.new_block(&[Ty::Ptr, Ty::Ptr]);
+        let meta_ty = if frozen { Ty::Ptr } else { u };
+        let empty_meta = if frozen { null } else { zero };
+        let join = self.new_block(&[Ty::Ptr, meta_ty]);
         self.runtime_branch(some, full, empty, n);
         self.start(empty);
-        self.jump(join, &[null, null], n);
+        self.jump(join, &[null, empty_meta], n);
         self.start(full);
         let data = self.byte_word(base, 1, Ty::Scalar(Scalar::U8), n)?;
         let data = self.pointer(data, n);
@@ -90,14 +92,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             )?;
             (data, meta)
         } else if owned {
-            let [data, ..] = self.runtime_row(
+            let [data, capacity, ..] = self.runtime_row(
                 hirsel_core_ir::RtOp::StaticString,
                 &[Arg::Value(data), Arg::Value(length)],
                 n,
             )?;
-            (data, null)
+            (data, capacity)
         } else {
-            (data, null)
+            (data, zero)
         };
         self.jump(join, &[data, payer], n);
         self.start(join);
@@ -108,7 +110,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let words = if frozen {
             [(data, Ty::Ptr), (payer, Ty::Ptr), (length, u)]
         } else {
-            [(data, Ty::Ptr), (length, u), (zero, u)]
+            [(data, Ty::Ptr), (length, u), (payer, u)]
         };
         for (index, (value, ty)) in words.into_iter().enumerate() {
             let at = self.byte_word(AddressBase::Address(to), index as u64, ty, n)?;

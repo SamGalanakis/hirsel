@@ -301,7 +301,12 @@ impl<'m> Host<'m> for Pure {
     fn enter_call(_: &mut Machine<'m, Self>, _: &Task, _: usize) {}
     fn rt(_: &mut Machine<'m, Self>, _: &mut Task, op: RtOp, a: &[u64]) -> X<Vec<u64>> {
         match op {
-            RtOp::StaticString => Ok(vec![a[0]]),
+            RtOp::StaticString => Ok(vec![a[0], 0]),
+            RtOp::DropStaticStrings => Ok(vec![]),
+            RtOp::ShareStaticFrozen => Ok(vec![u64::from(
+                a[0] == hirsel_core_layout::FROZEN_STATIC_UNCHARGED,
+            )]),
+            RtOp::ByteCapacity { .. } => Ok(vec![a[0]]),
             RtOp::StaticFrozen => Ok(vec![a[0], a[1]]),
             RtOp::ReleaseStaticBytes => Ok(vec![]),
             _ => std::panic::resume_unwind(Box::new(RunStop("WorldOperation"))),

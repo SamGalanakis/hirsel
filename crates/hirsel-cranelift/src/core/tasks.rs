@@ -816,6 +816,9 @@ impl Function<'_, '_, '_> {
             | RtOp::HeldTake { .. }
             | RtOp::StaticString
             | RtOp::StaticFrozen
+            | RtOp::ByteCapacity { .. }
+            | RtOp::ShareStaticFrozen
+            | RtOp::DropStaticStrings
             | RtOp::ReleaseStaticBytes => self
                 .lower_held_op(op, &args, &mut outputs)?
                 .expect("held op"),

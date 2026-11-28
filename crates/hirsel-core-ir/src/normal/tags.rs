@@ -440,6 +440,9 @@ tags!(RtOp {
     104 => ReleaseStaticBytes,
     105 => DataDecode { witness, bytes, output },
     106 => ConnReceiveUntil { item },
+    107 => ByteCapacity { carrier },
+    108 => ShareStaticFrozen,
+    109 => DropStaticStrings,
 });
 
 tags!(Wait {

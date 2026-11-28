@@ -142,6 +142,9 @@ impl Node {
             | RtOp::CodeRevision
             | RtOp::StaticString
             | RtOp::StaticFrozen
+            | RtOp::ByteCapacity { .. }
+            | RtOp::ShareStaticFrozen
+            | RtOp::DropStaticStrings
             | RtOp::ReleaseStaticBytes
             | RtOp::Closed(_) => &[],
         };

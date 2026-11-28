@@ -252,7 +252,17 @@ pub enum RtOp {
     StaticString,
     /// Relocate a loaded image's owned static `FrozenBytes` literal into its `CauseData` R/NX mapping.
     StaticFrozen,
-    /// Release any `CauseData` count owned by a `cap == 0` byte carrier.
+    /// Read the writable capacity word of the `carrier` row. A loaded String
+    /// literal's tagged owner reads as no capacity. A generic carrier is
+    /// decided by its instance.
+    ByteCapacity {
+        carrier: TypeId,
+    },
+    /// Drop the contiguous String leaves of an immutable literal binding.
+    DropStaticStrings,
+    /// Try to share a FrozenBytes literal, retaining its native owner.
+    ShareStaticFrozen,
+    /// Release the count encoded in a loaded String capacity.
     ReleaseStaticBytes,
     /// Borrow the compiler witness and input. The next seven words are the
     /// data limits in declaration order. Commit the owned result only on the
@@ -488,7 +498,7 @@ impl RtOp {
             RtOp::HeldNew { item } => (vec![take(item), V(p), V(u64_)], vec![p, u64_]),
             RtOp::HeldTake { item } => (vec![V(p), V(p), out(item)], vec![bool_]),
             RtOp::ResourceOrigin { .. } => (vec![V(p)], vec![]),
-            RtOp::StaticString => (vec![V(p), V(u64_)], vec![p]),
+            RtOp::StaticString => (vec![V(p), V(u64_)], vec![p, u64_]),
             RtOp::StaticFrozen => (vec![V(p), V(p), V(u64_)], vec![p, p]),
             RtOp::DataDecode {
                 witness,
@@ -504,7 +514,10 @@ impl RtOp {
                 params.push(out(output));
                 (params, vec![])
             }
-            RtOp::ReleaseStaticBytes => (vec![V(p)], vec![]),
+            RtOp::ReleaseStaticBytes => (vec![V(u64_)], vec![]),
+            RtOp::DropStaticStrings => (vec![V(p), V(u64_)], vec![]),
+            RtOp::ShareStaticFrozen => (vec![V(u64_)], vec![bool_]),
+            RtOp::ByteCapacity { .. } => (vec![V(u64_)], vec![u64_]),
             RtOp::CodeSlotNew => (vec![V(u64_)], vec![p]),
             RtOp::CodeLoad => (
                 vec![V(u64_), V(p), V(p), V(p), V(u8_), V(p), V(p), V(p)],
@@ -549,6 +562,7 @@ impl RtOp {
             | RtOp::LatestNew { item }
             | RtOp::SharedNew { item }
             | RtOp::SharedRelease { item } => vec![item],
+            RtOp::ByteCapacity { carrier } => vec![carrier],
             RtOp::LaunchTarget { view } => vec![view],
             RtOp::Cancel
             | RtOp::CheckCancel
@@ -625,6 +639,9 @@ impl RtOp {
             | RtOp::CodeRevision
             | RtOp::StaticString
             | RtOp::StaticFrozen
+            | RtOp::ByteCapacity { .. }
+            | RtOp::ShareStaticFrozen
+            | RtOp::DropStaticStrings
             | RtOp::ReleaseStaticBytes => vec![],
         }
     }

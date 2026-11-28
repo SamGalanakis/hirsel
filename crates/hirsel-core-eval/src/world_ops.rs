@@ -476,7 +476,12 @@ impl Machine<'_> {
                 }
             }
             RtOp::ResourceOrigin { .. } | RtOp::ReleaseStaticBytes => vec![],
-            RtOp::StaticString => vec![a[0]],
+            RtOp::StaticString => vec![a[0], 0],
+            RtOp::DropStaticStrings => vec![],
+            RtOp::ShareStaticFrozen => vec![u64::from(
+                a[0] == hirsel_core_layout::FROZEN_STATIC_UNCHARGED,
+            )],
+            RtOp::ByteCapacity { .. } => vec![a[0]],
             RtOp::StaticFrozen => vec![a[0], a[1]],
             RtOp::HeldNew { item } => {
                 if let Err(room) = self.admit(cur, a[2]) {

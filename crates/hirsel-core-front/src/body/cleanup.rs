@@ -77,6 +77,7 @@ pub(super) struct Own {
     pub address: AddressId,
     pub id: TypeId,
     pub flag: AddressId,
+    pub literal_strings: Option<u64>,
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
@@ -200,32 +201,56 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let Some(flag) = self.new_flag(v.avail == Avail::Live, n) else {
             return;
         };
-        self.vars[b as usize].as_mut().unwrap().own = Some(Own { address, id, flag });
+        self.vars[b as usize].as_mut().unwrap().own = Some(Own {
+            address,
+            id,
+            flag,
+            literal_strings: None,
+        });
         self.owners.push(Owner::Slot(b));
         self.changed();
     }
-    /// FORM #114: whether an immutable `let` of `ty` initialised by `value` holds
-    /// nothing a drop would free, so it gets no owner and no drop. True only when
-    /// `ty` is `String` or an inline array (nested) of `String`, and `value` is the
-    /// same tree written as empty `""` literals (null data pointer, capacity 0,
-    /// owning neither heap storage nor a loaded image's R/NX `CauseData` count).
-    /// Non-empty literals keep their drop so loaded modules balance `CauseData`
-    /// counts on scope exit.
-    pub(super) fn static_owned(&self, value: NodeId, ty: TyId) -> bool {
+    pub(super) fn own_binding(
+        &mut self,
+        b: u32,
+        pat: NodeId,
+        value: NodeId,
+        ty: TyId,
+        origin: Origin,
+    ) {
+        self.own(b, pat);
+        if origin == Origin::Let
+            && let Some(count) = self.static_strings(value, ty)
+            && let Some(own) = self.vars[b as usize].as_mut().and_then(|v| v.own.as_mut())
+        {
+            own.literal_strings = Some(count);
+        }
+    }
+
+    /// Number of contiguous String carriers in a literal-only immutable value.
+    /// Standalone emission elides their cleanup. Loaded code releases each tag.
+    pub(super) fn static_strings(&self, value: NodeId, ty: TyId) -> Option<u64> {
         match self.t.kind(ty) {
-            TyKind::Array(elem, _) => {
-                let elem = *elem;
-                self.kind(value) == NodeKind::Array
-                    && self.kids(value).iter().all(|&k| self.static_owned(k, elem))
+            TyKind::Array(elem, _) if self.kind(value) == NodeKind::Array => {
+                self.kids(value).iter().try_fold(0u64, |sum, &child| {
+                    sum.checked_add(self.static_strings(child, *elem)?)
+                })
             }
-            TyKind::Adt(d, args) => {
-                args.is_empty()
-                    && self.p.decls[d.index()].role == Some(Role::String)
-                    && self.kind(value) == NodeKind::Literal
-                    && self.token_kind(value) == Some(TokenKind::String)
-                    && self.token_text(value) == "\"\""
+            TyKind::Adt(d, args)
+                if args.is_empty() && self.p.decls[d.index()].role == Some(Role::String) =>
+            {
+                let literal = match self.kind(value) {
+                    NodeKind::Literal => self.token_kind(value) == Some(TokenKind::String),
+                    NodeKind::Path => self.p.resolved(self.at, value).is_some_and(|use_| {
+                        use_.projections.is_empty()
+                            && matches!(use_.target, Target::Definition(id)
+                                if self.p.constant_ids[id.0 as usize].is_some())
+                    }),
+                    _ => false,
+                };
+                literal.then_some(1)
             }
-            _ => false,
+            _ => None,
         }
     }
     /// Slot `s` is moved out or taken apart: clear its flag.
@@ -350,11 +375,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return;
         }
         let mut frame = None;
+        let mut literals = None;
         let (base, id, avail, flag) = match o {
             Owner::Slot(s) => {
                 let v = self.var(s);
                 let Some(own) = v.own else { return };
                 frame = self.frame_list_at(own.address);
+                literals = own.literal_strings;
                 (
                     AddressBase::Address(own.address),
                     own.id,
@@ -389,7 +416,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         };
         match (avail, flag) {
-            (Avail::Live, _) => self.drop_owner(base, id, frame, n),
+            (Avail::Live, _) => self.drop_owner(base, id, frame, literals, n),
             (Avail::Maybe, Some(flag)) => {
                 let on = self.read_bits(flag, Ty::Scalar(Scalar::Bool), n);
                 let yes = self.new_block(&[]);
@@ -407,7 +434,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 if matches!(o,Owner::Temp(t) if self.temporary_storage(t).is_some()) {
                     self.store_flag(flag, false, n);
                 }
-                self.drop_owner(base, id, frame, n);
+                self.drop_owner(base, id, frame, literals, n);
                 self.jump(next, &[], n);
                 self.start(next);
             }
@@ -517,8 +544,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         base: AddressBase,
         id: TypeId,
         frame: Option<frame_lists::FrameList>,
+        literals: Option<u64>,
         n: NodeId,
     ) {
+        if let (Some(count), AddressBase::Address(at)) = (literals, base) {
+            let carriers = self.pointer(at, n);
+            let count = self
+                .konst(Ty::Scalar(Scalar::U64), count, n)
+                .expect("live drop");
+            self.runtime_row(
+                hirsel_core_ir::RtOp::DropStaticStrings,
+                &[Arg::Value(carriers), Arg::Value(count)],
+                n,
+            );
+            return;
+        }
         match (frame, base) {
             (Some(f), AddressBase::Address(address)) => {
                 self.drop_frame_list(f, address, id, n);

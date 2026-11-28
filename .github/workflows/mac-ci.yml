@@ -61,6 +61,8 @@ jobs:
             if [[ "$SCHEDULE" == '30 3 * * *' ]]; then
               echo 'cross_reason=Mac laws run separately from the nightly corpus comparison.'
               echo 'mac_reason=Mac laws run separately from the nightly corpus comparison.'
+              rustup toolchain install --no-self-update
+              cargo fetch --locked
               dist_help=$(tools/toolchain-dist/build --help)
               if ! grep -Eq -- '(^|[[:space:]])--host([=[:space:]]|$)' <<< "$dist_help"; then
                 echo 'nightly_reason=Waiting for R4: toolchain-dist/build --host aarch64-apple-darwin.'
@@ -145,6 +147,7 @@ jobs:
           read -r deployment_env floor <<< "$apple"
           export "$deployment_env=$floor"
           rustup toolchain install --no-self-update
+          cargo fetch --locked
           python3 tools/buck2/bootstrap_llvm.py
           sdk=$(xcrun --sdk macosx --show-sdk-path)
           clang=$(xcrun --sdk macosx --find clang)
@@ -220,6 +223,7 @@ jobs:
           read -r deployment_env floor <<< "$apple"
           export "$deployment_env=$floor"
           rustup toolchain install --no-self-update
+          cargo fetch --locked
           python3 tools/buck2/bootstrap_llvm.py
           sdk=$(xcrun --sdk macosx --show-sdk-path)
           clang=$(xcrun --sdk macosx --find clang)
@@ -304,6 +308,8 @@ jobs:
         env:
           RELEASE_TAG: v0.0.0-nightly
         run: |
+          rustup toolchain install --no-self-update
+          cargo fetch --locked
           tools/toolchain-dist/build --host aarch64-apple-darwin \
             --runtime-archives "$RUNNER_TEMP/darwin-runtime-archives" --output "$RUNNER_TEMP/prefix"
       - name: Compare cross-built and native Mach-O files

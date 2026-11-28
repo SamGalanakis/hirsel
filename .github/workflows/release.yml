@@ -45,6 +45,8 @@ jobs:
       - name: Resolve host targets and runners
         id: hosts
         run: |
+          rustup toolchain install --no-self-update
+          cargo fetch --locked
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, subprocess
           entries = json.loads(subprocess.check_output(['python3', 'tools/toolchain-dist/product.py', 'matrix'], text=True))['include']
@@ -57,7 +59,10 @@ jobs:
           print(f'darwin_runner={by_target[darwin]}')
           PY
       - name: Check installer release resolution
-        run: dash tools/toolchain-dist/check-installer
+        run: |
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+          export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          dash tools/toolchain-dist/check-installer
 
   build-linux:
     needs: [plan]
@@ -225,6 +230,7 @@ jobs:
           if ! rustc --version >/dev/null 2>&1; then
             rustup toolchain install --no-self-update
           fi
+          cargo fetch --locked
           mkdir -p "$RUNNER_TEMP/darwin-xdg/hirsel/llvm-source"
           XDG_CACHE_HOME="$RUNNER_TEMP/darwin-xdg" \
             tools/toolchain-dist/build --host "$TARGET" \
@@ -253,7 +259,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: host
-        run: echo "target=$(python3 tools/toolchain-dist/product.py target)" >> "$GITHUB_OUTPUT"
+        run: |
+          rustup toolchain install --no-self-update
+          cargo fetch --locked
+          target=$(python3 tools/toolchain-dist/product.py target)
+          echo "target=$target" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         with:
           name: release-${{ steps.host.outputs.target }}
@@ -299,7 +309,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: host
-        run: echo "target=$(python3 tools/toolchain-dist/product.py target)" >> "$GITHUB_OUTPUT"
+        run: |
+          rustup toolchain install --no-self-update
+          cargo fetch --locked
+          target=$(python3 tools/toolchain-dist/product.py target)
+          echo "target=$target" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         with:
           name: release-${{ steps.host.outputs.target }}
@@ -316,6 +330,8 @@ jobs:
         env:
           HIRSEL_VERSION: ${{ needs.plan.outputs.version }}
         run: |
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+          export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
           python3 tools/toolchain-dist/product.py installer > "$RUNNER_TEMP/release/install.sh"
           asset=$(python3 tools/toolchain-dist/product.py asset "$HIRSEL_VERSION")
           (cd "$RUNNER_TEMP/release" && shasum -a 256 "$asset" install.sh > SHA256SUMS)
@@ -341,6 +357,10 @@ jobs:
           pattern: release-*
           merge-multiple: true
           path: ${{ runner.temp }}/release
+      - name: Prepare pinned Rust and Cargo downloads
+        run: |
+          rustup toolchain install --no-self-update
+          cargo fetch --locked
       - name: Publish the tagged release
         id: release
         env:

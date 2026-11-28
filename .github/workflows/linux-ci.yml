@@ -98,6 +98,7 @@ jobs:
       - name: Prepare pinned Rust and LLVM
         run: |
           rustup toolchain install --no-self-update
+          cargo fetch --locked
           python3 tools/buck2/bootstrap_llvm.py
       - name: Build the release compiler with Cargo
         run: cargo build --release -p hirsel-core-driver --locked

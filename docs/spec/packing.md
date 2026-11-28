@@ -15,10 +15,16 @@ Nothing here changes what a program means ([PROG-6](programs.md#prog-6-one-meani
 Place that is loaded and a Place that is linked as a standalone executable
 ([EXEC-4](exec.md#exec-4-the-image-is-the-pinned-bytes)) are the same program.
 
-**What isolates Places in one process.** Hirsel's checker, its bounds and overflow checks,
-the stack watermark ([FAIL-17](failure.md)), byte and step bounds
-([MEM-19](budgets.md#mem-19-limits), [MEM-30](budgets.md#mem-30-step-bounds)) and the closed
-import mask (PACK-7). Places in one pool are not isolated from each other against
+**One owner per pack pool.** This is the supported security boundary. Run Places with
+different owners in separate OS processes until the CoreIR verifier, the ownership and
+capability fuzzer, and hardening with ASan, TSan and Miri have a clean production track record.
+The verifier work includes the `wf::module` admission gate, metering, ownership completeness
+and the Lean 4 proof of join soundness.
+
+Within a pool, Hirsel checks types, bounds and overflow, enforces the stack watermark
+([FAIL-17](failure.md)) and byte and step bounds
+([MEM-19](budgets.md#mem-19-limits), [MEM-30](budgets.md#mem-30-step-bounds)), and restricts
+calls to the closed import mask (PACK-7). Places in one pool remain exposed to each other's
 speculative side channels. Secrets never live in a shared pool, and Places that need
 confidentiality from each other run in separate OS processes. A hardware fault in loaded
 code stops the pool and quarantines the image (PACK-9).

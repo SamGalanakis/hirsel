@@ -5,9 +5,12 @@ kernel rules K1 to K13, directory rules D1 to D6, and verification tiers T0 to T
 Phase 1 builds the move-authorization kernel, independent register model, simulation laws
 and formal proofs. Phase 3a adds the dedicated `Directory[K]` Place library and
 `hirsel fleet sim` at 50 and 1,000 simulated hosts. The [launcher](launch.md#the-launcher)
-carries opaque move envelopes and the release embeds `platform_main`. Real-cluster
-orchestration verbs, Store `ClaimAuth`/`ORIGIN`, Runner `Deposed` and the platform move
-integration remain planned.*
+carries opaque move envelopes and the release embeds `platform_main`. Store implements
+`ClaimAuth` and `ORIGIN`, and Runner implements `Deposed` (`0ed2f789`,
+[claim laws](../../core/programs/store/bucket_claim_auth_laws.hirsel)). Phase 3b Split 1
+landed authenticated `join`, a monotonic `roster` and real SPKI-pinned `quic@1` links
+(`631e196b`, [three-host QUIC law](../../core/programs/fleet/cluster_laws.hirsel)).
+Further real-cluster orchestration verbs and platform move integration remain planned.*
 
 Hirsel Fleet runs multi-machine workloads with the existing `hirsel` launcher and `platform`
 host packaged as one single-binary distribution, with no Kubernetes, no second host daemon,

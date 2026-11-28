@@ -4,6 +4,14 @@
 A writer publishes new roots at commit. Its journal acknowledges a durable prefix,
 and a checkpoint writes immutable packs and publishes the current roots.
 
+Store implements its engine in pure Hirsel so its allocations and work count toward the
+Place's byte and step budgets. Its storage and scheduling effects go through capabilities
+that `sim.world` can drive for deterministic crash testing and replay. An uncontained
+`Foreign` binding to SQLite or LMDB would share the Place's address space with native
+code whose internal allocations, work and effects sit outside those controls.
+See [MEM-20](../../../docs/spec/budgets.md#mem-20-limit-records-and-hand-over) and
+[MEM-30](../../../docs/spec/budgets.md#mem-30-step-bounds).
+
 - [API](#1-api) covers transactions, queries and handles.
 - [On-disk format](#2-on-disk-format) covers frames and recovery. The current format
   word is defined by AP1 in [§11.1](#111-format-word-kinds-and-limits).

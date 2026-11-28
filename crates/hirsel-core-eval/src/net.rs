@@ -30,7 +30,7 @@ impl Machine<'_> {
                                 a[4] as u16,
                             )
                         {
-                            let provider = self.host.world.net_ports.get(&a[0]).copied();
+                            let provider = self.host.world.port_grants.get(&a[0]).copied();
                             *self.host.world.not_public.entry(provider).or_default() += 1;
                         }
                         let mut row = vec![0, u64::from(tag), 0, 0];
@@ -39,7 +39,7 @@ impl Machine<'_> {
                         }
                         return Ok(row);
                     }
-                    if let Some(&c) = self.host.world.net_ports.get(&a[0]) {
+                    if let Some(&c) = self.host.world.port_grants.get(&a[0]) {
                         return self.net_call(t, op, c, 0, true, a);
                     }
                 }
@@ -142,7 +142,7 @@ impl Machine<'_> {
 
     pub(super) fn tls_connect(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
         let key = a[1];
-        let served = self.host.world.net_ports.get(&a[0]).copied();
+        let served = self.host.world.port_grants.get(&a[0]).copied();
         if let Some(&(c, _, peer)) = self.host.world.port_keys.get(&(key & !3)) {
             return self.port_tls(t, a, c, peer, served);
         }

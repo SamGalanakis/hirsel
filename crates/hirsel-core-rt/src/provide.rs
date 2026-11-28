@@ -22,7 +22,10 @@ pub(crate) mod random;
 mod replies;
 mod udp;
 use net::net_port;
-pub(crate) use net::{exec_port, join_socket, release_socket, split_socket};
+pub(crate) use net::{
+    exec_port, grant_child, grant_live, join_socket, port_denials, release_socket, served_rules,
+    socket_live, split_socket, track_derived_word,
+};
 use replies::{answer, unix_reply};
 pub(crate) use udp::release_udp;
 
@@ -67,6 +70,11 @@ struct ProcessCell {
 #[derive(Default)]
 struct Port {
     vocab: Vocab,
+    root: u64,
+    grants: std::collections::BTreeSet<u64>,
+    first_call: u64,
+    derived_words: Vec<crate::host_file::CellWords>,
+    denials: [u64; 2],
     /// Cleaning the `Served` end seals the port: every unsettled and later
     /// call completes as `sealed` answers.
     sealed: bool,
@@ -89,10 +97,6 @@ struct Port {
     /// and the server ids they name (NOTES 31).
     keys: BTreeMap<u64, u64>,
     udp_retired: BTreeMap<u64, crate::udp_net::served::Retirement>,
-    /// A Net port's root rules: every address, pinned with the port, so
-    /// `net.narrow` intersects them as any Net grant's.
-    rules: Option<crate::net::RulesStorage>,
-    exec_grant: Option<Box<crate::exec::Grant>>,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -192,10 +196,10 @@ const R_ACCEPTED: u64 = 19;
 
 /// A port caller's socket and listener keys: the registry's generation-0
 /// band with bit 33 set, so they never meet a registry key (generation 1 and
-/// up) or a model key (small and sequential). Process-wide, so two ports'
-/// keys never meet either (NOTES 31).
+/// up) or a model key (small and sequential). Allocated once per run (NOTES 31).
 const PORT_KEYS: u64 = 1 << 33;
-static NEXT_PORT_KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Root designations are distinct from derived object keys and aligned rule pointers.
+pub(crate) const PORT_ROOT: u64 = 1 << 63;
 
 struct PortCall {
     /// The caller's operation; 0 for a Released notice, which has none.
@@ -257,8 +261,7 @@ impl Port {
         let op = self.calls.get(&id)?.words[0];
         self.settle(id, self.closed_for(op))
     }
-    fn issue_key(&mut self, id: u64) -> u64 {
-        let seq = NEXT_PORT_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    fn issue_key(&mut self, id: u64, seq: u64) -> u64 {
         let key = PORT_KEYS | (seq << 2);
         self.keys.insert(key, id);
         key
@@ -280,6 +283,8 @@ impl Port {
             return;
         }
         let (taken, file) = (call.taken, call.words[1]);
+        let key = unsafe { (*call.request).handle };
+        self.keys.remove(&key);
         if taken {
             if self.handles.remove(&file).is_some() {
                 self.used -= HANDLE_ROOM;
@@ -386,13 +391,14 @@ impl Port {
                     u64::from(launch.piped[2]),
                 ];
             }
-            EXEC_WAIT | EXEC_SIGNAL if self.live(request.handle, Kind::Proc) => {
+            EXEC_WAIT | EXEC_SIGNAL => {
+                let id = self.socket(request.handle, Kind::Proc)?;
                 let op = if request.operation == EXEC_WAIT {
                     exec::AWAIT
                 } else {
                     exec::SIGNAL
                 };
-                words[..3].copy_from_slice(&[op, request.handle, u64::from(request.mode)]);
+                words[..3].copy_from_slice(&[op, id, u64::from(request.mode)]);
             }
             RECV_BOUNDED | SEND_PAIR => {
                 // SAFETY: the pipe I/O adapter pins its request and any tail.
@@ -420,7 +426,11 @@ impl Port {
             Vocab::Exec => return self.exec_words(request),
             _ => {}
         }
-        let h = request.handle;
+        let h = if request.handle == self.root {
+            0
+        } else {
+            *self.keys.get(&request.handle)?
+        };
         let b = request.buffer;
         let spare = (b.capacity.saturating_sub(b.len)) as u64;
         let path = request.path_len as u64;
@@ -582,6 +592,17 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+pub(crate) fn retired(provider: &Provider) -> bool {
+    std::ptr::fn_addr_eq(provider.issue, RETIRED.0.issue)
+}
+
+pub(crate) fn served_exec() -> &'static crate::exec::Grant {
+    static GRANT: OnceLock<crate::exec::Grant> = OnceLock::new();
+    GRANT.get_or_init(|| crate::exec::Grant::Served {
+        rules: ExecRules::universal(),
+    })
+}
+
 const PROVIDER: Provider = Provider {
     state: ptr::null_mut(),
     wait,
@@ -739,9 +760,9 @@ fn done(outcome: Outcome) -> Step {
 
 /// `next`: take the oldest queued call (`written` 1, `value` its id), answer
 /// `None` once quiescence woke this wait, or register and stay pending.
-fn next_step(state: *mut u8, port: &Mutex<Port>, token: u64) -> Step {
+fn next_step(state: *mut u8, port: &Mutex<Port>, handle: u64, token: u64) -> Step {
     let mut port = lock(port);
-    if port.withdrawn {
+    if port.withdrawn || port.root != handle {
         return done(WITHDRAWN);
     }
     let queued = port.queued();
@@ -900,7 +921,7 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
                 return done(WITHDRAWN);
             }
         }
-        (Cell::Port(port), PORT_NEXT) => return next_step(state, port, token),
+        (Cell::Port(port), PORT_NEXT) => return next_step(state, port, request.handle, token),
         (Cell::Port(port), RELEASE | CLOSE)
             if request.operation == RELEASE || lock(port).vocab == Vocab::Exec =>
         {
@@ -908,7 +929,8 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
             // `next` delivers the notice. A sealed port's server never asks.
             let mut p = lock(port);
             let stamp = p.next_id;
-            let live = match p.handles.get_mut(&request.handle) {
+            let id = p.keys.remove(&request.handle);
+            let live = match id.and_then(|id| p.handles.get_mut(&id)) {
                 Some(h) if h.state == State::Live => {
                     h.state = State::Released(stamp);
                     true
@@ -928,6 +950,15 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
             let passed =
                 unsafe { crate::os_net::deadline(until, token) } == crate::os_net::Due::Passed;
             let mut p = lock(port);
+            if p.withdrawn || p.stale(request) {
+                drop(p);
+                unsafe { crate::os_net::retire_deadline(until, token) };
+                return done(if operation == CLOSE {
+                    Outcome::default()
+                } else {
+                    WITHDRAWN
+                });
+            }
             let words = match p.vocab {
                 Vocab::Stream => {
                     let mut w = [0; 9];
@@ -938,8 +969,6 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
             };
             if p.sealed {
                 outcome = match request.operation {
-                    CLOSE if p.withdrawn => Outcome::default(),
-                    _ if p.withdrawn => WITHDRAWN,
                     EXEC_SPAWN | EXEC_WAIT | EXEC_SIGNAL => crate::exec_runtime::failure(4, 0),
                     _ => p.closed,
                 };
@@ -1014,6 +1043,9 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
         }
         (Cell::Port(port), CLOSE_SERVED) => {
             let mut p = lock(port);
+            if p.root != handle {
+                return done(Outcome::default());
+            }
             p.sealed = true;
             let ids: Vec<u64> = p.calls.keys().copied().collect();
             let tokens = ids.into_iter().filter_map(|id| p.close_call(id)).collect();
@@ -1036,7 +1068,7 @@ unsafe extern "C" fn resume(state: *mut u8, request: *mut Request, token: u64) -
     // SAFETY: as `wait`.
     let (cell, request) = unsafe { (cell(state), &*request) };
     match (cell, request.operation) {
-        (Cell::Port(port), PORT_NEXT) => next_step(state, port, token),
+        (Cell::Port(port), PORT_NEXT) => next_step(state, port, request.handle, token),
         // SAFETY: the caller's request is pinned through delivery.
         (Cell::Port(port), _) => match unsafe { collect(port, request, token, None) } {
             Some(outcome) => done(outcome),
@@ -1118,7 +1150,6 @@ unsafe fn files<'a>(context: *mut Context) -> &'a crate::host_file::Files {
     unsafe { &*(*context).host_files }
 }
 
-/// The cell a live hand or trigger designates.
 /// The cell a live hand designates, its state and the hand's generation.
 /// None once a withdrawal forgot the hand.
 unsafe fn held<'a>(context: *mut Context, key: u64) -> Option<(&'a Cell, *mut u8, u64)> {
@@ -1131,7 +1162,7 @@ unsafe fn held<'a>(context: *mut Context, key: u64) -> Option<(&'a Cell, *mut u8
 }
 
 /// A hand's operation on a withdrawn cell fails with `Bounds` (MEM-24).
-unsafe fn withdrawn(context: *mut Context, site: u64) -> Outcome {
+pub(crate) unsafe fn withdrawn(context: *mut Context, site: u64) -> Outcome {
     // SAFETY: a running context records the cause.
     unsafe { causes::record(&mut *context, causes::Cause::new(causes::BOUNDS, site)) };
     CANCELLED
@@ -1310,82 +1341,7 @@ fn empty_request(operation: u8, handle: u64, site: u64) -> Request {
     }
 }
 
-/// `provide.stdout/stderr/dir(bytes n)`: a port with room `n`, admitted with
-/// its cell's charge from the current limit until that limit ends. `value`
-/// is the capability's grant (id 0, a Dir port's root) and `written` the
-/// `Served` key; a refusal answers as `Cells::add`.
-/// # Safety
-/// Context is running.
-unsafe fn provide_port(
-    context: *mut Context,
-    n: u64,
-    vocab: Vocab,
-    terminal: crate::host_file::Terminal,
-) -> Outcome {
-    // SAFETY: forwarded.
-    let files = unsafe { files(context) };
-    // A sealed port answers Closed (IoError tag 4), or for a Net Reset
-    // (NetError tag 5).
-    let closed = if matches!(vocab, Vocab::Net | Vocab::Exec) {
-        5
-    } else {
-        4
-    };
-    let mut port = Port {
-        vocab,
-        closed: Outcome {
-            error: IoError {
-                tag: closed,
-                code: 0,
-            },
-            ..Outcome::default()
-        },
-        room: n,
-        ..Port::default()
-    };
-    if vocab == Vocab::Dir {
-        port.handles.insert(0, Handle::new(Kind::Dir));
-    }
-    let mut root = 0;
-    if vocab == Vocab::Net {
-        // Every address in each direction and family (NOTES 31), a
-        // handshake to any name and port under any trust (NOTES 32), and a
-        // lookup of any name (NOTES 34).
-        let addresses = hirsel_core_net::GrantRule::served_addresses();
-        let tls = hirsel_core_net::GrantRule::Tls(hirsel_core_net::TlsRule::served());
-        let resolve = hirsel_core_net::GrantRule::Resolve(hirsel_core_net::ResolveRule::served());
-        let unix = hirsel_core_net::UnixDirection::ALL
-            .into_iter()
-            .map(|dir| hirsel_core_net::GrantRule::Unix(hirsel_core_net::UnixRule::served(dir)));
-        let rules = crate::net::RulesStorage::new(addresses.chain([tls, resolve]).chain(unix));
-        root = rules.handle();
-        port.rules = Some(rules);
-    }
-    if vocab == Vocab::Exec {
-        let grant = Box::new(crate::exec::Grant::Served {
-            rules: ExecRules::universal(),
-        });
-        root = std::ptr::from_ref(&*grant) as u64;
-        port.exec_grant = Some(grant);
-    }
-    let charge = PROVIDE_CELL.saturating_add(n);
-    // SAFETY: forwarded.
-    let provider = match unsafe {
-        files.registry.run_grants().cells.add(
-            context,
-            || Cell::Port(Box::new(Mutex::new(port))),
-            charge,
-        )
-    } {
-        Ok((provider, _)) => provider,
-        Err(refused) => return refused,
-    };
-    Outcome {
-        value: files.registry.grant_with_terminal(provider, root, terminal),
-        written: files.registry.held(provider, 0, CLOSE_SERVED),
-        ..Outcome::default()
-    }
-}
+use cells::provide_port;
 
 /// # Safety
 /// Context is running.
@@ -1473,7 +1429,7 @@ pub unsafe extern "C" fn hirsel_core_port_next(
     unsafe {
         let registry = &files(context).registry;
         let provider = registry.file_provider(served);
-        let mut request = empty_request(PORT_NEXT, 0, site);
+        let mut request = empty_request(PORT_NEXT, registry.file_handle(served), site);
         let mut outcome = drive(context, &provider, &mut request, None);
         if outcome.status == 0 && outcome.written == 1 {
             outcome.value = registry.held(provider, outcome.value, CLOSE_CALL);
@@ -1573,13 +1529,15 @@ pub unsafe extern "C" fn hirsel_core_port_fill(
     unsafe {
         let (port, id) = call_of(context, call);
         let registry = &files(context).registry;
-        let Cell::Port(own) = cell(registry.file_provider(served).state) else {
-            unreachable!("a Served designates a port")
-        };
+        let own = registry.file_provider(served);
         let mut p = lock(port);
         let vocab = p.vocab;
         let c = &p.calls[&id];
-        if !ptr::eq(&**own, port) || c.finished || c.answer.is_some() {
+        if own.state != registry.file_provider(call).state
+            || registry.file_handle(served) != p.root
+            || c.finished
+            || c.answer.is_some()
+        {
             return Outcome::default();
         }
         let bytes = request_bytes((*b).data, (*b).len);
@@ -1652,7 +1610,10 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
     if let Some(call) = p.calls.get_mut(&id) {
         call.held = false;
     }
-    let foreign = registry.file_provider(served).state != provider.state;
+    let foreign = registry.file_provider(served).state != provider.state
+        || registry.file_handle(served) != p.root
+        || id < p.first_call
+        || p.withdrawn;
     let notice = !foreign && is_notice(p.vocab, p.calls[&id].words[0]);
     if notice {
         // A Released notice needs no reply; `Done` acknowledges it.
@@ -1692,9 +1653,6 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
         unsafe { causes::record(&mut *context, causes::Cause::fail(Default::default(), site)) };
         return CANCELLED;
     };
-    if p.vocab == Vocab::Net && udp::operation(p.calls[&id].words[0]) {
-        return udp::reply(p, id, tag, w, outcome);
-    }
     let mut outcome = outcome;
     let kind = match (p.vocab, tag) {
         (Vocab::Dir, R_FILE) => Some(Kind::File),
@@ -1707,21 +1665,43 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
             .and_then(|(_, kind)| kind),
         _ => None,
     };
-    if let Some(kind) = kind {
-        let available = p.room - p.used;
-        if available < HANDLE_ROOM {
-            let token = p.close_call(id);
+    let count = if kind.is_some() {
+        1
+    } else if (p.vocab, tag) == (Vocab::Exec, exec::STARTED) {
+        w[..4].iter().filter(|&&id| id != 0).count() as u64
+    } else if p.vocab == Vocab::Net && tag == udp::SOCKETS {
+        w[5]
+    } else {
+        0
+    };
+    let needed = count * HANDLE_ROOM;
+    let available = p.room - p.used;
+    if available < needed {
+        let token = p.close_call(id);
+        drop(p);
+        ready_all(token.into_iter().collect());
+        return refused(needed, available);
+    }
+    let mut sequence = 0..0;
+    if count != 0 {
+        let order = std::sync::atomic::Ordering::Relaxed;
+        let next_key = &registry.run_grants().next_port_key;
+        let reserved = next_key.fetch_update(order, order, |next| {
+            next.checked_add(count).filter(|end| *end <= PORT_KEYS >> 2)
+        });
+        let Ok(start) = reserved else {
             drop(p);
-            ready_all(token.into_iter().collect());
-            return refused(HANDLE_ROOM, available);
-        }
-        p.used += HANDLE_ROOM;
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostHandles"));
+        };
+        sequence = start..start + count;
+        p.used += needed;
+    }
+    if p.vocab == Vocab::Net && udp::operation(p.calls[&id].words[0]) {
+        return udp::reply(p, id, tag, w, outcome, sequence);
+    }
+    if let Some(kind) = kind {
         p.handles.insert(w[0], Handle::new(kind));
-        if p.vocab == Vocab::Net {
-            // The caller's key, and the address it learns: a listener's
-            // bound one, an accepted socket's peer.
-            outcome.value = p.issue_key(w[0]);
-        }
+        outcome.value = p.issue_key(w[0], sequence.next().unwrap());
     }
     if p.vocab == Vocab::Net && matches!(tag, R_SOCKET | R_LISTENER | R_ADDRESS) {
         // SAFETY: the unsettled IP operation pins its address output.
@@ -1739,16 +1719,8 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
         }
     }
     if (p.vocab, tag) == (Vocab::Exec, exec::STARTED) {
-        let needed = HANDLE_ROOM * w[..4].iter().filter(|&&id| id != 0).count() as u64;
-        let available = p.room - p.used;
-        if available < needed {
-            let token = p.close_call(id);
-            drop(p);
-            ready_all(token.into_iter().collect());
-            return refused(needed, available);
-        }
-        p.used += needed;
         p.handles.insert(w[0], Handle::new(Kind::Proc));
+        outcome.value = p.issue_key(w[0], sequence.next().unwrap());
         let mut pipes = [0; 3];
         for (i, &pipe) in w[1..4].iter().enumerate().filter(|&(_, id)| *id != 0) {
             let (kind, part) = if i == 0 {
@@ -1757,7 +1729,7 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
                 (Kind::PipeRead, 1)
             };
             p.handles.insert(pipe, Handle::new(kind));
-            pipes[i] = p.issue_key(pipe) | part;
+            pipes[i] = p.issue_key(pipe, sequence.next().unwrap()) | part;
         }
         // SAFETY: the caller is unsettled and lends SpawnCall through delivery.
         unsafe {

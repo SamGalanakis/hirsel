@@ -1,4 +1,4 @@
-// expect: returned stdout=ticks=40,copy=1,wait=1,next=1,reply=1
+// expect: returned stdout=ticks=40,copy=1,wait=1,next=1,reply=1,reused=1,net=1,exec=1
 // MEM-24: a port (stdout, stderr, dir, net, exec) is charged to the limit
 // current at its construction and withdrawn when that limit ends, by a fault
 // too, so MEM-19 holds: 40 ticks, half of them faulting, that each build 20
@@ -8,7 +8,8 @@
 // fails its next write with Bounds (copy=1), as does a write parked on the
 // port when the bound ends (wait=1) and a server's parked `next` (next=1). A Call the
 // server took before the bound ended is settled: its reply is Withdrawn
-// (reply=1).
+// (reply=1), including when offered to a new port in the same slot (reused=1).
+// Narrowed Net and Exec grants from the previous generation fail with Bounds.
 type Writer:send { out: Stdout, tx: Sender[u64] }
 type Server:send { port: Served[StreamOp], tx: Sender[u64] }
 fn build() {
@@ -53,6 +54,7 @@ fn copy_write(tasks: Tasks) -> u64 waits {
         out
     }
     let out = match got { Ok(out) => out, Error(_) => return 4 }
+    let _ = provide.stdout(bytes 64, None)
     let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
     let h = task.spawn(tasks, bytes 4096, Writer(out: out, tx: take tx), write_once)
     joined_bounds(take h)
@@ -93,7 +95,7 @@ fn parked_next(tasks: Tasks) -> u64 waits {
         Error(_) => 7
     }
 }
-fn taken_reply(tasks: Tasks) -> u64 waits {
+fn taken_reply(tasks: Tasks, reuse: bool) -> u64 waits {
     let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
     let got = bound bytes 16384 {
         let (out, take port) = provide.stdout(bytes 64, None)
@@ -109,12 +111,43 @@ fn taken_reply(tasks: Tasks) -> u64 waits {
         Ok(Some(take parts)) => take parts,
         _ => return 8
     }
-    let mut p = take served
+    let (_, take replacement) = provide.stdout(bytes 64, None)
+    let mut p = if reuse { take replacement } else { take served }
     let replied = match provide.reply(mut p, take call, provide.stream_reply(Done)) {
-        Error(_) => 1u64,
+        Error(Withdrawn) => 1u64,
         Ok(()) => 9
     }
     if joined_bounds(take h) == 1 { replied } else { 10 }
+}
+fn stale_net() -> u64 {
+    let got = bound bytes 4096 {
+        let (n, take port) = provide.net(bytes 64)
+        let rules: List[Rule] = list.new()
+        result.unwrap(net.narrow(n, rules))
+    }
+    let n = match got { Ok(n) => n, Error(_) => return 4 }
+    let _ = provide.net(bytes 64)
+    match isolate(fn() -> u64 { net.denials(n).not_public }) {
+        Ok(Error(causes)) => bounds(causes),
+        _ => 5
+    }
+}
+fn stale_exec() -> u64 {
+    let got = bound bytes 4096 {
+        let (e, take port) = provide.exec(bytes 64)
+        let form: List[ArgToken] = list.new()
+        result.unwrap(exec.narrow(e, Form(program: "git", form: take form)))
+    }
+    let e = match got { Ok(e) => e, Error(_) => return 4 }
+    let _ = provide.exec(bytes 64)
+    match isolate(fn() -> u64 {
+        let form: List[ArgToken] = list.new()
+        let _ = exec.narrow(e, Form(program: "git", form: take form))
+        0
+    }) {
+        Ok(Error(causes)) => bounds(causes),
+        _ => 5
+    }
 }
 pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
     // Each tick's bound fits its parent only while earlier ticks gave all
@@ -142,7 +175,13 @@ pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
     string.push(mut s, ",next=")
     string.push_u64(mut s, parked_next(tasks))
     string.push(mut s, ",reply=")
-    string.push_u64(mut s, taken_reply(tasks))
+    string.push_u64(mut s, taken_reply(tasks, false))
+    string.push(mut s, ",reused=")
+    string.push_u64(mut s, taken_reply(tasks, true))
+    string.push(mut s, ",net=")
+    string.push_u64(mut s, stale_net())
+    string.push(mut s, ",exec=")
+    string.push_u64(mut s, stale_exec())
     result.unwrap(stdout.write(out, s))
     Ok(())
 }

@@ -384,6 +384,19 @@ unsafe fn admit<const RETURNABLE: bool>(
                 ..Outcome::default()
             });
         }
+        if crate::provide::retired(&*provider)
+            && !matches!(
+                operation,
+                CLOSE | RELEASE | CLOSE_CALL | CLOSE_SERVED | CLOSE_CELL
+            )
+        {
+            return Some(crate::provide::withdrawn(context, site));
+        }
+        if matches!(operation, CONNECT | LISTEN | RESOLVE | EXEC_SPAWN)
+            && !crate::provide::grant_live(&*provider, (*request).handle)
+        {
+            return Some(crate::provide::withdrawn(context, site));
+        }
         if let Some(refusal) = authorize(&*provider, &mut *request) {
             return Some(refusal);
         }

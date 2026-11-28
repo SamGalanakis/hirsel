@@ -51,7 +51,7 @@ pub unsafe extern "C" fn hirsel_core_exec_narrow(
     case: u32,
     name: *const Buffer,
     argument: *const Buffer,
-    _site: u64,
+    site: u64,
 ) -> Outcome {
     unsafe {
         crate::process::deny_describe_capability(context);
@@ -67,23 +67,26 @@ pub unsafe extern "C" fn hirsel_core_exec_narrow(
         let Some(rule) = rule else { return DENIED };
         let provider = *hirsel_core_capability_provider(context, exec);
         let key = hirsel_core_capability_handle(context, exec);
+        if !crate::provide::grant_live(&provider, key) {
+            return crate::provide::withdrawn(context, site);
+        }
         #[cfg(feature = "record")]
         let taped = crate::tape::owns(&provider);
         #[cfg(feature = "record")]
         let (parent, rules) = if taped {
             let parent = crate::tape::source(&provider, key)
-                .map(|(_, handle)| &*(handle as *const super::Grant));
+                .map(|(_, handle)| super::Grant::from_handle(handle));
             let Some(rules) = crate::tape::exec_rules(&provider, key) else {
                 return DENIED;
             };
             (parent, rules.narrow(&rule))
         } else {
-            let parent = &*(key as *const super::Grant);
+            let parent = super::Grant::from_handle(key);
             (Some(parent), parent.rules().narrow(&rule))
         };
         #[cfg(not(feature = "record"))]
         let (parent, rules) = {
-            let parent = &*(key as *const super::Grant);
+            let parent = super::Grant::from_handle(key);
             (Some(parent), parent.rules().narrow(&rule))
         };
         let Some(rules) = rules else { return DENIED };
@@ -121,6 +124,9 @@ pub unsafe extern "C" fn hirsel_core_exec_narrow(
                 payer,
                 charge: charge.unwrap(),
             });
+        if !crate::provide::grant_child(&provider, key, handle) {
+            return crate::provide::withdrawn(context, site);
+        }
         Outcome {
             value: registry.grant(provider, handle),
             error: IoError::OK,

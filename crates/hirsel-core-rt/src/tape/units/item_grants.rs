@@ -226,7 +226,7 @@ fn host(provider: &Provider, h: u64, kind: u8) -> Result<Grant, &'static str> {
 fn net_rules(rules: u64) -> Result<Vec<u8>, &'static str> {
     // SAFETY: a recorded Net's source handle is its run-pinned rule list,
     // whose rows the run keeps live.
-    let rules = unsafe { (*(rules as *const crate::net::Rules)).as_slice() };
+    let rules = unsafe { crate::net::Rules::from_handle(rules).as_slice() };
     format::net_snapshot(rules).map_err(|_| NET_RULES)
 }
 

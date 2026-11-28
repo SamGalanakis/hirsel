@@ -153,7 +153,11 @@ unsafe fn connect(
     unsafe {
         crate::process::deny_describe_capability(context);
         let files = (*context).host_files;
-        let prepared = { prepare(context, files, n, key, name, trust, &roots, alpn, bad_alpn) };
+        let prepared = {
+            prepare(
+                context, files, n, key, name, trust, &roots, alpn, bad_alpn, site,
+            )
+        };
         let (address, provider, mut state) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -287,6 +291,7 @@ unsafe fn prepare(
     roots: &Buffer,
     alpn: View,
     bad_alpn: bool,
+    site: u64,
 ) -> Result<(net::Address, Provider, HandshakeState), Outcome> {
     unsafe {
         let Some(&TcpRoute {
@@ -299,6 +304,12 @@ unsafe fn prepare(
         // A served Net's sockets handshake through that Net, and only it:
         // never another provider's, which could not answer for them.
         let net_provider = &*hirsel_core_capability_provider(context, n);
+        let grant = hirsel_core_capability_handle(context, n);
+        if !crate::provide::grant_live(net_provider, grant)
+            || !crate::provide::socket_live(&provider, key)
+        {
+            return Err(crate::provide::withdrawn(context, site));
+        }
         if (crate::provide::owns(&provider) || crate::provide::owns(net_provider))
             && provider.state != net_provider.state
         {
@@ -326,7 +337,6 @@ unsafe fn prepare(
                 (pin, store.map(Arc::new), cacheable)
             }
         };
-        let grant = hirsel_core_capability_handle(context, n);
         #[cfg(feature = "record")]
         let rules = {
             let grant_provider = &*hirsel_core_capability_provider(context, n);
@@ -338,7 +348,7 @@ unsafe fn prepare(
         };
         #[cfg(not(feature = "record"))]
         let rules = grant;
-        let rules = &*(rules as *const Rules);
+        let rules = Rules::from_handle(rules);
         if !rules.permits(
             |rule| matches!(rule, GrantRule::Tls(rule) if rule.permits(&name, address.port, pin)),
         ) {

@@ -545,14 +545,16 @@ impl Machine<'_> {
                     self.refund(payer, 32);
                     return false;
                 }
-                self.trace.push(h);
+                if let Some(trace) = &mut self.trace {
+                    trace.push(h);
+                }
                 if (PORT_HANDLE..CALL_BASE).contains(&h) {
                     // A served Dir's file or listing: the server learns by
                     // Released (FAIL-13).
                     self.port_release(h);
                     return false;
                 }
-                if h >= CALL_BASE || (SERVED_BASE..SERVED_BASE + 0x10_0000).contains(&h) {
+                if h >= CALL_BASE || (SERVED_BASE..SERVED_BASE + PORT_GRANT).contains(&h) {
                     // A dropped Call settles its caller as sealed; a cleaned
                     // Served end seals its port.
                     self.port_drop(h);
@@ -679,7 +681,7 @@ impl Machine<'_> {
         }
         // A dropped Hello declines: a served socket's server sees it released.
         self.host.world.tls_hellos.remove(&key);
-        if !self.port_socket_part(key, false) {
+        if !self.port_socket_part(key, false) && !(PORT_KEYS..2 * PORT_KEYS).contains(&key) {
             self.host.world.network.sockets.release(key);
         }
     }

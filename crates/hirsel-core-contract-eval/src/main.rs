@@ -135,7 +135,10 @@ fn run(
         destination.as_deref_mut(),
         setting.instructions,
         revisions,
-        setting.events,
+        eval::EntryObservations {
+            events: setting.events,
+            cleanup_trace: false,
+        },
         &sites,
         setting.launch.as_ref(),
         None,

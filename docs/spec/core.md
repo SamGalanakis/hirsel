@@ -1181,7 +1181,8 @@ pub fn trigger(take t: StopTrigger)
   and so does every later operation through its capability or handles but a close, which
   succeeds; a parked `provide.next` fails with `Bounds`, and so does every later one. A
   `Call` its server already holds is settled: `payload` and `fill` supply nothing and
-  `reply` returns `Error(Withdrawn)`.
+  `reply` returns `Error(Withdrawn)`. The slot can serve a new port of the same vocabulary.
+  The new port has fresh designations even when its server uses the same object IDs.
 - **Replay.** A virtual provider's results are computed by the run, so they are not
   inputs of [CAP-8](capabilities.md#cap-8-the-replay-point): a replay recomputes them. The
   host operations a server makes pass the replay point as every provider operation does.

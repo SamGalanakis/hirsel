@@ -979,7 +979,7 @@ impl Tape {
             None
         } else {
             // SAFETY: the launch owner pins the Exec grant through cleanup.
-            let grant = unsafe { &*(handle as *const crate::exec::Grant) };
+            let grant = unsafe { crate::exec::Grant::from_handle(handle) };
             let crate::exec::Grant::Native { profiles, .. } = grant else {
                 return Err(Fault::Corrupt);
             };

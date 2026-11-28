@@ -5,7 +5,7 @@ use std::{
     collections::BTreeMap,
     mem::ManuallyDrop,
     ptr,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
 #[derive(Clone, Copy)]
@@ -150,7 +150,7 @@ fn next_id(next: &mut u64) -> Result<u64, crate::run_stop::Stop> {
 
 #[derive(Default)]
 pub(crate) struct Registry {
-    owned: Mutex<Entries>,
+    owned: Arc<Mutex<Entries>>,
     run: Arc<RunGrants>,
     /// A recorded helper's own designation of each capability its entry
     /// holds: the word, then its cell's provider and handle there, so its
@@ -158,6 +158,29 @@ pub(crate) struct Registry {
     /// The provider is a tape cell's, pinned for the process, by address.
     #[cfg(feature = "record")]
     unit_grants: BTreeMap<u64, (usize, u64)>,
+}
+
+/// A generation's published words. Registry keys are monotonic within each
+/// registry. A returned or moved held word may already have left its owner.
+pub(crate) struct CellWords {
+    grants: Weak<Mutex<Designations>>,
+    owned: Weak<Mutex<Entries>>,
+    grant: u64,
+    held: u64,
+}
+
+impl CellWords {
+    pub(crate) fn retire(self) {
+        if let Some(grants) = self.grants.upgrade() {
+            grants.lock().unwrap().grants.remove(&self.grant);
+        }
+        if self.held != 0
+            && let Some(owned) = self.owned.upgrade()
+            && let Some(files) = owned.lock().unwrap().live.as_mut()
+        {
+            files.values.remove(&self.held);
+        }
+    }
 }
 
 /// What a retired hand or trigger key designates (MEM-24).
@@ -173,7 +196,7 @@ const RETIRED_FILE: File = File {
 /// their last holder (TLS-5); the rest live through the run.
 #[derive(Default)]
 pub(crate) struct RunGrants {
-    designations: Mutex<Designations>,
+    designations: Arc<Mutex<Designations>>,
     pub(crate) net_grants: Mutex<Vec<crate::net::Grant>>,
     /// The UDP rules cache, host allowance and waiters, built by the run's first UDP
     /// socket, so a run without UDP carries none of their code.
@@ -185,6 +208,7 @@ pub(crate) struct RunGrants {
     /// media resource (`media::run_state`).
     pub(crate) media: OnceLock<Box<dyn RunPart>>,
     pub(crate) cells: crate::provide::Cells,
+    pub(crate) next_port_key: std::sync::atomic::AtomicU64,
     /// NET-18's `not_public` refusals per provider (its `state` address).
     pub(crate) not_public: Mutex<BTreeMap<usize, u64>>,
     /// NET-18's `own_address` refusals per provider, counted from deliveries.
@@ -265,7 +289,7 @@ impl Registry {
 
     pub(crate) fn for_unit(&self) -> Self {
         Self {
-            owned: Mutex::default(),
+            owned: Default::default(),
             run: self.run.clone(),
             #[cfg(feature = "record")]
             unit_grants: BTreeMap::new(),
@@ -349,30 +373,18 @@ impl Registry {
             .and_then(|l| l.values.remove(&key))
             .unwrap_or(RETIRED_FILE)
     }
-    /// MEM-24: forget a withdrawn cell's grant word and, when this registry
-    /// holds it, its hand or trigger, if they still designate that cell.
-    pub(crate) fn retire(&self, word: u64, state: usize, generation: u64, held: Option<u64>) {
-        let ours = |p: &Provider, h: u64| p.state as usize == state && h == generation;
-        let mut d = self.run.designations.lock().unwrap();
-        if d.grants
-            .get(&word)
-            .is_some_and(|g| ours(&g.provider, g.handle))
-        {
-            d.grants.remove(&word);
-        }
-        drop(d);
-        if let Some(key) = held
-            && let Some(live) = self.owned.lock().unwrap().live.as_mut()
-            && live
-                .values
-                .get(&key)
-                .is_some_and(|f| ours(&f.provider, f.handle))
-        {
-            live.values.remove(&key);
+    pub(crate) fn cell_words(&self, grant: u64, held: u64) -> CellWords {
+        CellWords {
+            grants: Arc::downgrade(&self.run.designations),
+            owned: Arc::downgrade(&self.owned),
+            grant,
+            held,
         }
     }
     pub(crate) fn grant(&self, provider: Provider, handle: u64) -> u64 {
-        self.grant_with_terminal(provider, handle, Terminal::No)
+        let word = self.grant_with_terminal(provider, handle, Terminal::No);
+        crate::provide::track_derived_word(&provider, handle, || self.cell_words(word, 0));
+        word
     }
     /// Grant an `Env` or `Cred` word whose handle is the run's own grant,
     /// noting its kind so a value that carries it can snapshot it.
@@ -409,9 +421,9 @@ impl Registry {
         );
         id
     }
-    pub(crate) fn grant_terminal(&self, handle: u64) -> Terminal {
+    pub(crate) fn grant_terminal(&self, handle: u64) -> Option<Terminal> {
         let d = self.run.designations.lock().unwrap();
-        d.grants.get(&handle).map_or(Terminal::No, |g| g.terminal)
+        d.grants.get(&handle).map(|g| g.terminal)
     }
     pub(crate) fn grant_provider(&self, handle: u64) -> *const Provider {
         #[cfg(feature = "record")]
@@ -433,7 +445,9 @@ impl Registry {
             return unit;
         }
         let d = self.run.designations.lock().unwrap();
-        d.grants.get(&handle).map_or(0, |g| g.handle)
+        d.grants
+            .get(&handle)
+            .map_or(crate::provide::PORT_ROOT, |g| g.handle)
     }
     /// A virtual provider's live resource: a ClockHand or StopTrigger
     /// (CLOSE_CELL, which closes nothing but itself), a `Served` end
@@ -498,7 +512,8 @@ impl Files {
         self.datagrams.clear();
         self.unix_served.clear();
         self.exec_pipes.clear();
-        if let Some(files) = &mut self.registry.owned.get_mut().unwrap().live {
+        let files = self.registry.owned.lock().unwrap().live.take();
+        if let Some(mut files) = files {
             // SAFETY: the run's Context and providers remain pinned.
             unsafe { files.close(context) };
         }
@@ -637,6 +652,11 @@ pub unsafe extern "C" fn hirsel_core_host_file(
         } else {
             (*registry).registry.file(file)
         };
+        if (*request).operation != CLOSE
+            && !crate::provide::socket_live(&owned.provider, owned.handle)
+        {
+            return crate::provide::withdrawn(context, (*request).site);
+        }
         if (owned.read_only_dir || owned.mode == MODE_READ_DEVICE)
             && matches!((*request).operation, WRITE | WRITE_AT | ZERO_AT)
         {

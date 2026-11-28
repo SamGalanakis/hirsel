@@ -6,10 +6,13 @@ use super::*;
 pub unsafe extern "C" fn hirsel_core_net_split(
     context: *mut Context,
     key: u64,
-    _site: u64,
+    site: u64,
 ) -> Outcome {
     unsafe {
         if let Some(provider) = served_socket(context, key) {
+            if !crate::provide::socket_live(&provider, key) {
+                return crate::provide::withdrawn(context, site);
+            }
             crate::provide::split_socket(&provider, key);
             return Outcome {
                 value: key | 1,
@@ -46,7 +49,7 @@ pub unsafe extern "C" fn hirsel_core_net_join(
     context: *mut Context,
     read: u64,
     write: u64,
-    _site: u64,
+    site: u64,
 ) -> Outcome {
     let refused = || Outcome {
         value: read,
@@ -55,6 +58,13 @@ pub unsafe extern "C" fn hirsel_core_net_join(
         ..Outcome::default()
     };
     unsafe {
+        for key in [read, write] {
+            if let Some(p) = served_socket(context, key)
+                && !crate::provide::socket_live(&p, key)
+            {
+                return crate::provide::withdrawn(context, site);
+            }
+        }
         // A served socket's halves rejoin at its port; a TLS stream's never.
         if let Some(provider) = served_socket(context, read) {
             let unix = {

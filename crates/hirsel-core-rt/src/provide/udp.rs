@@ -9,7 +9,7 @@ const BIND: u64 = 22;
 pub(super) const RECV: u64 = 23;
 pub(super) const SEND: u64 = 24;
 const LOCAL: u64 = 25;
-const SOCKETS: u64 = 17;
+pub(super) const SOCKETS: u64 = 17;
 const PACKETS: u64 = 18;
 
 pub(super) fn operation(op: u64) -> bool {
@@ -138,26 +138,19 @@ pub(super) fn reply(
     tag: u64,
     w: [u64; 6],
     mut outcome: Outcome,
+    sequence: std::ops::Range<u64>,
 ) -> Outcome {
-    let ready = match udp::deliver(&mut p, id, tag, w, &mut outcome) {
-        Ok(true) => {
-            // The server consumed its Call and the rejected datagrams. Requeue
-            // the same pinned request, preserving its caller token and deadline.
-            p.free_staged(id);
-            let mut call = p.calls.remove(&id).expect("live UDP receive");
-            call.taken = false;
-            let next = p.next_id;
-            p.next_id += 1;
-            p.calls.insert(next, call);
-            p.servers.iter().map(|&(t, _)| t).collect()
-        }
-        Ok(false) => p.settle(id, outcome).into_iter().collect(),
-        Err((needed, available)) => {
-            let token = p.close_call(id);
-            drop(p);
-            ready_all(token.into_iter().collect());
-            return refused(needed, available);
-        }
+    let ready = if deliver(&mut p, id, tag, w, &mut outcome, sequence) {
+        // Requeue a receive whose entire batch failed ingress.
+        p.free_staged(id);
+        let mut call = p.calls.remove(&id).expect("live UDP receive");
+        call.taken = false;
+        let next = p.next_id;
+        p.next_id += 1;
+        p.calls.insert(next, call);
+        p.servers.iter().map(|&(t, _)| t).collect()
+    } else {
+        p.settle(id, outcome).into_iter().collect()
     };
     drop(p);
     ready_all(ready);
@@ -171,24 +164,19 @@ fn deliver(
     tag: u64,
     w: [u64; 6],
     outcome: &mut Outcome,
-) -> Result<bool, (u64, u64)> {
+    sequence: std::ops::Range<u64>,
+) -> bool {
     let call = &p.calls[&id];
     // SAFETY: the reply was validated and the caller cannot collect until settlement.
     unsafe {
         let request = &*call.request;
         match tag {
             SOCKETS => {
-                let needed = HANDLE_ROOM * w[5];
-                let available = p.room - p.used;
-                if needed > available {
-                    return Err((needed, available));
-                }
-                p.used += needed;
                 let mut keys = Vec::with_capacity(w[5] as usize);
-                for offset in 0..w[5] {
+                for (offset, seq) in (0..w[5]).zip(sequence) {
                     let server_id = w[0] + offset;
                     p.handles.insert(server_id, Handle::new(Kind::Udp));
-                    keys.push(p.issue_key(server_id));
+                    keys.push(p.issue_key(server_id, seq));
                 }
                 served::deliver_address(request, address(w).unwrap(), keys);
             }
@@ -196,12 +184,12 @@ fn deliver(
             PACKETS => {
                 outcome.value =
                     served::deliver_receive(request, &call.staged_packets, &call.staged);
-                return Ok(outcome.value == 0);
+                return outcome.value == 0;
             }
             _ => {}
         }
     }
-    Ok(false)
+    false
 }
 
 pub(crate) fn release_udp(provider: &Provider, key: u64, retirement: Retirement) {
@@ -243,12 +231,13 @@ pub unsafe extern "C" fn hirsel_core_udp_fill_packets(
     unsafe {
         let (port, id) = call_of(context, call_key);
         let registry = &files(context).registry;
-        let Cell::Port(own) = cell(registry.file_provider(served_key).state) else {
-            unreachable!("a Served designates a port")
-        };
         let mut p = lock(port);
         let call = &p.calls[&id];
-        if !ptr::eq(&**own, port) || call.finished || call.answer.is_some() || call.words[0] != RECV
+        if registry.file_provider(served_key).state != registry.file_provider(call_key).state
+            || registry.file_handle(served_key) != p.root
+            || call.finished
+            || call.answer.is_some()
+            || call.words[0] != RECV
         {
             return Outcome::default();
         }

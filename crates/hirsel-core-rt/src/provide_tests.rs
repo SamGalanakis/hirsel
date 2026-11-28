@@ -24,6 +24,7 @@ fn a_dir_port_refuses_every_handle_it_does_not_hold_live_for_the_op() {
     port.handles.insert(7, handle(Kind::File, State::Closing));
     port.handles
         .insert(8, handle(Kind::File, State::Released(3)));
+    port.keys.extend([(5, 5), (6, 6), (7, 7), (8, 8)]);
     port.next_id = 9;
     let mut cell = cells::test_slot(Cell::Port(Box::new(Mutex::new(port))));
     let state = (&raw mut *cell).cast::<u8>();
@@ -83,6 +84,7 @@ fn a_withdrawn_port_settles_its_calls_and_answers_bounds_but_to_a_close() {
     port.handles.insert(0, handle(Kind::Dir, State::Live));
     port.handles.insert(5, handle(Kind::File, State::Live));
     port.used = 2 * HANDLE_ROOM;
+    port.keys.insert(5, 5);
     port.next_id = 6;
     port.servers.push((9, false));
     let mut cell = cells::test_slot(Cell::Port(Box::new(Mutex::new(port))));

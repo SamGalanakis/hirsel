@@ -35,31 +35,7 @@ const HANDLE: u64 = 1 << 60;
 const OVERSIZE: u8 = 12;
 const EXHAUSTED: u8 = 13;
 
-pub(crate) fn valid_creation(
-    requested: Address,
-    actual: Address,
-    binding: bool,
-    first: u64,
-    count: u64,
-    expected_count: u64,
-    fresh: impl FnOnce(std::ops::RangeInclusive<u64>) -> bool,
-) -> bool {
-    if first == 0 || count == 0 || count != expected_count || actual.family != requested.family {
-        return false;
-    }
-    let Some(last) = first.checked_add(count - 1) else {
-        return false;
-    };
-    let endpoint = if binding {
-        actual.hi == requested.hi
-            && actual.lo == requested.lo
-            && actual.port != 0
-            && (requested.port == 0 || actual.port == requested.port)
-    } else {
-        actual.hi == 0 && actual.lo == 0 && actual.port == 0
-    };
-    endpoint && fresh(first..=last)
-}
+pub(crate) use served::valid_creation;
 
 pub(crate) fn is_socket(key: u64) -> bool {
     key & HANDLE != 0 && key < HANDLE * 2
@@ -784,6 +760,10 @@ unsafe fn create(
         crate::process::deny_describe_capability(context);
         let files = (*context).host_files;
         let provider = *hirsel_core_capability_provider(context, net);
+        let handle = hirsel_core_capability_handle(context, net);
+        if !crate::provide::grant_live(&provider, handle) {
+            return fail(crate::provide::withdrawn(context, site));
+        }
         let served = crate::provide::owns(&provider);
         #[cfg(feature = "record")]
         let taped = crate::tape::owns(&provider);
@@ -792,7 +772,6 @@ unsafe fn create(
         if !served && !taped && !crate::os::owns(&provider) {
             return fail(DENIED);
         }
-        let handle = hirsel_core_capability_handle(context, net);
         #[cfg(feature = "record")]
         let rules_id = if taped {
             crate::tape::net_rules(&provider, handle)
@@ -804,6 +783,7 @@ unsafe fn create(
         if rules_id == 0 {
             return fail(DENIED);
         }
+        let rules_id = std::ptr::from_ref(Rules::from_handle(rules_id)) as u64;
         let rules = {
             let mut cache = run_state((*files).registry.run_grants())
                 .rules
@@ -812,7 +792,7 @@ unsafe fn create(
             cache
                 .entry(rules_id)
                 .or_insert_with(|| {
-                    let rows = (*(rules_id as *const Rules)).as_slice();
+                    let rows = Rules::from_handle(rules_id).as_slice();
                     Arc::new(UdpRules::new(
                         rows.iter()
                             .filter_map(hirsel_core_net::GrantRule::as_address),
@@ -901,6 +881,11 @@ unsafe fn existing(
     unsafe {
         let files = (*context).host_files;
         let resource = (*files).udp_sockets.get(&key).unwrap();
+        if let Carrier::Served(socket) = &resource.carrier
+            && !crate::provide::socket_live(&resource.provider, socket.key())
+        {
+            return fail(crate::provide::withdrawn(context, site));
+        }
         if operation != UDP_SEND && !resource.receiving {
             return fail(DENIED);
         }

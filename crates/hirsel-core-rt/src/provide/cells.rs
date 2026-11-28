@@ -1,11 +1,6 @@
-//! MEM-24: every cell, a port included, is charged to the limit current at its
-//! construction and withdrawn when that limit ends. Slots outlive their cells:
-//! a withdrawn clock, random or process slot is reused by the next cell of its
-//! kind, and the generation a live designation carries tells a copy that
-//! outlived its limit from the slot's current cell. A port's designations
-//! carry no generation (a grant's handle is its rules, a `Call`'s its id), so a
-//! withdrawn port keeps its slot until teardown, sealed and empty, and answers
-//! every operation but a close with Bounds.
+//! MEM-24: slots are pinned for the run. A withdrawal retires the cell's
+//! designations before its slot can serve another generation. A port slot
+//! keeps its vocabulary so parked callers can retire their typed deadlines.
 use super::*;
 use crate::limit::Payer;
 use std::collections::HashMap;
@@ -17,18 +12,17 @@ pub(crate) struct Slot {
     generation: AtomicU64,
     pub(super) cell: Cell,
     provider: Provider,
+    kind: usize,
 }
 
 /// The run's slots, each charged cell's payer and charge, and the withdrawn
-/// slots of each reusable kind (a withdrawn port's is never reused).
+/// slots of each kind.
 #[derive(Default)]
 pub(crate) struct Table {
     slots: Vec<Box<Slot>>,
     charged: HashMap<usize, (Payer, u64)>,
-    /// Each withdrawable cell's grant word, held key (0 for none) and the
-    /// address of the registry that holds the key.
-    words: HashMap<usize, (u64, u64, usize)>,
-    free: [Vec<usize>; 3],
+    words: HashMap<usize, crate::host_file::CellWords>,
+    free: [Vec<usize>; 7],
     next: u64,
 }
 
@@ -63,12 +57,12 @@ static BY_LIMIT: Mutex<BTreeMap<usize, Vec<(usize, usize)>>> = Mutex::new(BTreeM
 static WITHDRAWABLE: AtomicUsize = AtomicUsize::new(0);
 
 /// A reusable cell's kind: the free list its withdrawn slot joins.
-fn kind(cell: &Cell) -> Option<usize> {
+fn kind(cell: &Cell) -> usize {
     match cell {
-        Cell::Clock(_) => Some(0),
-        Cell::Random(_) => Some(1),
-        Cell::Process(_) => Some(2),
-        Cell::Port(_) => None,
+        Cell::Clock(_) => 0,
+        Cell::Random(_) => 1,
+        Cell::Process(_) => 2,
+        Cell::Port(port) => 3 + lock(port).vocab as usize,
     }
 }
 
@@ -123,9 +117,21 @@ impl Cells {
         let cell = make();
         let kind = kind(&cell);
         let mut table = lock(&self.0);
+        if table.next == PORT_ROOT - 1 {
+            drop(table);
+            drop(cell);
+            payer.refund_run_owned(charge);
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostHandles"));
+        }
         table.next += 1;
-        let generation = table.next;
-        let reused = kind.and_then(|k| table.free[k].pop());
+        let generation = if let Cell::Port(p) = &cell {
+            let root = PORT_ROOT | table.next;
+            lock(p).root = root;
+            root
+        } else {
+            table.next
+        };
+        let reused = table.free[kind].pop();
         let address = match reused {
             Some(address) => {
                 // SAFETY: the table owns the slot; its kind matches.
@@ -137,6 +143,7 @@ impl Cells {
                 let mut slot = Box::new(Slot {
                     generation: AtomicU64::new(generation),
                     cell,
+                    kind,
                     provider: PROVIDER,
                 });
                 let address = &raw const *slot as usize;
@@ -169,11 +176,29 @@ impl Cells {
         (provider, generation): (Provider, u64),
         close_op: Option<u8>,
     ) -> Outcome {
-        let value = files.registry.grant(provider, generation);
+        self.designate_with_terminal(
+            files,
+            (provider, generation),
+            close_op,
+            crate::host_file::Terminal::No,
+        )
+    }
+
+    pub(super) fn designate_with_terminal(
+        &self,
+        files: &crate::host_file::Files,
+        (provider, generation): (Provider, u64),
+        close_op: Option<u8>,
+        terminal: crate::host_file::Terminal,
+    ) -> Outcome {
+        let value = files
+            .registry
+            .grant_with_terminal(provider, generation, terminal);
         let held = close_op.map_or(0, |op| files.registry.held(provider, generation, op));
-        let registry = std::ptr::from_ref(&files.registry) as usize;
-        let entry = (value, held, registry);
-        lock(&self.0).words.insert(provider.state as usize, entry);
+        lock(&self.0).words.insert(
+            provider.state as usize,
+            files.registry.cell_words(value, held),
+        );
         Outcome {
             value,
             written: held,
@@ -189,7 +214,6 @@ impl Cells {
     fn withdraw(&self, address: usize) {
         // SAFETY: the table owns the slot until teardown.
         let slot = unsafe { slot(address as *mut u8) };
-        let generation = slot.generation.load(Ordering::Relaxed);
         let mut tokens = Vec::new();
         match &slot.cell {
             Cell::Clock(clock) => {
@@ -217,34 +241,24 @@ impl Cells {
             }
             Cell::Port(port) => {
                 let retired;
-                (tokens, retired) = lock(port).withdraw();
+                {
+                    let mut p = lock(port);
+                    slot.generation.store(0, Ordering::Relaxed);
+                    (tokens, retired) = p.withdraw();
+                }
                 drop(retired);
             }
         }
         lock(&IDLE).retain(|_, (cell, _)| *cell != address);
         lock(&SERVERS).retain(|_, (cell, _)| *cell != address);
-        let (charged, words) = {
+        let charged = {
             let mut table = lock(&self.0);
-            let charged = table.charged.remove(&address);
-            if let Some(kind) = kind(&slot.cell) {
-                table.free[kind].push(address);
+            if let Some(words) = table.words.remove(&address) {
+                words.retire();
             }
-            (charged, table.words.remove(&address))
+            table.free[slot.kind].push(address);
+            table.charged.remove(&address)
         };
-        // The words are forgotten through the withdrawing task's registry,
-        // which is live; a word it cannot reach is forgotten at teardown.
-        let context = crate::tasks::current_context();
-        if let Some((word, held, registry)) = words
-            && !context.is_null()
-        {
-            // SAFETY: the running task pins its context and files.
-            let files = unsafe { &*(*context).host_files };
-            if std::ptr::eq(&files.registry.run_grants().cells, self) {
-                let own = std::ptr::from_ref(&files.registry) as usize == registry;
-                let held = if own && held != 0 { Some(held) } else { None };
-                files.registry.retire(word, address, generation, held);
-            }
-        }
         ready_all(tokens);
         if let Some((payer, charge)) = charged {
             payer.refund_run_owned(charge);
@@ -273,7 +287,15 @@ impl Port {
             self.free_staged(id);
             self.prune(id);
         }
-        tokens.extend(self.servers.drain(..).map(|(token, _)| token));
+        tokens.extend(
+            std::mem::take(&mut self.servers)
+                .into_iter()
+                .map(|(token, _)| token),
+        );
+        for words in std::mem::take(&mut self.derived_words) {
+            words.retire();
+        }
+        self.grants.clear();
         self.handles = BTreeMap::new();
         self.keys = BTreeMap::new();
         self.used = 0;
@@ -287,6 +309,7 @@ impl Port {
 pub(super) fn test_slot(cell: Cell) -> Box<Slot> {
     Box::new(Slot {
         generation: AtomicU64::new(0),
+        kind: kind(&cell),
         cell,
         provider: PROVIDER,
     })
@@ -317,7 +340,7 @@ unsafe extern "C" fn retired_wait(_: *mut u8, _: *mut Request, _: u64) -> Wait {
 unsafe extern "C" fn retired_issue(_: *mut u8, request: *mut Request, _: u64) -> Step {
     // SAFETY: the caller pins the request.
     match unsafe { (*request).operation } {
-        CLOSE | CLOSE_CELL => done(Outcome::default()),
+        CLOSE | CLOSE_CELL | CLOSE_SERVED | CLOSE_CALL | RELEASE => done(Outcome::default()),
         _ => done(WITHDRAWN),
     }
 }
@@ -344,6 +367,15 @@ fn refill(slot: &Slot, cell: Cell, generation: u64) {
         (Cell::Process(old), Cell::Process(new)) => {
             let mut old = lock(old);
             *old = new.into_inner().unwrap_or_else(|e| e.into_inner());
+            slot.generation.store(generation, Ordering::Relaxed);
+        }
+        (Cell::Port(old), Cell::Port(new)) => {
+            let mut old = lock(old);
+            let mut new = new.into_inner().unwrap_or_else(|e| e.into_inner());
+            new.next_id = old.next_id;
+            new.first_call = old.next_id;
+            new.calls = std::mem::take(&mut old.calls);
+            *old = new;
             slot.generation.store(generation, Ordering::Relaxed);
         }
         _ => unreachable!("a free slot is reused by its own kind"),
@@ -396,4 +428,64 @@ pub(super) fn drop_cells(cells: &mut Cells) {
     // SAFETY: Cells owns the table. Its Drop runs once, and its constructor
     // installs this callback before putting any cell in the table.
     unsafe { ManuallyDrop::drop(cells.0.get_mut().unwrap_or_else(|e| e.into_inner())) };
+}
+
+#[cfg(test)]
+#[path = "port_slot_tests.rs"]
+mod port_slot_tests;
+
+/// `provide.stdout/stderr/dir(bytes n)`: a port with room `n`, admitted with
+/// its cell's charge from the current limit until that limit ends. `value`
+/// is the capability's grant (id 0, a Dir port's root) and `written` the
+/// `Served` key; a refusal answers as `Cells::add`.
+/// # Safety
+/// Context is running.
+pub(super) unsafe fn provide_port(
+    context: *mut Context,
+    n: u64,
+    vocab: Vocab,
+    terminal: crate::host_file::Terminal,
+) -> Outcome {
+    // SAFETY: forwarded.
+    let files = unsafe { files(context) };
+    // A sealed port answers Closed (IoError tag 4), or for a Net Reset
+    // (NetError tag 5).
+    let closed = if matches!(vocab, Vocab::Net | Vocab::Exec) {
+        5
+    } else {
+        4
+    };
+    let mut port = Port {
+        vocab,
+        closed: Outcome {
+            error: IoError {
+                tag: closed,
+                code: 0,
+            },
+            ..Outcome::default()
+        },
+        room: n,
+        ..Port::default()
+    };
+    if vocab == Vocab::Dir {
+        port.handles.insert(0, Handle::new(Kind::Dir));
+    }
+    let charge = PROVIDE_CELL.saturating_add(n);
+    // SAFETY: forwarded.
+    let provider = match unsafe {
+        files.registry.run_grants().cells.add(
+            context,
+            || Cell::Port(Box::new(Mutex::new(port))),
+            charge,
+        )
+    } {
+        Ok(provider) => provider,
+        Err(refused) => return refused,
+    };
+    files.registry.run_grants().cells.designate_with_terminal(
+        files,
+        provider,
+        Some(CLOSE_SERVED),
+        terminal,
+    )
 }

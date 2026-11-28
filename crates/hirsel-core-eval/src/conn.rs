@@ -134,7 +134,7 @@ impl Machine<'_> {
         for owner in owners.iter().filter(|owner| owner[1] == SOCKET) {
             let key = self.load(at + owner[0], 8);
             if key & 3 != 0
-                || self.host.world.port_keys.contains_key(&key)
+                || (PORT_KEYS..2 * PORT_KEYS).contains(&key)
                 || self.host.world.tls_writes.contains_key(&key)
             {
                 std::panic::resume_unwind(Box::new(RunStop("UnitSocket")));

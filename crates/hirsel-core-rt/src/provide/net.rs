@@ -1,6 +1,59 @@
 use super::*;
 
+/// Every served Net starts with the same immutable rules. Datagrams and UDP
+/// rules caches may still name this view after the port that issued it ends.
+pub(crate) fn served_rules() -> u64 {
+    struct Root(crate::net::RulesStorage);
+    // SAFETY: RulesStorage owns both boxed allocations. Its view points into
+    // the immutable rows and the process-wide root never moves or drops them.
+    unsafe impl Sync for Root {}
+    unsafe impl Send for Root {}
+    static ROOT: OnceLock<Root> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        use hirsel_core_net::{GrantRule, ResolveRule, TlsRule, UnixDirection, UnixRule};
+        let tls = GrantRule::Tls(TlsRule::served());
+        let resolve = GrantRule::Resolve(ResolveRule::served());
+        let unix = UnixDirection::ALL
+            .into_iter()
+            .map(|dir| GrantRule::Unix(UnixRule::served(dir)));
+        Root(crate::net::RulesStorage::new(
+            GrantRule::served_addresses()
+                .chain([tls, resolve])
+                .chain(unix),
+        ))
+    })
+    .0
+    .handle()
+}
+
 impl Port {
+    fn admits_grant(&self, handle: u64) -> bool {
+        !self.withdrawn && (handle == self.root || self.grants.contains(&handle))
+    }
+
+    pub(super) fn stale(&self, request: &Request) -> bool {
+        let handle = request.handle;
+        if handle & PORT_ROOT != 0 || self.vocab == Vocab::Stream {
+            return handle != self.root;
+        }
+        let root = matches!(
+            request.operation,
+            CONNECT
+                | LISTEN
+                | RESOLVE
+                | EXEC_SPAWN
+                | DATAGRAM_OPEN
+                | UDP_OPEN
+                | UDP_BIND
+                | UDP_BIND_GROUP
+        ) || UnixOperation::describe(request.operation)
+            .is_some_and(|op| matches!(op.fields.first(), Some(UnixField::Root(_))));
+        if root {
+            return !self.admits_grant(handle);
+        }
+        (PORT_KEYS..2 * PORT_KEYS).contains(&handle) && !self.keys.contains_key(&(handle & !3))
+    }
+
     pub(super) fn net_words(&self, request: &Request) -> Option<[u64; 9]> {
         if udp_operation(request.operation) {
             return self.udp_words(request);
@@ -240,4 +293,62 @@ pub(crate) fn release_socket(provider: &Provider, key: u64) -> bool {
         ready_all(servers);
     }
     gone
+}
+
+/// Register a narrowed grant only on the generation that authorized its parent.
+pub(crate) fn grant_child(provider: &Provider, parent: u64, child: u64) -> bool {
+    if retired(provider) {
+        return false;
+    }
+    let Some(port) = net_port(provider) else {
+        return true;
+    };
+    let mut port = lock(port);
+    if !port.admits_grant(parent) {
+        return false;
+    }
+    port.grants.insert(child);
+    true
+}
+pub(crate) fn grant_live(provider: &Provider, handle: u64) -> bool {
+    !retired(provider) && net_port(provider).is_none_or(|p| lock(p).admits_grant(handle))
+}
+
+/// A derived Dir or narrowed grant word lives until its issuing port withdraws.
+/// An already committed reply may publish after withdrawal. Its fresh word
+/// must immediately resolve to the retired provider.
+pub(crate) fn track_derived_word(
+    provider: &Provider,
+    handle: u64,
+    words: impl FnOnce() -> crate::host_file::CellWords,
+) {
+    if let Some(port) = net_port(provider) {
+        let mut p = lock(port);
+        if !p.withdrawn && (p.keys.contains_key(&handle) || p.grants.contains(&handle)) {
+            p.derived_words.push(words());
+        } else {
+            drop(p);
+            words().retire();
+        }
+    }
+}
+
+pub(crate) fn socket_live(provider: &Provider, key: u64) -> bool {
+    net_port(provider).is_none_or(|p| lock(p).keys.contains_key(&(key & !3)))
+}
+
+/// NET-18 counts belong to the generation that authorized the connect.
+pub(crate) fn port_denials(
+    provider: &Provider,
+    handle: u64,
+    increment: Option<usize>,
+) -> Option<Result<[u64; 2], ()>> {
+    let mut p = lock(net_port(provider)?);
+    if !p.admits_grant(handle) {
+        return Some(Err(()));
+    }
+    if let Some(index) = increment {
+        p.denials[index] += 1;
+    }
+    Some(Ok(p.denials))
 }

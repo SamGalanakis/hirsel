@@ -101,6 +101,21 @@ pub fn run_entry_with_meter(
     )
 }
 
+/// Observations retained in the entry report.
+pub struct EntryObservations {
+    pub events: bool,
+    pub cleanup_trace: bool,
+}
+
+impl From<bool> for EntryObservations {
+    fn from(events: bool) -> Self {
+        Self {
+            events,
+            cleanup_trace: true,
+        }
+    }
+}
+
 /// As run_entry_with_meter, with an explicitly supplied registry check service.
 #[allow(clippy::too_many_arguments)]
 pub fn run_entry_with_grants(
@@ -112,13 +127,14 @@ pub fn run_entry_with_grants(
     destination: Option<&mut [u8]>,
     instructions: u64,
     revisions: &Revisions,
-    events: bool,
+    observations: impl Into<EntryObservations>,
     sites: &[u64],
     launch: Option<&hirsel_core_ids::launch::Metadata>,
     error_text: Option<ErrorText<'_>>,
     meter: Option<StepMeter>,
     compiler: Option<CompilerGrant>,
 ) -> (Report, Checked) {
+    let observations = observations.into();
     run_world(
         m,
         f,
@@ -136,7 +152,8 @@ pub fn run_entry_with_grants(
             },
             destination,
             revisions: Some(revisions),
-            events,
+            events: observations.events,
+            omit_cleanup_trace: !observations.cleanup_trace,
             process_entry: true,
             launch,
             error_text,

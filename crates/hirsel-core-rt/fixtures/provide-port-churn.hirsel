@@ -1,0 +1,23 @@
+fn batch() {
+    for _ in 0u64 .. 4 {
+        let _ = provide.stdout(bytes 64, None)
+        let _ = provide.stderr(bytes 64, None)
+        let _ = provide.dir(bytes 64)
+        let _ = provide.net(bytes 64)
+        let _ = provide.exec(bytes 64)
+    }
+}
+fn churn(n: u64) -> bool {
+    match (bound bytes 1048576 {
+        match (bound steps n {
+            loop {
+                match (bound bytes 65536 { batch() }) {
+                    Ok(()) => {},
+                    Error(_) => fail("port charge")
+                }
+            }
+        }) { Error(e) => e.steps == n, Ok(_) => false }
+    }) { Ok(exhausted) => exhausted, Error(_) => false }
+}
+pub fn small() -> Result[(), Exit] { if !churn(400000) { fail("budget") }; Ok(()) }
+pub fn large() -> Result[(), Exit] { if !churn(2000000) { fail("budget") }; Ok(()) }

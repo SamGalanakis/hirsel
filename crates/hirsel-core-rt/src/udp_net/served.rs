@@ -262,3 +262,29 @@ pub(crate) unsafe fn deliver_address(r: &Request, endpoint: Address, keys: Vec<u
     call.endpoint = endpoint;
     call.served.ids = keys;
 }
+
+pub(crate) fn valid_creation(
+    requested: Address,
+    actual: Address,
+    binding: bool,
+    first: u64,
+    count: u64,
+    expected_count: u64,
+    fresh: impl FnOnce(std::ops::RangeInclusive<u64>) -> bool,
+) -> bool {
+    if first == 0 || count == 0 || count != expected_count || actual.family != requested.family {
+        return false;
+    }
+    let Some(last) = first.checked_add(count - 1) else {
+        return false;
+    };
+    let endpoint = if binding {
+        actual.hi == requested.hi
+            && actual.lo == requested.lo
+            && actual.port != 0
+            && (requested.port == 0 || actual.port == requested.port)
+    } else {
+        actual.hi == 0 && actual.lo == 0 && actual.port == 0
+    };
+    endpoint && fresh(first..=last)
+}

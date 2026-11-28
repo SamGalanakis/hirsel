@@ -30,6 +30,16 @@ pub(crate) enum Grant {
 }
 
 impl Grant {
+    /// A served generation names the universal root. A narrowed or native
+    /// grant points to the immutable grant pinned by its run.
+    pub(crate) unsafe fn from_handle<'a>(handle: u64) -> &'a Self {
+        if handle & crate::provide::PORT_ROOT != 0 {
+            crate::provide::served_exec()
+        } else {
+            unsafe { &*(handle as *const Self) }
+        }
+    }
+
     pub(crate) fn rules(&self) -> &ExecRules {
         match self {
             #[cfg(any(target_os = "linux", target_os = "macos"))]

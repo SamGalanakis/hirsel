@@ -136,31 +136,7 @@ pub unsafe extern "C" fn hirsel_core_capability_handle(
         }
     }
 }
-/// Query the immutable terminal bit on a granted or virtual stream.
-/// # Safety
-/// Context is running and handle designates a stream grant in this run.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_stream_is_terminal(
-    context: *mut Context,
-    handle: u64,
-    _kind: u8,
-    _site: u64,
-) -> crate::provider::Outcome {
-    // SAFETY: operands designate a valid entry or run-owned virtual grant.
-    let terminal = unsafe {
-        crate::process::deny_describe_capability(context);
-        if handle & crate::host_file::DYNAMIC_GRANT != 0 {
-            (*(*context).host_files).registry.grant_terminal(handle)
-                != crate::host_file::Terminal::No
-        } else {
-            (*(*(*context).run).capabilities.add((handle - 1) as usize)).terminal
-        }
-    };
-    crate::provider::Outcome {
-        value: u64::from(terminal),
-        ..Default::default()
-    }
-}
+pub use crate::host_ops::hirsel_core_stream_is_terminal;
 
 /// Operations required by a live Process grant. The generated launcher names
 /// this table only when main can receive Process.

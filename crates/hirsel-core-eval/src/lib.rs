@@ -30,8 +30,8 @@ mod data_decode;
 mod field_steps;
 mod metering;
 pub use metering::{
-    CompilerGrant, StepMeter, run_args, run_args_with_meter, run_entry, run_entry_with_grants,
-    run_entry_with_meter, run_injected,
+    CompilerGrant, EntryObservations, StepMeter, run_args, run_args_with_meter, run_entry,
+    run_entry_with_grants, run_entry_with_meter, run_injected,
 };
 mod flat;
 mod footprint;
@@ -45,6 +45,7 @@ mod key_share;
 mod launch;
 mod map;
 mod media;
+mod port_slots;
 mod provide;
 mod pure;
 mod scram;
@@ -237,10 +238,11 @@ struct World {
     cells: Vec<VirtualCell>,
     /// A served Dir's derived handles: handle `PORT_HANDLE + i` is the port
     /// and server id at `i`.
-    port_handles: Vec<(usize, u64)>,
-    /// A served Net's grants (in `network.grants`, so `net.narrow` works on
-    /// them as on any Net) and their port.
-    net_ports: BTreeMap<u64, usize>,
+    port_handles: BTreeMap<u64, (usize, u64)>,
+    free_ports: [Vec<usize>; 4],
+    next_port_word: u64,
+    /// Each live port root and narrowed grant names one physical cell slot.
+    port_grants: BTreeMap<u64, usize>,
     /// NET-18's `not_public` refusals per provider: a served Net's port, or
     /// `None` for the run's own provider. Every Net from one provider shares it.
     not_public: BTreeMap<Option<usize>, u64>,
@@ -249,7 +251,7 @@ struct World {
     narrowing: BTreeMap<u64, (u64, Vec<hirsel_core_net::GrantRule>, bool)>,
     /// NET-18's `own_address` refusals per served Net's port.
     own_address: BTreeMap<Option<usize>, u64>,
-    exec_grants: Vec<(usize, hirsel_core_net::exec::ExecRules)>,
+    exec_grants: BTreeMap<u64, (usize, hirsel_core_net::exec::ExecRules)>,
     exec_handles: BTreeMap<u64, Limit>,
     /// A served Net caller's socket and listener keys (direction bits clear):
     /// port, server id and the peer's port, which a handshake's rule checks
@@ -262,10 +264,10 @@ struct World {
 const CELL_BASE: u64 = 0x80_0000;
 const SCRAM_BASE: u64 = 1 << 60;
 const PORT_HANDLE: u64 = 1 << 61;
-const EXEC_GRANT: u64 = 1 << 58;
-/// A port's `Served` end is `SERVED_BASE + i` for cell `i`; its call `id` is
-/// `CALL_BASE + (i << 32) + id`.
-const SERVED_BASE: u64 = 0x90_0000;
+const PORT_GRANT: u64 = 1 << 57;
+/// A Served word uses its root grant sequence. A Call packs the slot index
+/// and the call ID, which keeps increasing across generations of that slot.
+const SERVED_BASE: u64 = 1 << 58;
 const CALL_BASE: u64 = 1 << 62;
 /// A served Net caller's keys (native `provide::PORT_KEYS`): clear of the
 /// host registry keys.
@@ -396,6 +398,7 @@ enum VirtualCell {
         waiters: Vec<usize>,
     },
     Port {
+        first_call: u64,
         vocab: Vocab,
         /// A stream port's terminal size word (`cols | rows << 16`); zero is no terminal.
         size: u64,
@@ -792,7 +795,7 @@ struct Machine<'m, H = WorldHost<'m>> {
     arrays: Vec<(FieldTy, u64)>,
     /// By inline array, its element's stride and what an element holds.
     array_steps: Vec<(u64, At)>,
-    trace: Vec<u64>,
+    trace: Option<Vec<u64>>,
     /// The last destination identity handed out (`rt.dest_id`).
     dests: u64,
     /// FAIL-17's glue worklist (`rt.glue_push`), and the fixed block `rt.glue_pop`
@@ -1314,6 +1317,7 @@ struct WorldInput<'a> {
     destination: Option<&'a mut [u8]>,
     events: bool,
     process_entry: bool,
+    omit_cleanup_trace: bool,
     /// PROG-3: render `main`'s `Error(e)` with this program, before the run's
     /// memory is released, into the slot.
     error_text: Option<ErrorText<'a>>,
@@ -1370,6 +1374,9 @@ fn run_world(
     let m = native.as_ref();
     work_tally::module(m);
     let mut mach = Machine::new(m, recipes, limit, &input);
+    if input.omit_cleanup_trace {
+        mach.trace = None;
+    }
     mach.install_statics();
     launch::install(&mut mach, f, input.revisions);
     for a in input.argv {
@@ -1492,7 +1499,7 @@ fn run_world(
         step_refusal: mach.step_refusal,
         used: mach.root().used(),
         peak_reserved: mach.peak_reserved,
-        trace: mach.trace,
+        trace: mach.trace.unwrap_or_default(),
         admissions: mach.admissions,
         stdout: mach.host.world.stdout,
         stderr: mach.host.world.stderr,
@@ -1712,7 +1719,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             causes: HashMap::new(),
             arrays: Vec::new(),
             array_steps: Vec::new(),
-            trace: Vec::new(),
+            trace: Some(Vec::new()),
             dests: 0,
             glue: Vec::new(),
             glue_entry: 0,
@@ -1920,7 +1927,7 @@ impl<'m> Machine<'m> {
             causes: HashMap::new(),
             arrays: Vec::new(),
             array_steps: Vec::new(),
-            trace: Vec::new(),
+            trace: Some(Vec::new()),
             dests: 0,
             glue: Vec::new(),
             glue_entry: 0,
@@ -2025,6 +2032,9 @@ impl<'m> Machine<'m> {
 
 impl Machine<'_> {
     fn cell(&self, handle: u64) -> Option<usize> {
+        if let Some(&slot) = self.host.world.port_grants.get(&handle) {
+            return Some(slot);
+        }
         handle
             .checked_sub(CELL_BASE)
             .map(|i| i as usize)
@@ -2285,7 +2295,7 @@ impl Machine<'_> {
     /// handle: the root is the cell's own capability.
     fn port_handle(&self, h: u64) -> Option<(usize, u64)> {
         if (PORT_HANDLE..CALL_BASE).contains(&h) {
-            return Some(self.host.world.port_handles[(h - PORT_HANDLE) as usize]);
+            return self.host.world.port_handles.get(&h).copied();
         }
         let c = self.cell(h)?;
         matches!(
@@ -2326,97 +2336,6 @@ impl Machine<'_> {
         }
     }
 
-    /// `provide.next`: the oldest queued call, or None once quiescence answers.
-    fn port_next(&mut self, t: &Task, c: usize) -> X<Vec<u64>> {
-        self.check_cancel(t)?;
-        loop {
-            if self.host.world.withdrawn.contains(&c) {
-                return Err(Stop::Cause("Bounds"));
-            }
-            let queued = self.host.world.cells[c].queued();
-            let VirtualCell::Port {
-                vocab,
-                calls,
-                servers,
-                handles,
-                used,
-                next,
-                ..
-            } = &mut self.host.world.cells[c]
-            else {
-                unreachable!()
-            };
-            let quiesced = servers.iter().any(|&(k, q)| k == t.k && q);
-            if queued.is_some() || quiesced {
-                servers.retain(|&(k, _)| k != t.k);
-                let id = match queued {
-                    None => return Ok(vec![0, 0, 0, 0]),
-                    Some(Queued::Call(id)) => {
-                        let call = calls.get_mut(&id).unwrap();
-                        call.taken = true;
-                        call.held = true;
-                        id
-                    }
-                    Some(Queued::Released(h, write)) => {
-                        // The notice's record leaves the room with the last
-                        // part's notice, and becomes a Call that needs no reply.
-                        let handle = handles.get_mut(&h).unwrap();
-                        let part = match (handle.kind, handle.write, write) {
-                            (PORT_PIPE_READ, _, _) | (_, Some(_), false) => 1,
-                            (PORT_PIPE_WRITE, _, _) | (_, Some(_), true) => 2,
-                            _ => 0,
-                        };
-                        if write {
-                            handle.write = Some(PortState::Gone);
-                        } else {
-                            handle.state = PortState::Gone;
-                        }
-                        if handle.done() {
-                            handles.remove(&h);
-                            *used -= HANDLE_ROOM;
-                        }
-                        let id = *next;
-                        *next += 1;
-                        let mut words = [0; 9];
-                        match *vocab {
-                            Vocab::Net => words[..3].copy_from_slice(&[NET_RELEASED, h, part]),
-                            Vocab::Exec => words[..3].copy_from_slice(&[exec::RELEASED, h, part]),
-                            _ => words[..2].copy_from_slice(&[DirOp::Released.word(), h]),
-                        }
-                        calls.insert(
-                            id,
-                            PortCall {
-                                caller: t.k,
-                                words,
-                                fields: Vec::new(),
-                                out: None,
-                                staged: Vec::new(),
-                                taken: true,
-                                held: true,
-                                answer: None,
-                                finished: true,
-                                secret: None,
-                            },
-                        );
-                        id
-                    }
-                };
-                return Ok(vec![CALL_BASE + ((c as u64) << 32) + id, 0, 0, 1]);
-            }
-            if !servers.iter().any(|&(k, _)| k == t.k) {
-                servers.push((t.k, false));
-            }
-            self.host.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
-            self.park(Some(Wait::Network(None)));
-            if std::mem::take(&mut self.host.sched.tasks[t.k].cancelled) {
-                if let VirtualCell::Port { servers, .. } = &mut self.host.world.cells[c] {
-                    servers.retain(|&(k, _)| k != t.k);
-                }
-                self.check_cancel(t)?;
-            }
-        }
-    }
-
     /// A `Call` dropped without a reply, or the `Served` end cleaned (sealing
     /// the port): settle as sealed.
     fn port_drop(&mut self, h: u64) {
@@ -2432,7 +2351,14 @@ impl Machine<'_> {
             callers.extend(cell.settle(id, port_outcome(vocab, op, port_closed(vocab, op))));
             cell.prune(id);
         } else {
-            let c = (h - SERVED_BASE) as usize;
+            let Some(&c) = self
+                .host
+                .world
+                .port_grants
+                .get(&(h - SERVED_BASE + PORT_GRANT))
+            else {
+                return;
+            };
             let cell = &mut self.host.world.cells[c];
             let VirtualCell::Port {
                 sealed,
@@ -2666,7 +2592,14 @@ impl Machine<'_> {
     fn port_reply(&mut self, a: &[u64]) -> X<Vec<u64>> {
         let ok = |value: u64| vec![value, 0, 0, 0];
         let (c, id) = Self::call_of(a[1]);
-        if c != (a[0] - SERVED_BASE) as usize {
+        if self
+            .host
+            .world
+            .port_grants
+            .get(&(a[0] - SERVED_BASE + PORT_GRANT))
+            != Some(&c)
+            || matches!(self.host.world.cells[c], VirtualCell::Port {first_call, ..} if id < first_call)
+        {
             self.port_drop(a[1]);
             return Ok(ok(1));
         }
@@ -2722,8 +2655,7 @@ impl Machine<'_> {
             handle.accepted_socket = vocab == Vocab::Net && op == 3;
             handles.insert(answer[0], handle);
             if vocab == Vocab::Net {
-                let key = PORT_KEYS | (self.host.world.next_port_key << 2);
-                self.host.world.next_port_key += 1;
+                let key = port_slots::next_socket_key(&mut self.host.world.next_port_key);
                 // A connected socket's peer is the dialed address; an
                 // accepted one's, the reply's.
                 let peer = if op == 0 { dialed } else { a[7] };
@@ -2733,8 +2665,9 @@ impl Machine<'_> {
                     .insert(key, (c, answer[0], peer as u16));
                 answer[0] = key;
             } else {
-                self.host.world.port_handles.push((c, answer[0]));
-                answer[0] = PORT_HANDLE + self.host.world.port_handles.len() as u64 - 1;
+                let key = self.host.world.port_word(PORT_HANDLE);
+                self.host.world.port_handles.insert(key, (c, answer[0]));
+                answer[0] = key;
             }
         }
         let mut pipes = [0; 3];
@@ -2764,8 +2697,7 @@ impl Machine<'_> {
                     _ => (PORT_PIPE_READ, 1),
                 };
                 handles.insert(id, PortHandle::new(kind));
-                let key = PORT_KEYS | (self.host.world.next_port_key << 2);
-                self.host.world.next_port_key += 1;
+                let key = port_slots::next_socket_key(&mut self.host.world.next_port_key);
                 self.host.world.port_keys.insert(key, (c, id, 0));
                 if i == 0 {
                     answer[0] = key;
@@ -3147,7 +3079,13 @@ impl Machine<'_> {
             _ => None,
         };
         let row = self.port_call_with(t, c, w, fields, out, live, &mut None, deadline);
-        row.map(|row| self.own_address(public, c, row))
+        row.map(|row| {
+            self.own_address(
+                public && self.host.world.port_grants.get(&a[0]) == Some(&c),
+                c,
+                row,
+            )
+        })
     }
 
     /// `net.join` on a served Net socket's live halves (native
@@ -3226,10 +3164,7 @@ impl Machine<'_> {
         use hirsel_core_net::exec::LogicalLaunch;
         self.check_cancel(t)?;
         if op == HostOp::ExecSpawn {
-            let Some((c, rules)) = a[0]
-                .checked_sub(EXEC_GRANT)
-                .and_then(|i| self.host.world.exec_grants.get(i as usize))
-            else {
+            let Some((c, rules)) = self.host.world.exec_grants.get(&a[0]) else {
                 std::panic::resume_unwind(Box::new(RunStop("NativeExec")));
             };
             let string = |at| std::str::from_utf8(self.carrier_bytes(at)).unwrap();
@@ -3307,7 +3242,7 @@ impl Machine<'_> {
         };
         let answer =
             self.port_call_with(t, c, words, Vec::new(), None, live, &mut None, deadline)?;
-        if wait && answer[1] == 0 {
+        if wait && answer[1] == 0 && self.port_socket(a[0], PORT_PROC).is_some() {
             self.host.world.cells[c]
                 .port()
                 .1
@@ -3320,10 +3255,7 @@ impl Machine<'_> {
 
     fn exec_narrow(&mut self, t: &Task, a: &[u64]) -> Vec<u64> {
         use hirsel_core_net::exec::{ArgToken, ExecRule, Form, Names};
-        let Some((c, parent)) = a[0]
-            .checked_sub(EXEC_GRANT)
-            .and_then(|i| self.host.world.exec_grants.get(i as usize))
-        else {
+        let Some((c, parent)) = self.host.world.exec_grants.get(&a[0]) else {
             std::panic::resume_unwind(Box::new(RunStop("NativeExec")));
         };
         let c = *c;
@@ -3360,8 +3292,8 @@ impl Machine<'_> {
         if let Err(available) = self.admit_charge(payer, charge, size.is_none()) {
             return vec![charge, 2, 0, available];
         }
-        let key = EXEC_GRANT + self.host.world.exec_grants.len() as u64;
-        self.host.world.exec_grants.push((c, rules));
+        let key = self.host.world.new_port_grant(c);
+        self.host.world.exec_grants.insert(key, (c, rules));
         self.host.world.grant_charges.push((payer.clone(), charge));
         vec![key, 0, 0, 0]
     }
@@ -3377,7 +3309,7 @@ impl Machine<'_> {
             | HostOp::UnixListen
             | HostOp::DatagramOpen
             | HostOp::DatagramBind => {
-                let Some(&c) = self.host.world.net_ports.get(&key) else {
+                let Some(&c) = self.host.world.port_grants.get(&key) else {
                     return denied();
                 };
                 (key, c, 0, true)
@@ -3480,7 +3412,7 @@ impl Machine<'_> {
         };
         let result = self.port_call_with(t, c, w, fields, out, live, &mut None, deadline)?;
         if result[1] == 0 {
-            if creates_datagram {
+            if creates_datagram && self.host.world.port_keys.contains_key(&result[0]) {
                 self.host.world.datagrams.insert(
                     result[0],
                     DatagramState {
@@ -3489,8 +3421,10 @@ impl Machine<'_> {
                         connected: false,
                     },
                 );
-            } else if op == HostOp::DatagramConnect {
-                self.host.world.datagrams.get_mut(&key).unwrap().connected = true;
+            } else if op == HostOp::DatagramConnect
+                && let Some(state) = self.host.world.datagrams.get_mut(&key)
+            {
+                state.connected = true;
             }
         }
         Ok(result)
@@ -3515,7 +3449,7 @@ impl Machine<'_> {
                     .iter()
                     .any(|r| matches!(r, GrantRule::Resolve(rule) if rule.permits(&name)))
             });
-        if allowed && let Some(&c) = self.host.world.net_ports.get(&a[0]) {
+        if allowed && let Some(&c) = self.host.world.port_grants.get(&a[0]) {
             return self.net_call(t, HostOp::Resolve, c, 0, true, a);
         }
         Ok(vec![0, 1, 0, 0])
@@ -3561,19 +3495,21 @@ impl Machine<'_> {
         if let Err(available) = self.admit(payer, charge) {
             return vec![charge, 2, 0, available];
         }
-        let grants = &mut self.host.world.network.grants;
-        let key = grants
-            .last_key_value()
-            .map_or(0, |(&key, _)| key)
-            .checked_add(1)
-            .expect("run-local handle counter");
-        grants.insert(key, intersections);
+        let key = if let Some(&c) = self.host.world.port_grants.get(&parent) {
+            self.host.world.new_port_grant(c)
+        } else {
+            self.host
+                .world
+                .network
+                .grants
+                .range(..PORT_GRANT)
+                .next_back()
+                .map_or(0, |(&key, _)| key)
+                .checked_add(1)
+                .expect("run-local handle counter")
+        };
+        self.host.world.network.grants.insert(key, intersections);
         self.host.world.grant_charges.push((payer.clone(), charge));
-        if let Some(&c) = self.host.world.net_ports.get(&parent) {
-            // A narrowed served Net keeps its port (native `narrow` keeps
-            // the provider).
-            self.host.world.net_ports.insert(key, c);
-        }
         vec![key, 0, 0, 0]
     }
 
@@ -4070,13 +4006,15 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
     fn drop_resource(&mut self, t: &mut Task, blk: u64, ty: TypeRef) -> bool {
         let (b, _) = split(blk);
         // Report::trace names a declared u64 field, never carrier/pointer bytes.
-        if let Shaped::Record(fields) = &self.shape(ty).body
+        if self.trace.is_some()
+            && let Shaped::Record(fields) = &self.shape(ty).body
             && let Some(i) = fields
                 .iter()
                 .position(|f| f.ty == FieldTy::Scalar(Scalar::U64))
         {
             let offset = self.fixed(ty).offsets[0][i];
-            self.trace.push(self.load(blk + offset, 8));
+            let word = self.load(blk + offset, 8);
+            self.trace.as_mut().unwrap().push(word);
         }
         let mut failed = false;
         if let Some(f) = self.shape(ty).finalizer {

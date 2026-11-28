@@ -22,6 +22,17 @@ pub struct Rules {
     pub len: usize,
 }
 impl Rules {
+    /// Native and narrowed grants pin their rule view. All served roots share
+    /// immutable rules and carry their port generation in the request handle.
+    pub(crate) unsafe fn from_handle<'a>(handle: u64) -> &'a Self {
+        let ptr = if handle & crate::provide::PORT_ROOT != 0 {
+            crate::provide::served_rules()
+        } else {
+            handle
+        };
+        unsafe { &*(ptr as *const Self) }
+    }
+
     /// # Safety
     /// The run pins this grant's immutable rows.
     pub(crate) unsafe fn permits(&self, test: impl FnMut(&GrantRule) -> bool) -> bool {
@@ -402,7 +413,14 @@ unsafe fn address_op(
         {
             outcome = tape.carrier(outcome);
         }
-        addr::count_own_address(&*files, &*provider, &network, &outcome, served);
+        addr::count_own_address(
+            &*files,
+            &*provider,
+            &network,
+            &outcome,
+            served,
+            request.handle,
+        );
         let ok = outcome.status == 0 && outcome.error == IoError::OK;
         if ok && (op == CONNECT || served) {
             // A served Net's listeners route to it too.
@@ -464,6 +482,16 @@ impl OwnedNet {
     ) -> Result<Routing, AddressOutcome> {
         unsafe {
             let files = (*context).host_files;
+            let served = served_socket(context, key);
+            if served
+                .as_ref()
+                .is_some_and(|p| !crate::provide::socket_live(p, key))
+            {
+                return Err(AddressOutcome::new(
+                    crate::provide::withdrawn(context, site),
+                    Address::default(),
+                ));
+            }
             if op == SEND_PAIR && write_spent(files, key) {
                 return Err(AddressOutcome::new(RESET, Address::default()));
             }
@@ -497,7 +525,6 @@ impl OwnedNet {
             } else {
                 *operand
             };
-            let served = served_socket(context, key);
             if op == RECV_READY && served.as_ref().is_some_and(crate::provide::exec_port) {
                 // ExecOp has no readiness call: a served pipe is ready at
                 // once and its receive waits (NET-1).
@@ -967,7 +994,14 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
         }
         // A served Net's stream was verified by its server, so it never
         // satisfies a granted Secret (TLS-5, NOTES 6).
-        let served = served_socket(context, key).is_some();
+        let served = served_socket(context, key);
+        if served
+            .as_ref()
+            .is_some_and(|p| !crate::provide::socket_live(p, key))
+        {
+            return crate::provide::withdrawn(context, site);
+        }
+        let served = served.is_some();
         let resolved: Vec<_> = handles
             .iter()
             .map(|&handle| crate::secret::resolve(context, handle))
@@ -1282,81 +1316,17 @@ pub(crate) unsafe fn narrow_add(builder: u64, rule: Option<GrantRule>) -> Outcom
 pub unsafe extern "C" fn hirsel_core_net_narrow_end(
     context: *mut Context,
     builder: u64,
-    _site: u64,
+    site: u64,
 ) -> Outcome {
     // SAFETY: the emitted loop ends each builder exactly once.
     let builder = unsafe { Box::from_raw(builder as *mut Narrowing) };
     if builder.invalid {
         return DENIED;
     }
-    unsafe { narrow(context, builder.net, &builder.rules) }
+    unsafe { narrow(context, builder.net, &builder.rules, site) }
 }
 
-/// NET-6: each parent rule intersected with every rule of the list.
-pub(crate) unsafe fn narrow(context: *mut Context, n: u64, list: &[GrantRule]) -> Outcome {
-    unsafe {
-        crate::process::deny_describe_capability(context);
-        let provider = *hirsel_core_capability_provider(context, n);
-        let parent = hirsel_core_capability_handle(context, n);
-        #[cfg(feature = "record")]
-        let taped = crate::tape::owns(&provider);
-        #[cfg(feature = "record")]
-        let rules_handle = if taped {
-            crate::tape::net_rules(&provider, parent)
-        } else {
-            parent
-        };
-        #[cfg(not(feature = "record"))]
-        let rules_handle = parent;
-        let rules = (*(rules_handle as *const Rules)).as_slice();
-        let intersections: Vec<_> = rules
-            .iter()
-            .flat_map(|r| list.iter().filter_map(move |rule| r.intersect(rule)))
-            .collect();
-        let charge = intersections
-            .iter()
-            .try_fold(0u64, |total, r| total.checked_add(r.logical_size()))
-            .and_then(|n| n.checked_add(7))
-            .map(|n| n & !7);
-        let payer = (*context).payer();
-        if let Err(capacity) = payer.admit_run_owned(charge) {
-            return Outcome {
-                value: capacity.requested,
-                error: IoError { tag: 2, code: 0 },
-                written: capacity.available,
-                status: 0,
-                kind: 0,
-            };
-        }
-        let rules = RulesStorage::new(intersections);
-        let handle = rules.handle();
-        let files = (*context).host_files;
-        (*files)
-            .registry
-            .run_grants()
-            .net_grants
-            .lock()
-            .unwrap()
-            .push(Grant {
-                _rules: rules,
-                payer,
-                charge: charge.unwrap(),
-            });
-        #[cfg(feature = "record")]
-        let value = if taped {
-            let (handle, _group) = crate::tape::narrow_net(&provider, parent, handle);
-            (*files).registry.grant(provider, handle)
-        } else {
-            (*files).registry.grant(provider, handle)
-        };
-        #[cfg(not(feature = "record"))]
-        let value = (*files).registry.grant(provider, handle);
-        Outcome {
-            value,
-            ..Outcome::default()
-        }
-    }
-}
+pub(crate) use addr::narrow;
 
 pub(crate) fn tls_failure(case: u8, detail: u8) -> Outcome {
     Outcome {

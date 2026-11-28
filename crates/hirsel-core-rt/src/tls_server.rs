@@ -161,6 +161,10 @@ pub unsafe extern "C" fn hirsel_core_host_tls_hello(
     unsafe {
         crate::process::deny_describe_capability(context);
         let files = (*context).host_files;
+        if net::served_socket(context, key).is_some_and(|p| !crate::provide::socket_live(&p, key)) {
+            net::hirsel_core_socket_drop(context, key);
+            return crate::provide::withdrawn(context, site);
+        }
         // Only a socket a TCP listener accepted, a host's or a served Net's,
         // or its rejoined halves.
         let Some(&TcpRoute {
@@ -260,8 +264,13 @@ unsafe fn request_network(
 pub unsafe extern "C" fn hirsel_core_tls_server_name(
     context: *mut Context,
     hello: u64,
-    _site: u64,
+    site: u64,
 ) -> Outcome {
+    if unsafe { net::served_socket(context, hello) }
+        .is_some_and(|p| !crate::provide::socket_live(&p, hello))
+    {
+        return unsafe { crate::provide::withdrawn(context, site) };
+    }
     let view = unsafe { (*(*context).host_files).tls_hellos.get(&hello) }
         .map_or(&EMPTY_NAME.0, |record| &record.view);
     Outcome {
@@ -332,6 +341,10 @@ unsafe fn accept(
             net::hirsel_core_socket_drop(context, key);
             return DENIED;
         };
+        if !crate::provide::socket_live(&provider, key) {
+            net::hirsel_core_socket_drop(context, key);
+            return crate::provide::withdrawn(context, site);
+        }
         let key_secret = crate::secret::resolve(context, secret);
         if !key_secret.policy.uses().permits(SecretUse::TLS_SERVE) {
             return refuse(context, key, DENIED);

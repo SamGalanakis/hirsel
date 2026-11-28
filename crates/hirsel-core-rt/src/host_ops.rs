@@ -104,7 +104,10 @@ pub unsafe extern "C" fn hirsel_core_stream_size(
     unsafe {
         crate::process::deny_describe_capability(context);
         let terminal = if handle & DYNAMIC_GRANT != 0 {
-            (*(*context).host_files).registry.grant_terminal(handle)
+            let Some(terminal) = (*(*context).host_files).registry.grant_terminal(handle) else {
+                return crate::provide::withdrawn(context, site);
+            };
+            terminal
         } else {
             Terminal::of((*(*(*context).run).capabilities.add((handle - 1) as usize)).terminal)
         };
@@ -178,6 +181,12 @@ pub unsafe extern "C" fn hirsel_core_host_op(
             OPEN | RENAME | MKDIR | MKDTEMP | MKSTEMP | REMOVE | REMOVE_TREE | SYNC_DIR
             | ZERO_EXTENSION | OPEN_DIR | ENTRIES | STAT => {
                 let rights = handle & DIR_READ_ONLY;
+                let handle = handle & !DIR_READ_ONLY;
+                let provider = hirsel_core_capability_provider(context, handle);
+                request.handle = hirsel_core_capability_handle(context, handle);
+                if crate::provide::retired(&*provider) {
+                    return crate::provide::withdrawn(context, site);
+                }
                 if rights != 0 && needs_writable_dir(op, mode) {
                     return refused(context, site, libc::EACCES);
                 }
@@ -191,9 +200,6 @@ pub unsafe extern "C" fn hirsel_core_host_op(
                 {
                     return refused(context, site, libc::EACCES);
                 }
-                let handle = handle & !DIR_READ_ONLY;
-                let provider = hirsel_core_capability_provider(context, handle);
-                request.handle = hirsel_core_capability_handle(context, handle);
                 if matches!(
                     op,
                     OPEN | MKDIR | REMOVE | REMOVE_TREE | OPEN_DIR | ENTRIES | STAT
@@ -522,5 +528,33 @@ unsafe fn compiler_call(
                 ..Default::default()
             },
         }
+    }
+}
+
+/// Query the immutable terminal bit on a granted or virtual stream.
+/// # Safety
+/// Context is running and handle designates a stream grant in this run.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_stream_is_terminal(
+    context: *mut Context,
+    handle: u64,
+    _kind: u8,
+    site: u64,
+) -> crate::provider::Outcome {
+    // SAFETY: operands designate a valid entry or run-owned virtual grant.
+    let terminal = unsafe {
+        crate::process::deny_describe_capability(context);
+        if handle & crate::host_file::DYNAMIC_GRANT != 0 {
+            let Some(terminal) = (*(*context).host_files).registry.grant_terminal(handle) else {
+                return crate::provide::withdrawn(context, site);
+            };
+            terminal != crate::host_file::Terminal::No
+        } else {
+            (*(*(*context).run).capabilities.add((handle - 1) as usize)).terminal
+        }
+    };
+    crate::provider::Outcome {
+        value: u64::from(terminal),
+        ..Default::default()
     }
 }

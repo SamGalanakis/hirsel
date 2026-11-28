@@ -38,7 +38,7 @@ pub(crate) unsafe fn authorize(provider: &Provider, request: &mut Request) -> bo
         else {
             return false;
         };
-        let rules = &*(handle as *const Rules);
+        let rules = Rules::from_handle(handle);
         if !rules.permits(|rule| matches!(rule, GrantRule::Resolve(rule) if rule.permits(&name))) {
             return false;
         }

@@ -297,8 +297,9 @@ impl Machine<'_> {
         let mut answer = self.port_call(t, c, w, payload, out, live)?;
         if answer[1] == 0 {
             let narrow = a[0] & DIR_READ_ONLY != 0;
-            if op == HostOp::Open {
-                let (_, file) = self.port_handle(answer[0]).expect("a registered file");
+            if op == HostOp::Open
+                && let Some((_, file)) = self.port_handle(answer[0])
+            {
                 let (_, handles, ..) = self.host.world.cells[c].port();
                 let handle = handles.get_mut(&file).unwrap();
                 handle.read_only_file =
@@ -364,7 +365,10 @@ impl Machine<'_> {
                     *stopped = true;
                     ready.append(waiters);
                 }
-                port @ VirtualCell::Port { .. } => ready = withdraw_port(port),
+                port @ VirtualCell::Port { .. } => {
+                    ready = withdraw_port(port);
+                    self.host.world.retire_port(cell);
+                }
             }
             for k in receivers {
                 if matches!(
@@ -442,23 +446,6 @@ impl Machine<'_> {
         if withdrawn(self) {
             return Some(Err(Stop::Cause("Bounds")));
         }
-        if matches!(
-            op,
-            HostOp::ProvideStdout
-                | HostOp::ProvideStderr
-                | HostOp::ProvideDir
-                | HostOp::ProvideNet
-                | HostOp::ProvideExec
-        ) {
-            // A port's room with its cell's charge, held until its limit ends.
-            let payer = t.limits.last().unwrap();
-            let charge = hirsel_core_layout::charge::PROVIDE_CELL.saturating_add(a[0]);
-            if let Err(available) = self.admit(payer, charge) {
-                return Some(Ok(ok(0, available)));
-            }
-            let (w, held) = (&mut self.host.world, (payer.clone(), charge));
-            w.cell_charges.insert(w.cells.len(), held);
-        }
         let new = |w: &mut World, cell| {
             w.cells.push(cell);
             CELL_BASE + w.cells.len() as u64 - 1
@@ -534,64 +521,7 @@ impl Machine<'_> {
             | HostOp::ProvideDir
             | HostOp::ProvideNet
             | HostOp::ProvideExec => {
-                let vocab = match op {
-                    HostOp::ProvideDir => Vocab::Dir,
-                    HostOp::ProvideNet => Vocab::Net,
-                    HostOp::ProvideExec => Vocab::Exec,
-                    _ => Vocab::Stream,
-                };
-                let port = VirtualCell::Port {
-                    vocab,
-                    size: if vocab == Vocab::Stream { a[1] } else { 0 },
-                    sealed: false,
-                    next: 0,
-                    calls: BTreeMap::new(),
-                    servers: Vec::new(),
-                    handles: if vocab == Vocab::Dir {
-                        BTreeMap::from([(0, PortHandle::new(0))])
-                    } else {
-                        BTreeMap::new()
-                    },
-                    room: a[0],
-                    used: 0,
-                };
-                let h = new(&mut self.host.world, port);
-                let served = h - CELL_BASE + SERVED_BASE;
-                if vocab == Vocab::Exec {
-                    let key = EXEC_GRANT + self.host.world.exec_grants.len() as u64;
-                    self.host.world.exec_grants.push((
-                        (h - CELL_BASE) as usize,
-                        hirsel_core_net::exec::ExecRules::universal(),
-                    ));
-                    return Some(Ok(ok(key, served)));
-                }
-                if vocab != Vocab::Net {
-                    return Some(Ok(ok(h, served)));
-                }
-                // A served Net is an ordinary grant of every address, handshake
-                // and name (native `provide_port`), so `net.narrow`
-                // intersects it as any Net's.
-                let tls = hirsel_core_net::GrantRule::Tls(hirsel_core_net::TlsRule::served());
-                let resolve =
-                    hirsel_core_net::GrantRule::Resolve(hirsel_core_net::ResolveRule::served());
-                let rules = hirsel_core_net::GrantRule::served_addresses()
-                    .chain([tls, resolve])
-                    .chain(hirsel_core_net::UnixDirection::ALL.into_iter().map(|dir| {
-                        hirsel_core_net::GrantRule::Unix(hirsel_core_net::UnixRule::served(dir))
-                    }))
-                    .collect();
-                let grants = &mut self.host.world.network.grants;
-                let key = grants
-                    .last_key_value()
-                    .map_or(0, |(&key, _)| key)
-                    .checked_add(1)
-                    .expect("run-local handle counter");
-                grants.insert(key, rules);
-                self.host
-                    .world
-                    .net_ports
-                    .insert(key, (h - CELL_BASE) as usize);
-                ok(key, served)
+                return Some(Ok(self.make_port(t, op, a)));
             }
             HostOp::StdinTerminal | HostOp::StdoutTerminal | HostOp::StderrTerminal => {
                 let terminal = match self.cell(a[0]) {
@@ -612,8 +542,7 @@ impl Machine<'_> {
                 None => ok(0, 0),
             },
             HostOp::PortNext => {
-                let c = (a[0] - SERVED_BASE) as usize;
-                return Some(self.port_next(t, c));
+                return Some(self.port_next(t, a[0] - SERVED_BASE + PORT_GRANT));
             }
             HostOp::CallWord => {
                 let (c, id) = Self::call_of(a[0]);
@@ -650,7 +579,13 @@ impl Machine<'_> {
                 // room too short refuses with error tag 1 (MEM-21).
                 let (c, id) = Self::call_of(a[1]);
                 let (bytes, ..) = self.carrier(a[2]);
-                if c != (a[0] - SERVED_BASE) as usize {
+                if self
+                    .host
+                    .world
+                    .port_grants
+                    .get(&(a[0] - SERVED_BASE + PORT_GRANT))
+                    != Some(&c)
+                {
                     return Some(Ok(ok(0, 0)));
                 }
                 let VirtualCell::Port {
@@ -966,6 +901,9 @@ fn withdraw_port(port: &mut VirtualCell) -> Vec<usize> {
         .filter_map(|&id| port.settle(id, WITHDRAWN_ANSWER))
         .collect();
     for id in ids {
+        let call = port.port().0.get_mut(&id).unwrap();
+        call.fields = Vec::new();
+        call.out = None;
         port.free_staged(id);
         port.prune(id);
     }
@@ -980,7 +918,7 @@ fn withdraw_port(port: &mut VirtualCell) -> Vec<usize> {
         unreachable!("a port")
     };
     *sealed = true;
-    ready.extend(servers.drain(..).map(|(k, _)| k));
+    ready.extend(std::mem::take(servers).into_iter().map(|(k, _)| k));
     handles.clear();
     *used = 0;
     ready

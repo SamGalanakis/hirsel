@@ -113,7 +113,7 @@ unsafe fn str_operand<'a>(carrier: *const Buffer) -> Option<&'a str> {
 pub(crate) unsafe fn permits(rules: u64, direction: UnixDirection, root: &str, path: &str) -> bool {
     // SAFETY: the run pins the resolved Net grant and all its row text.
     unsafe {
-        (*(rules as *const Rules)).permits(
+        Rules::from_handle(rules).permits(
             |row| matches!(row, GrantRule::Unix(rule) if rule.permits(direction, root, path)),
         )
     }
@@ -153,6 +153,9 @@ unsafe fn call(
             _ => {
                 let provider = *hirsel_core_capability_provider(context, handle);
                 let key = hirsel_core_capability_handle(context, handle);
+                if !crate::provide::grant_live(&provider, key) {
+                    return crate::provide::withdrawn(context, site);
+                }
                 #[cfg(feature = "record")]
                 let rules = if crate::tape::owns(&provider) {
                     crate::tape::net_rules(&provider, key)
@@ -165,6 +168,11 @@ unsafe fn call(
             }
         };
         let served = crate::provide::owns(&provider);
+        if matches!(target, Some(UnixField::Listener | UnixField::Datagram))
+            && !crate::provide::socket_live(&provider, key)
+        {
+            return crate::provide::withdrawn(context, site);
+        }
         let authorized = state_ok
             && description.direction().is_none_or(|dir| {
                 !root.is_empty()

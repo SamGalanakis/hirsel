@@ -35,6 +35,13 @@ impl Machine<'_> {
         if op == HostOp::StdinSecret {
             return self.stdin_secret(t, a);
         }
+        if self.host.world.stale_port_operand(op, a) {
+            return if op == HostOp::Close {
+                Ok(vec![0; 4])
+            } else {
+                Err(Stop::Cause("Bounds"))
+            };
+        }
         let mode = if op == HostOp::Open { a[2] as u8 } else { 0 };
         if needs_writable_dir(op.code(), mode) && a[0] & DIR_READ_ONLY != 0 {
             self.check_cancel(t)?;
@@ -336,7 +343,7 @@ impl Machine<'_> {
             }
             HostOp::NetClass => unreachable!("net.class runs on the pure core"),
             HostOp::NetDenials => {
-                let provider = self.host.world.net_ports.get(&a[0]).copied();
+                let provider = self.host.world.port_grants.get(&a[0]).copied();
                 ok(
                     self.host
                         .world

@@ -407,7 +407,7 @@ unsafe fn launch_permitted(provider: &Provider, key: u64, launch: &LogicalLaunch
     }
     let _ = provider;
     // SAFETY: the non-tape key points to the pinned grant.
-    launch.permitted(unsafe { (*(key as *const Grant)).rules() })
+    launch.permitted(unsafe { Grant::from_handle(key).rules() })
 }
 
 fn request<T>(operation: u8, mode: u8, handle: u64, call: *mut Call<T>, site: u64) -> Request {
@@ -478,6 +478,9 @@ pub unsafe extern "C" fn hirsel_core_exec_wait(
             if crate::tasks::check_cancel(context, site) != 0 {
                 return CANCELLED;
             }
+            if !crate::provide::socket_live(&proc.provider, proc.handle) {
+                return crate::provide::withdrawn(context, site);
+            }
             return Outcome {
                 value,
                 ..Outcome::default()
@@ -515,6 +518,9 @@ pub unsafe extern "C" fn hirsel_core_exec_signal(
             crate::tasks::before_provider_entry();
             if crate::tasks::check_cancel(context, site) != 0 {
                 return CANCELLED;
+            }
+            if !crate::provide::socket_live(&proc.provider, proc.handle) {
+                return crate::provide::withdrawn(context, site);
             }
             return Outcome::default();
         }

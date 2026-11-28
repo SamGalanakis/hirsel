@@ -58,7 +58,7 @@ unsafe fn mark_public(request: &Request, handle: u64, denial: Option<u8>) {
     unsafe {
         let network = request.path.cast_mut().cast::<NetworkRequest>();
         let address = (*network).address;
-        let rules = (&*(handle as *const Rules)).as_slice();
+        let rules = Rules::from_handle(handle).as_slice();
         (*network).public = hirsel_core_net::public_only(
             rules.iter().filter_map(GrantRule::as_address),
             address.family,
@@ -78,11 +78,15 @@ pub(super) fn count_own_address(
     network: &NetworkRequest,
     outcome: &Outcome,
     served: bool,
+    handle: u64,
 ) {
     if network.public
         && outcome.error.tag == 1
         && (served || outcome.error.code == hirsel_core_net::OWN_ADDRESS)
     {
+        if crate::provide::port_denials(provider, handle, Some(1)).is_some() {
+            return;
+        }
         let run = files.registry.run_grants();
         *run.own_address
             .lock()
@@ -107,7 +111,7 @@ unsafe fn count_not_public(
     // SAFETY: network adapters pin the scalar address and the grant's Rules.
     unsafe {
         let address = &(*request.path.cast::<NetworkRequest>()).address;
-        let rules = (&*(handle as *const Rules)).as_slice();
+        let rules = Rules::from_handle(handle).as_slice();
         if hirsel_core_net::not_public(
             rules.iter().filter_map(GrantRule::as_address),
             AddressDirection::Connect,
@@ -116,6 +120,9 @@ unsafe fn count_not_public(
             address.lo,
             address.port,
         ) {
+            if crate::provide::port_denials(provider, handle, Some(0)).is_some() {
+                return;
+            }
             let run = (*(*context).host_files).registry.run_grants();
             *run.not_public
                 .lock()
@@ -149,12 +156,26 @@ pub unsafe extern "C" fn hirsel_core_net_class(
 pub unsafe extern "C" fn hirsel_core_net_denials(
     context: *mut Context,
     n: u64,
-    _site: u64,
+    site: u64,
 ) -> Outcome {
     unsafe {
         crate::process::deny_describe_capability(context);
         let provider = &*crate::entry::hirsel_core_capability_provider(context, n);
         let run = (*(*context).host_files).registry.run_grants();
+        let handle = crate::entry::hirsel_core_capability_handle(context, n);
+        if crate::provide::retired(provider) {
+            return crate::provide::withdrawn(context, site);
+        }
+        if let Some(counts) = crate::provide::port_denials(provider, handle, None) {
+            let Ok([value, written]) = counts else {
+                return crate::provide::withdrawn(context, site);
+            };
+            return Outcome {
+                value,
+                written,
+                ..Outcome::default()
+            };
+        }
         let key = provider.state as usize;
         let count = |counts: &Mutex<BTreeMap<usize, u64>>| {
             counts.lock().unwrap().get(&key).copied().unwrap_or(0)
@@ -171,7 +192,7 @@ unsafe fn request_denial(request: &Request, handle: u64) -> Option<u8> {
     // SAFETY: network adapters pin the scalar address and the grant's Rules.
     unsafe {
         let address = &(*request.path.cast::<NetworkRequest>()).address;
-        let rules = (&*(handle as *const Rules)).as_slice();
+        let rules = Rules::from_handle(handle).as_slice();
         hirsel_core_net::address_denial(
             rules.iter().filter_map(GrantRule::as_address),
             if request.operation == LISTEN {
@@ -194,7 +215,7 @@ pub(crate) unsafe fn permits_address(
     dir: AddressDirection,
 ) -> bool {
     unsafe {
-        let rules = &*(handle as *const Rules);
+        let rules = Rules::from_handle(handle);
         rules.permits(|r| {
             r.as_address().is_some_and(|rule| {
                 rule.permits(dir, address.family, address.hi, address.lo, address.port)
@@ -295,4 +316,81 @@ pub unsafe extern "C" fn hirsel_core_net_narrow(
         last,
     });
     unsafe { narrow_add(builder, rule.map(GrantRule::Address)) }
+}
+
+/// NET-6: each parent rule intersected with every rule of the list.
+pub(crate) unsafe fn narrow(
+    context: *mut Context,
+    n: u64,
+    list: &[GrantRule],
+    site: u64,
+) -> Outcome {
+    unsafe {
+        crate::process::deny_describe_capability(context);
+        let provider = *hirsel_core_capability_provider(context, n);
+        let parent = hirsel_core_capability_handle(context, n);
+        if !crate::provide::grant_live(&provider, parent) {
+            return crate::provide::withdrawn(context, site);
+        }
+        #[cfg(feature = "record")]
+        let taped = crate::tape::owns(&provider);
+        #[cfg(feature = "record")]
+        let rules_handle = if taped {
+            crate::tape::net_rules(&provider, parent)
+        } else {
+            parent
+        };
+        #[cfg(not(feature = "record"))]
+        let rules_handle = parent;
+        let rules = Rules::from_handle(rules_handle).as_slice();
+        let intersections: Vec<_> = rules
+            .iter()
+            .flat_map(|r| list.iter().filter_map(move |rule| r.intersect(rule)))
+            .collect();
+        let charge = intersections
+            .iter()
+            .try_fold(0u64, |total, r| total.checked_add(r.logical_size()))
+            .and_then(|n| n.checked_add(7))
+            .map(|n| n & !7);
+        let payer = (*context).payer();
+        if let Err(capacity) = payer.admit_run_owned(charge) {
+            return Outcome {
+                value: capacity.requested,
+                error: IoError { tag: 2, code: 0 },
+                written: capacity.available,
+                status: 0,
+                kind: 0,
+            };
+        }
+        let rules = RulesStorage::new(intersections);
+        let handle = rules.handle();
+        let files = (*context).host_files;
+        (*files)
+            .registry
+            .run_grants()
+            .net_grants
+            .lock()
+            .unwrap()
+            .push(Grant {
+                _rules: rules,
+                payer,
+                charge: charge.unwrap(),
+            });
+        if !crate::provide::grant_child(&provider, parent, handle) {
+            return crate::provide::withdrawn(context, site);
+        }
+        #[cfg(feature = "record")]
+        let value = if taped {
+            let (handle, _group) = crate::tape::narrow_net(&provider, parent, handle);
+            (*files).registry.grant(provider, handle)
+        } else {
+            (*files).registry.grant(provider, handle)
+        };
+        #[cfg(not(feature = "record"))]
+        let value = (*files).registry.grant(provider, handle);
+        Outcome {
+            value,
+            ..Outcome::default()
+        }
+    }
 }

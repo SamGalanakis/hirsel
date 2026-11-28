@@ -256,28 +256,44 @@ fn offset32(value: u64, what: &str) -> Result<u32, String> {
     u32::try_from(value).map_err(|_| format!("{what} exceeds a module's 4 GiB"))
 }
 
-/// Decode each function with a direct RIP-relative data relocation once. An
-/// immediate after disp32 belongs to the PC bias even when the ELF addend also
-/// includes an offset into the target object.
-fn x86_rip_fields(code: &[u8]) -> BTreeMap<u64, u8> {
+/// Decode the original executable section. ELF function symbols can omit private
+/// helpers. Restart at known function boundaries so padding before a symbol
+/// cannot change the decoding of that function.
+fn x86_rip_fields(file: &object::File, section: SectionIndex) -> Result<BTreeMap<u64, u8>, String> {
     use iced_x86::{Decoder, DecoderOptions, Register};
 
-    let mut decoder = Decoder::new(64, code, DecoderOptions::NONE);
+    let section = file.section_by_index(section).map_err(|e| e.to_string())?;
+    let code = section.data().map_err(|e| e.to_string())?;
+    let boundaries: BTreeSet<_> = file
+        .symbols()
+        .filter(|s| {
+            s.section_index() == Some(section.index()) && s.kind() == object::SymbolKind::Text
+        })
+        .flat_map(|s| [s.address(), s.address().saturating_add(s.size())])
+        .filter(|&offset| offset < code.len() as u64)
+        .map(|offset| offset as usize)
+        .collect();
     let mut fields = BTreeMap::new();
-    while decoder.can_decode() {
-        let instruction = decoder.decode();
-        if instruction.memory_base() == Register::RIP {
-            let offsets = decoder.get_constant_offsets(&instruction);
-            if offsets.displacement_size() == 4 {
-                let field = instruction.ip() + offsets.displacement_offset() as u64;
-                let bias = instruction.next_ip() - field;
-                if (4..=8).contains(&bias) {
-                    fields.insert(field, bias as u8);
+    let mut start = 0;
+    for end in boundaries.iter().copied().chain([code.len()]) {
+        let mut decoder =
+            Decoder::with_ip(64, &code[start..end], start as u64, DecoderOptions::NONE);
+        while decoder.can_decode() {
+            let instruction = decoder.decode();
+            if instruction.memory_base() == Register::RIP {
+                let offsets = decoder.get_constant_offsets(&instruction);
+                if offsets.displacement_size() == 4 {
+                    let field = instruction.ip() + offsets.displacement_offset() as u64;
+                    let bias = instruction.next_ip() - field;
+                    if (4..=8).contains(&bias) {
+                        fields.insert(field, bias as u8);
+                    }
                 }
             }
         }
+        start = end;
     }
-    fields
+    Ok(fields)
 }
 
 /// A closed fixup names a data byte or the one-past address. Use wide
@@ -599,19 +615,14 @@ pub(crate) fn link(
                     (Band::Data, Arch::X86_64) => {
                         // x86-64 PIC `R_X86_64_PC32` addressing local data (`[rip + disp32]`).
                         // `S + A - P = (D + offset + addend + bias) - (T + at + bias)`.
-                        let (&start, &(length, _)) = spans
-                            .range(..=at)
-                            .next_back()
-                            .ok_or("PC32 displacement outside a text symbol")?;
-                        let end = start.checked_add(length).ok_or("PC32 text span overflow")?;
-                        let code = text
-                            .get(start as usize..end as usize)
-                            .ok_or("PC32 text span outside text")?;
-                        let fields = rip_fields
-                            .entry(start)
-                            .or_insert_with(|| x86_rip_fields(code));
+                        let fields = match rip_fields.entry(part) {
+                            std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+                            std::collections::btree_map::Entry::Vacant(e) => e.insert(
+                                x86_rip_fields(&link.objects[part.0], SectionIndex(part.1))?,
+                            ),
+                        };
                         let bias = *fields
-                            .get(&(at - start))
+                            .get(&site)
                             .ok_or("PC32 is not a RIP-relative displacement")?;
                         text_fixups.push(Fixup {
                             site: offset32(at, "text")?,

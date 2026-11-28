@@ -139,6 +139,15 @@ impl CompiledModule {
 }
 
 fn compile_pack_module(source: &str, export_names: &[&str], backend: Backend) -> CompiledModule {
+    compile_pack_target(source, export_names, backend, hirsel_code::TARGET)
+}
+
+fn compile_pack_target(
+    source: &str,
+    export_names: &[&str],
+    backend: Backend,
+    target: hirsel_core_layout::Target,
+) -> CompiledModule {
     let dir = tempfile::tempdir().unwrap();
     let exports: Vec<DefPath> = export_names
         .iter()
@@ -146,7 +155,7 @@ fn compile_pack_module(source: &str, export_names: &[&str], backend: Backend) ->
         .collect();
     let product = check_app(source, dir.path(), &exports);
     let mut opts = NativeOptions::development(
-        hirsel_code::TARGET.triple().to_owned(),
+        target.triple().to_owned(),
         PathBuf::new(),
         Link::Driver(PathBuf::new()),
         PathBuf::new(),
@@ -158,6 +167,7 @@ fn compile_pack_module(source: &str, export_names: &[&str], backend: Backend) ->
         .build_pack_module(&exports, &opts)
         .unwrap_or_else(|e| panic!("build_pack_module failed on {backend:?}: {e:?}"));
     let parsed = Module::parse(&bytes).expect("parse emitted .hirsel-mod");
+    assert_eq!(parsed.header.target, target);
     let key = parsed.header.key();
     assert_eq!(parsed.entries().count(), export_names.len());
     CompiledModule {

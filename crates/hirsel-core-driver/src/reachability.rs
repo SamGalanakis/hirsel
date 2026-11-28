@@ -252,7 +252,7 @@ impl Reachable<'_> {
             return Err(NativeStop::Check(stop));
         }
         if let Some(r) = self.resources.first() {
-            return Err(NativeStop::Check(r.message.clone()));
+            return Err(NativeStop::Resource(r.clone()));
         }
         self.instances
             .as_deref()
@@ -849,20 +849,17 @@ impl CheckProduct {
                 });
             }
         }
-        if let Err(InstanceStop::Resource { limit, next }) = &instances
+        if let Err(stop) = &instances
+            && let Some(next) = stop.resource_instance()
             && let Some(h) = self.headers.get(&next.definition)
         {
             resources.push(ResourceRefusal {
                 primary: h.site,
-                message: format!(
-                    "instance collection resource refusal: `{}` needs instance {} past the limit of {limit}",
-                    next.definition,
-                    limit + 1
-                ),
+                message: format!("instance collection resource refusal: {stop}"),
             });
         }
         if let Err(stop) = &instances
-            && !matches!(stop, InstanceStop::Resource { .. })
+            && stop.resource_instance().is_none()
         {
             let (path, construct) = match stop {
                 InstanceStop::OutsideReached(p) => (p, "body is unavailable".to_owned()),
@@ -877,7 +874,9 @@ impl CheckProduct {
                 InstanceStop::Unsupported(stop) => {
                     (stop.chain.last().expect("a chain"), stop.to_string())
                 }
-                InstanceStop::Resource { .. } => unreachable!("a resource refusal, above"),
+                InstanceStop::Resource { .. } | InstanceStop::RecursiveInstantiation { .. } => {
+                    unreachable!("a resource refusal, above")
+                }
             };
             if let Some(h) = self.headers.get(path)
                 && let std::collections::btree_map::Entry::Vacant(slot) =

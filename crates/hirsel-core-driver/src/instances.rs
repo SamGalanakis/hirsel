@@ -59,6 +59,9 @@ pub enum InstanceStop {
         limit: usize,
         next: Identity,
     },
+    RecursiveInstantiation {
+        next: Identity,
+    },
     OutsideReached(DefPath),
     Input {
         definition: DefPath,
@@ -70,6 +73,14 @@ pub enum InstanceStop {
     },
     Unsupported(Box<crate::unsupported_reach::Unsupported>),
 }
+impl InstanceStop {
+    pub(crate) fn resource_instance(&self) -> Option<&Identity> {
+        match self {
+            Self::Resource { next, .. } | Self::RecursiveInstantiation { next } => Some(next),
+            _ => None,
+        }
+    }
+}
 impl std::fmt::Display for InstanceStop {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -78,6 +89,12 @@ impl std::fmt::Display for InstanceStop {
                 "`{}` needs instance {} past the limit of {limit}",
                 next.definition,
                 limit + 1
+            ),
+            Self::RecursiveInstantiation { next } => write!(
+                f,
+                "recursive instantiation of `{}` exceeds the limit of {} changes of type arguments on one call path",
+                next.definition,
+                crate::instance_walk::RECURSIVE_INSTANTIATIONS
             ),
             Self::OutsideReached(definition) => write!(f, "{definition}: body is unavailable"),
             Self::Input {

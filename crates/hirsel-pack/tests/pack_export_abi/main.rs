@@ -238,3 +238,41 @@ pub fn call_via_bind() -> Big {
 
 mod parity_law;
 mod slot_laws;
+
+#[test]
+fn recursive_box_clone_and_drop_in_loaded_module() {
+    let _alone = alone();
+    let (loader, _) = primary_loader();
+    let source = r#"
+type Chain: key = Nil | Link(u64, Box[Chain])
+type Branch: key = Leaf(u64) | Fork(Box[Bough])
+type Bough: key = Next(Box[Branch])
+
+pub fn roundtrip(value: u64) -> u64 {
+    let chain = Link(value, box.new(Nil))
+    let twin: Chain = clone(chain)
+    let branch = Fork(box.new(Next(box.new(Leaf(value)))))
+    let copied: Branch = clone(branch)
+    if twin == chain && copied == branch { value } else { 0 }
+}
+"#;
+    for backend in BACKENDS {
+        use hirsel_core_layout::Target::{Aarch64Linux, X86_64Linux};
+        for target in [Aarch64Linux, X86_64Linux] {
+            if target != hirsel_code::TARGET {
+                compile_pack_target(source, &["roundtrip"], backend, target);
+            }
+        }
+        let image = compile_pack_module(source, &["roundtrip"], backend);
+        loader.admit_module(&image.bytes).unwrap();
+        let entry = image.load_raw(loader, "roundtrip");
+        // SAFETY: the exported adapter accepts a u64 and writes a u64 result.
+        let call: unsafe extern "C" fn(*mut Context, *mut u64, u64) -> u8 =
+            unsafe { std::mem::transmute(entry.entry()) };
+        let mut result = 0;
+        let status = run_in_worker(1 << 20, |ctx| unsafe { call(ctx, &mut result, 37) });
+        assert_eq!((status, result), (Ok(0), 37), "{backend:?}");
+        drop(entry);
+        loader.reclaim().unwrap();
+    }
+}

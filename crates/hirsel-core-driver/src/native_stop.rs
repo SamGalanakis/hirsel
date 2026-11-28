@@ -1,11 +1,41 @@
 //! How a [`NativeStop`] reads and what converts into one.
 
-use super::NativeStop;
+use super::{BuildProduct, DefPath, InstanceStop};
 use std::{fmt, io};
+
+#[derive(Debug)]
+pub enum NativeStop {
+    Check(String),
+    Resource(crate::ResourceRefusal),
+    Instances(InstanceStop),
+    Entry(String),
+    ForeignRecording {
+        reason: String,
+        site: String,
+    },
+    Archive(crate::code_admission::AdmissionError),
+    Emit {
+        definition: DefPath,
+        message: String,
+    },
+    Link(String),
+    /// The release cannot be a `.hirsel-mod` (PACK-3 `Unsupported`).
+    Module(String),
+    /// A coverage build's rebound body whose blocks are not its source's.
+    Coverage(hirsel_core_ir::coverage::Mismatch),
+    Input(io::Error),
+    /// The build succeeded and its executable is stored; writing it to the
+    /// requested output failed.
+    Output {
+        product: Box<BuildProduct>,
+        error: io::Error,
+    },
+}
 
 impl fmt::Display for NativeStop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Resource(r) => write!(f, "resource: {}", r.message),
             Self::Check(s) => write!(f, "check: {s}"),
             Self::Instances(s) => write!(f, "instances: {s}"),
             Self::Entry(s) => write!(f, "entry: {s}"),

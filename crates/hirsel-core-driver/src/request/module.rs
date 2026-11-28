@@ -46,6 +46,11 @@ pub(super) fn build(
             Err(crate::NativeStop::Module(reason) | crate::NativeStop::Entry(reason)) => {
                 ModuleBuild::Unsupported(reason)
             }
+            Err(crate::NativeStop::Resource(refusal)) => {
+                let resources = product.resources_for([&refusal])?;
+                super::launch::render_diagnostics(sources, &[], &[], &resources);
+                ModuleBuild::ToolRefusal
+            }
             Err(stop) => {
                 eprintln!("{stop:?}");
                 ModuleBuild::ToolRefusal

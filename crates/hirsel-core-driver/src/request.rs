@@ -1231,7 +1231,7 @@ fn run_compiler_request(
             reach
                 .as_ref()
                 .and_then(|r| r.instances.as_ref().err())
-                .filter(|e| !matches!(e, crate::InstanceStop::Resource { .. }))
+                .filter(|e| e.resource_instance().is_none())
                 .map(|e| match e {
                     // A PROG-6 refusal is its own line (`target.unsupported`).
                     crate::InstanceStop::Unsupported(_) => e.to_string(),

@@ -103,33 +103,7 @@ pub struct ReplayPlan {
 pub(crate) const DEFAULT_INSTANCE_LIMIT: usize = 65_536;
 pub(crate) const DEFAULT_ROOT_LIMIT: u64 = 64 * 1024 * 1024;
 
-#[derive(Debug)]
-pub enum NativeStop {
-    Check(String),
-    Instances(InstanceStop),
-    Entry(String),
-    ForeignRecording {
-        reason: String,
-        site: String,
-    },
-    Archive(crate::code_admission::AdmissionError),
-    Emit {
-        definition: DefPath,
-        message: String,
-    },
-    Link(String),
-    /// The release cannot be a `.hirsel-mod` (PACK-3 `Unsupported`).
-    Module(String),
-    /// A coverage build's rebound body whose blocks are not its source's.
-    Coverage(hirsel_core_ir::coverage::Mismatch),
-    Input(io::Error),
-    /// The build succeeded and its executable is stored; writing it to the
-    /// requested output failed.
-    Output {
-        product: Box<BuildProduct>,
-        error: io::Error,
-    },
-}
+pub use stop::NativeStop;
 /// The libLLVM an LLVM object's key takes (`tool_inputs::llvm_library`):
 /// none for Cranelift, which is part of the compiler executable.
 fn engine_library(backend: Backend) -> io::Result<Option<ContentHash>> {

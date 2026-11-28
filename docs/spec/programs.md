@@ -700,7 +700,10 @@ reaches a program, and it does so only as below. The one exception is an impleme
 whose checking exceeds the implementation's resources (for example unbounded generic
 instantiation or a declared or body-inferred type past a depth, expansion or layout limit)
 may be refused with a message that
-names no rule; such a refusal is not a meaning of the program. Likewise, where a step bound
+names no rule. During instance collection, this implementation allows twelve recursive
+changes of a source function's type arguments on one retained call path. Reusing or
+permuting the preceding arguments adds no change. Independent calls have separate limits.
+Such a refusal is not a meaning of the program. Likewise, where a step bound
 runs out and which admission an over-tight byte bound refuses are a build's resource
 outcomes, fixed for that build but not the same on every engine
 ([SEM-8](semantics.md#sem-8-determinism)); they are not meanings of the program either.

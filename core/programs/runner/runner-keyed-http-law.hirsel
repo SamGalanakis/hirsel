@@ -296,7 +296,7 @@ fn keyed_http_seed_admitted(dir: Dir, clock: Clock, random: Random, tasks: Tasks
     options.create = false
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
     let claim = store.ClaimKey(op: b"increment", caller: store.Caller(issuer: 7u8, subject: b"law"), key: b"held")
-    let Accepted(_) = result.unwrap(store.admit_claim(mut db, claim, store.request_digest(entry, raw), raw, Some(clone(policy)))) else {
+    let Accepted(_) = result.unwrap(admit_runner_claim(mut db, claim, store.request_digest(entry, raw), raw, Some(clone(policy)))) else {
         fail("the held claim did not admit")
     }
     result.unwrap(store.close(take db))

@@ -136,22 +136,38 @@ type RecoverClaims {
     sweep: store.ClaimSweep
 }
 
-fn recovery_registered[G: send, H: shareable + inert + send](reg: Registry[G, H], op: Bytes) -> bool {
-    map.contains(reg.t.keyed, op)
+fn recovery_registered[G: send, H: shareable + inert + send](reg: Registry[G, H], origin: Bytes, stored: Bytes) -> bool {
+    if !list.starts_with_at(stored, 0, origin) {
+        // A stamped foreign op stays inert. A live unscoped op has unknown
+        // origin and must refuse open before its delivery can be admitted again.
+        return list.len(stored) >= 17 && stored[0] == 0
+    }
+    match claim_operation_name(stored) {
+        Ok(name) => map.contains(reg.t.keyed, name),
+        Error(_) => false,
+    }
 }
 
 fn startup_claims[G: send, H: shareable + inert + send](mut db: store.Db, reg: Registry[G, H]) -> Result[Option[Box[RecoverClaims]], OpenError] waits {
     check_keyed_registrations(db, reg)?
+    let origin = claim_origin(db)
     let dropped = store.check_dropped_claim_ops(mut db, scoped fn(op: Bytes) -> bool {
-        recovery_registered(reg, op)
+        recovery_registered(reg, origin, op)
     }) ?=> Store
     if let Some(take gone) = take dropped {
-        return Error(KeyedOpDropped(take gone))
+        if !list.starts_with_at(gone.op, 0, origin) {
+            return Error(KeyedOpDropped(take gone))
+        }
+        let name = claim_operation_name(gone.op) ?=> Store
+        return Error(KeyedOpDropped(store.DroppedClaimOp(op: take name, last_expiry: gone.last_expiry)))
     }
     let mut scan = store.open_claim_cursor(db)
     let mut queue = new_claim_queue()
     while let Some(take claim) = store.next_open_claim(mut scan) {
-        enqueue_recovery(mut queue, claim)
+        // The Store cursor returns length-prefixed operation keys.
+        if list.starts_with_at(claim, 1, origin) {
+            enqueue_recovery(mut queue, claim)
+        }
     }
     if map.len(reg.t.keyed) == 0 && !store.has_keyed_ops(db) {
         return Ok(None)
@@ -244,7 +260,7 @@ fn run_claim_recovery[G: send, H: shareable + inert + send](mut hd: Head[G, H], 
         initial
     }
     let mut run = ClaimRun(claim: take named, entry: clone(activation.entry), caller: take caller, arguments: take arguments, deadline: deadline, waiters: take waiters, background: background)
-    let live = match map.get(hd.r.t.keyed, op) {
+    let live = match map.get(hd.r.t.keyed, claim_operation_name(op)?) {
         Some(KeyedRegistration(policy: Some(_), ..)) => true,
         _ => false,
     }
@@ -291,8 +307,9 @@ fn recovery_turn[G: send, H: shareable + inert + send](mut hd: Head[G, H], mut s
         }
     }
     let reg = view hd.r
+    let origin = claim_origin(hd.db)
     let swept = store.sweep_claims(mut hd.db, mut state.sweep, scoped fn(op: Bytes) -> bool {
-        recovery_registered(reg, op)
+        recovery_registered(reg, origin, op)
     })
     match take swept {
         Ok(_) => Ok(()),
@@ -311,18 +328,18 @@ fn parked_claim_index(state: RecoverClaims, name: Bytes) -> Option[u64] {
 }
 
 fn start_keyed_request[G: send, H: shareable + inert + send](mut hd: Head[G, H], mut state: RecoverClaims, take request: Request) -> Result[(), store.Error] waits {
-    let name = {
-        let Some(raw_key) = view request.claim else {
-            fail("runner: keyed request has no claim key")
-        }
-        store.ClaimKey(op: clone(request.key), caller: clone(request.caller), key: clone(raw_key))
-    }
-    let policies: Option[Option[store.KeyedPolicy]] = match map.get(hd.r.t.keyed, name.op) {
+    let policies: Option[Option[store.KeyedPolicy]] = match map.get(hd.r.t.keyed, request.key) {
         Some(registration) => Some(clone(registration.policy)),
         None => None,
     }
     let Some(take offered) = take policies else {
         return commitless(mut hd, take request, Refused(NoEntry))
+    }
+    let name = {
+        let Some(raw_key) = view request.claim else {
+            fail("runner: keyed request has no claim key")
+        }
+        store.ClaimKey(op: claim_operation(claim_origin(hd.db), request.key), caller: clone(request.caller), key: clone(raw_key))
     }
     let answer = match store.admit_claim(mut hd.db, name, request.digest, request.arg, take offered) {
         Ok(take admission) => take admission,

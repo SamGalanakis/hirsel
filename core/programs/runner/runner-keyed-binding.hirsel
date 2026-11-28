@@ -173,7 +173,7 @@ fn keep_keyed[G: send](mut t: Arc[Template[G]], take name: Bytes, take registrat
 
 fn check_keyed_registrations[G: send, H: shareable + inert + send](db: store.Db, reg: Registry[G, H]) -> Result[(), OpenError] {
     for (name, registration) in reg.t.keyed {
-        let Some(saved) = store.keyed_policy(db, name) ?=> Store else {
+        let Some(saved) = store.keyed_policy(db, claim_operation(claim_origin(db), name)) ?=> Store else {
             continue
         }
         if registration.keys_max != saved.keys_max {

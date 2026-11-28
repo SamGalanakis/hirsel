@@ -331,8 +331,8 @@ fn place_grant_bytes[G: send, H: shareable + inert + send, S: send](config: Opti
     Ok(total)
 }
 
-// RUNNER-SPEC v2.69 and v2.70: a wire needs a bind mint, a trigger config that
-// lists a granted entry needs an attempt mint, and every call-list element names
+// RUNNER-SPEC v2.69 and v2.70: a wire needs a bind mint, a nonempty trigger
+// config needs an attempt mint, and every call-list element names
 // a registered granted entry.
 fn check_grant_lists[G: send, H: shareable + inert + send, S: send](placing: Placing[G, H], given: Option[Grants[G, H, S]], configured: Option[TriggerConfig], wired: bool) -> Option[OpenError] {
     let has_bind = match given {
@@ -348,8 +348,8 @@ fn check_grant_lists[G: send, H: shareable + inert + send, S: send](placing: Pla
     }
     if !has_attempt {
         if let Some(t) = configured {
-            if let Some(take path) = triggers.first_unlisted(t.entries, scoped fn(_path: Bytes, _schema: Bytes, is_granted: bool) -> bool {
-                !is_granted
+            if let Some(take path) = triggers.first_unlisted(t.entries, scoped fn(_path: Bytes, _schema: Bytes, _is_granted: bool) -> bool {
+                false
             }) {
                 return Some(TriggerNoGrant(take path))
             }

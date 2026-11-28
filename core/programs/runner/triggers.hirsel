@@ -10,7 +10,7 @@ pub type Id: codec + key + send {
     index: u64
 }
 
-pub type Hold: codec + send = Request(u64, u64, Bytes, Bytes) | Revision(Bytes, Bytes)
+pub type Hold: codec + send = Request(u64, u64, Bytes, Bytes) | Revision(Bytes, Bytes) | InDoubt(u64, u64, u64)
 
 pub type Terminal: codec + send = Returned(Bytes) | Raised(u32) | OutOfTime(u64) | OutOfBytes(u64, u64) | Gone | Cancelled | Cap
 
@@ -63,6 +63,7 @@ pub opaque type Pending: send {
 }
 
 pub opaque type PendingRows {
+    origin: store.StoreId,
     rows: store.Rows[Id, SubRow]
 }
 
@@ -134,12 +135,12 @@ pub fn present(snap: store.Snapshot) -> Result[bool, store.Error] {
 }
 
 pub fn scan_pending(read_handle: store.Reader, s: store.Snapshot, t: Tables) -> Result[PendingRows, store.Error] waits {
-    Ok(PendingRows(rows: store.scan(read_handle, s, t.rows, Unbounded, Unbounded)?))
+    Ok(PendingRows(origin: store.snapshot_identity(s), rows: store.scan(read_handle, s, t.rows, Unbounded, Unbounded)?))
 }
 
 pub fn next_scanned(read_handle: store.Reader, mut cursor: PendingRows) -> Result[Option[Pending], store.Error] waits {
     while let Some((id, take row)) = store.next(read_handle, mut cursor.rows)? {
-        if id.branch == 0u32 {
+        if serving_origin(id, cursor.origin) {
             return Ok(Some(Pending(id: id, row: take row)))
         }
     }
@@ -287,10 +288,11 @@ fn write_at[A](mut tx: store.Tx, t: Tables, target: Entry[A], id: Id, arg: A, wh
 // The place supplies its durable main snapshot. The index sorts by due time,
 // with the primary key as the tie breaker (store index order).
 pub fn next_pending(read_handle: store.Reader, s: store.Snapshot, t: Tables, active: scoped[view] fn(Id) -> bool) -> Result[Option[Pending], store.Error] waits {
+    let origin = store.snapshot_identity(s)
     let mut rows = store.find(read_handle, s, t.due, Unbounded, Unbounded)?
     while let Some((id, take row)) = store.next(read_handle, mut rows)? {
         // An inherited trigger in a fork is inert.
-        if id.branch == 0u32 && !active(id) && (!parked(row.state) || row.cancel) {
+        if serving_origin(id, origin) && !active(id) && (!parked(row.state) || row.cancel) {
             return Ok(Some(Pending(id: id, row: take row)))
         }
     }
@@ -403,9 +405,9 @@ pub fn stored_pending(key: Bytes, value: Bytes) -> Option[Pending] {
     Some(Pending(id: id, row: take row))
 }
 
-/// The prepare scan reads only main's rows.
-pub fn on_main(p: Pending) -> bool {
-    p.id.branch == 0u32
+/// Only the serving Store owns effects on its main branch.
+pub fn serving_origin(id: Id, origin: store.StoreId) -> bool {
+    id.branch == 0u32 && id.store_hi == origin.hi && id.store_lo == origin.lo
 }
 
 /// The stored value that `settle` stages for `p`, whose stored value is `value`.
@@ -446,7 +448,11 @@ pub fn settle(mut staged: store.StagedMigration, t: Tables, p: Pending, restamp:
     store.stage_rewrite(mut staged, t.rows, p.id, row)
 }
 
-fn read(tx: store.Tx, t: Tables, id: Id) -> Result[SubRow, Error] {
+fn read(mut tx: store.Tx, t: Tables, id: Id) -> Result[SubRow, Error] {
+    let origin = store.info(mut tx).id
+    if id.store_hi != origin.store.hi || id.store_lo != origin.store.lo || id.branch != origin.branch {
+        return Error(StaleAttempt)
+    }
     match stored(store.fetch(tx, t.rows, id))? {
         Some(take row) => Ok(take row),
         None => Error(StaleAttempt),
@@ -471,16 +477,16 @@ fn current_attempt(row: SubRow, a: Attempt) -> bool {
     row.attempt == a.number && running(row.state)
 }
 
-fn current(tx: store.Tx, t: Tables, a: Attempt) -> Result[SubRow, Error] {
-    let row = read(tx, t, a.id)?
+fn current(mut tx: store.Tx, t: Tables, a: Attempt) -> Result[SubRow, Error] {
+    let row = read(mut tx, t, a.id)?
     if !current_attempt(row, a) {
         return Error(StaleAttempt)
     }
     Ok(take row)
 }
 
-pub fn fence(tx: store.Tx, t: Tables, a: Attempt) -> Result[bool, Error] {
-    let row = current(tx, t, a)?
+pub fn fence(mut tx: store.Tx, t: Tables, a: Attempt) -> Result[bool, Error] {
+    let row = current(mut tx, t, a)?
     Ok(row.cancel)
 }
 
@@ -492,6 +498,9 @@ pub fn hold_mark(read_handle: store.Reader, s: store.Snapshot, t: Tables, id: Id
 }
 
 pub fn boundary(read_handle: store.Reader, s: store.Snapshot, t: Tables, a: Attempt) -> Result[bool, Error] waits {
+    if !serving_origin(a.id, store.snapshot_identity(s)) {
+        return Error(StaleAttempt)
+    }
     let row = stored(store.get(read_handle, s, t.rows, a.id))?
     let Some(value) = row else {
         return Error(StaleAttempt)
@@ -504,7 +513,7 @@ pub fn boundary(read_handle: store.Reader, s: store.Snapshot, t: Tables, a: Atte
 
 pub fn start(mut tx: store.Tx, t: Tables, p: Pending, revision: Bytes) -> Result[Started, Error] {
     let at = store.info(mut tx).at
-    let mut row = read(tx, t, p.id)?
+    let mut row = read(mut tx, t, p.id)?
     if at < row.due {
         return Error(NotDue)
     }
@@ -529,7 +538,7 @@ pub fn start(mut tx: store.Tx, t: Tables, p: Pending, revision: Bytes) -> Result
 }
 
 pub fn hold(mut tx: store.Tx, t: Tables, a: Attempt, step: u64, expected: Bytes, actual: Bytes) -> Result[(), Error] {
-    let mut row = current(tx, t, a)?
+    let mut row = current(mut tx, t, a)?
     if row.cancel {
         return Error(CancelRequested)
     }
@@ -537,8 +546,17 @@ pub fn hold(mut tx: store.Tx, t: Tables, a: Attempt, step: u64, expected: Bytes,
     stored(store.put(mut tx, t.rows, a.id, row))
 }
 
+pub fn park_doubt(mut tx: store.Tx, t: Tables, a: Attempt, index: u64, first_started: u64) -> Result[(), Error] {
+    let mut row = current(mut tx, t, a)?
+    if row.cancel {
+        return Error(CancelRequested)
+    }
+    row.state = Parked(InDoubt(a.number, index, first_started))
+    stored(store.put(mut tx, t.rows, a.id, row))
+}
+
 pub fn release(mut tx: store.Tx, t: Tables, id: Id, revision: Option[Bytes]) -> Result[(), Error] {
-    let mut row = read(tx, t, id)?
+    let mut row = read(mut tx, t, id)?
     match row.state {
         Parked(mark) => match revision {
             Some(selected) => {
@@ -555,7 +573,7 @@ pub fn release(mut tx: store.Tx, t: Tables, id: Id, revision: Option[Bytes]) -> 
 }
 
 pub fn request_cancel(mut tx: store.Tx, t: Tables, id: Id) -> Result[(), Error] {
-    let mut row = read(tx, t, id)?
+    let mut row = read(mut tx, t, id)?
     row.cancel = true
     stored(store.put(mut tx, t.rows, id, row))
 }
@@ -567,7 +585,7 @@ fn consume(mut tx: store.Tx, t: Tables, id: Id, terminal: Terminal) -> Result[()
 }
 
 pub fn finish(mut tx: store.Tx, t: Tables, a: Attempt, terminal: Terminal) -> Result[(), Error] {
-    let row = read(tx, t, a.id)?
+    let row = read(mut tx, t, a.id)?
     if row.attempt != a.number {
         return Error(StaleAttempt)
     }
@@ -581,7 +599,7 @@ pub fn finish(mut tx: store.Tx, t: Tables, a: Attempt, terminal: Terminal) -> Re
 }
 
 pub fn finish_cancel(mut tx: store.Tx, t: Tables, p: Pending) -> Result[(), Error] {
-    let row = read(tx, t, p.id)?
+    let row = read(mut tx, t, p.id)?
     if !row.cancel {
         return Error(StaleAttempt)
     }
@@ -589,7 +607,7 @@ pub fn finish_cancel(mut tx: store.Tx, t: Tables, p: Pending) -> Result[(), Erro
 }
 
 pub fn finish_transact(mut tx: store.Tx, t: Tables, p: Pending, terminal: Terminal) -> Result[(), Error] {
-    let row = read(tx, t, p.id)?
+    let row = read(mut tx, t, p.id)?
     if row.granted {
         return Error(StaleAttempt)
     }

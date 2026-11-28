@@ -155,10 +155,12 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
     } else {
         None
     }
-    let granting: Option[GrantStart[TriggerContext, TriggerLawTables, ()]] = None
+    let grants = Some(trigger_law_mints())
+    let mint_bytes = result.unwrap(place_grant_bytes(grants))
+    let granting = Some(grant_start(option.unwrap(take grants)))
     let job = ManagedHead(backing: Disk(dir), options: clone(options), follower_plan: None, selection: selection, tasks: tasks, clock: c, random: r, placing: placing_at(code.describe(trigger_scan_law_empty), n_place), on_migrate: None, schema: code.describe(trigger_law_schema), n_place: n_place, n_publisher: 1048576u64, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain, head_to: channel.sender(head_to), cut: result.unwrap(cut_activity()), triggering: take triggering, granting: take granting, idle: None, expected_store: None)
     let writer = store.writer_bytes(result.unwrap(store.writer_plan(Directory, options)))
-    let allowance = writer + job.n_place + job.n_publisher
+    let allowance = writer + job.n_place + job.n_publisher + mint_bytes
     let server = task.spawn(tasks, bytes allowance, take job, head_ended)
     if let Ok(Recovered) = channel.receive(events) {} else {
         fail("L40: serving head did not recover")

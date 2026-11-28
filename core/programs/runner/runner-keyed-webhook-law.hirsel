@@ -382,7 +382,7 @@ fn keyed_http_webhook_history(d: Dir, random: Random, tasks: Tasks, net: Net) ->
     let mut reopened = options
     reopened.create = false
     let stored = result.unwrap(store.open(tasks, dir, clock, random, reopened))
-    if !none(result.unwrap(store.keyed_policy(stored, b"fault"))) || !none(result.unwrap(store.keyed_policy(stored, b"steps"))) {
+    if !none(result.unwrap(store.keyed_policy(stored, claim_operation(claim_origin(stored), b"fault")))) || !none(result.unwrap(store.keyed_policy(stored, claim_operation(claim_origin(stored), b"steps")))) {
         fail("a failed claim function left a keyed operation in the store")
     }
     result.unwrap(store.close(take stored))

@@ -102,7 +102,7 @@ fn settlement_check(db: store.Db, imported: store.ValidatedImport, image: Bytes,
             map.insert(mut shown, take key, (chosen, row.count, row.earliest_due))
         }
     }
-    let Some(expected) = fate.expected_settlement(applied.base, image, shown) else {
+    let Some(expected) = fate.expected_settlement(store.snapshot_identity(store.snapshot(db)), applied.base, image, shown) else {
         return Error(Unsettled)
     }
     let mut matched = 0u64

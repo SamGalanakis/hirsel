@@ -105,8 +105,8 @@ fn run_trigger_body[H: shareable + inert + send, A, R, E](mut tx: store.Tx, env:
     Ok(())
 }
 
-fn check_attempt(tx: store.Tx, tables: triggers.Tables, attempt: triggers.Attempt) -> Result[(), FencedRefusal] {
-    match triggers.fence(tx, tables, attempt) {
+fn check_attempt(mut tx: store.Tx, tables: triggers.Tables, attempt: triggers.Attempt) -> Result[(), FencedRefusal] {
+    match triggers.fence(mut tx, tables, attempt) {
         Ok(false) => Ok(()),
         Ok(true) => Error(Refusal(Cancelled)),
         Error(Store(take problem)) => Error(Refusal(Store(take problem))),
@@ -115,7 +115,7 @@ fn check_attempt(tx: store.Tx, tables: triggers.Tables, attempt: triggers.Attemp
 }
 
 fn run_transact_attempt[H: shareable + inert + send, A, R, E](mut tx: store.Tx, env: (TransactBody[H, A, R, E], triggers.Tables, triggers.Attempt, u64)) -> Result[Outcome, FencedRefusal] {
-    check_attempt(tx, env.1, env.2)?
+    check_attempt(mut tx, env.1, env.2)?
     let ran = bound bytes env.3 {
         transact_body(mut tx, env.0)
     }
@@ -196,7 +196,7 @@ type FencedEntry[H, Env: inert + send, A, R]: send {
 }
 
 fn run_fenced_entry[H: shareable + inert + send, Env: inert + send, A, R](mut tx: store.Tx, env: (FencedEntry[H, Env, A, R], triggers.Tables, triggers.Attempt, Bytes, u64, H)) -> Result[Outcome, FencedRefusal] {
-    check_attempt(tx, env.1, env.2)?
+    check_attempt(mut tx, env.1, env.2)?
     let ran: Result[Result[Outcome, FencedRefusal], Capacity] = bound bytes env.4 {
         let entry = view env.0
         let decoded = match std.codec.decode(entry.args, env.3) {

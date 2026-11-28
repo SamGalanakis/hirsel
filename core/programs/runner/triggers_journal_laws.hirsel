@@ -56,7 +56,7 @@ pub fn journal_law_trigger_revision(d: Dir, c: Clock, r: Random, tasks: Tasks) -
         return false
     }
     let refused = store.run(mut db, None, (store.copy_env(a1), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Error] {
-        let _ = fence(tx, call_env.1, call_env.0)?
+        let _ = fence(mut tx, call_env.1, call_env.0)?
         Ok(())
     })
     match refused {

@@ -9,15 +9,16 @@ pub opaque scoped type Ctx[G: send] {
     route: View[runner.TriggerContext],
     grants: Map[u64, G],
     index: u64,
+    in_doubt: bool,
 }
 
 type Fingerprint: codec + send {
     contract: Bytes
 }
 
-type SubRow: codec + send = Started(u64, Fingerprint) | Finished(Fingerprint, Bytes)
+type SubRow: codec + send = Started(u64, u64, Fingerprint) | Finished(Fingerprint, Bytes)
 
-type Mode: codec + send = First | Resend | Lookup
+type Mode: codec + send = First | Resend(u64) | Lookup
 
 type Begin: codec + send {
     index: u64,
@@ -30,9 +31,9 @@ type Finish: codec + send {
     raw: Bytes
 }
 
-type Command: codec + send = Enter(Begin) | Finalize(Finish)
+type Command: codec + send = Enter(Begin) | Finalize(Finish) | Park(u64)
 
-type Reply: codec + send = Ready | Replay(Bytes) | Doubt | Held | Capped
+type Reply: codec + send = Ready | Replay(Bytes) | Doubt | Unstarted | Held | Capped
 
 type TxRequest: codec + send {
     index: u64,
@@ -137,38 +138,40 @@ fn start_outside(mut tx: store.Tx, t: Tables, a: triggers.Attempt, take b: Begin
         return Ok(Capped)
     }
     let key = row_key(a, b.index)?
-    match store.fetch(tx, t.rows, key)? {
+    let now = store.info(mut tx).at
+    let first_started = match store.fetch(tx, t.rows, key)? {
         Some(Finished(take saved, take raw)) => {
             if saved.contract != b.fingerprint.contract {
                 return hold(mut tx, t, a, b.index, saved, b.fingerprint)
             }
             return Ok(Replay(take raw))
         },
-        Some(Started(previous, take saved)) => {
+        Some(Started(previous, first, take saved)) => {
             if saved.contract != b.fingerprint.contract {
                 return hold(mut tx, t, a, b.index, saved, b.fingerprint)
             }
             match b.mode {
                 First => return Ok(Doubt),
                 Lookup => return Ok(Ready),
-                Resend => if previous >= triggers.number(a) {
+                Resend(horizon_ms) => if previous >= triggers.number(a) || now < first || now - first >= horizon_ms {
                     return Ok(Doubt)
                 },
             }
+            first
         },
         None => match b.mode {
-            First => (),
-            _ => return Ok(Doubt)
+            First => now,
+            _ => return Ok(Unstarted)
         },
     }
     let Begin(index: _, fingerprint: take encoded, mode: _) = take b
-    store.put(mut tx, t.rows, key, Started(triggers.number(a), take encoded))?
+    store.put(mut tx, t.rows, key, Started(triggers.number(a), first_started, take encoded))?
     Ok(Ready)
 }
 
 fn finish_outside(mut tx: store.Tx, t: Tables, a: triggers.Attempt, take f: Finish) -> Result[Reply, store.Error] {
     let key = row_key(a, f.step.index)?
-    let Some(Started(attempt, take saved)) = store.fetch(tx, t.rows, key)? else {
+    let Some(Started(attempt, _, take saved)) = store.fetch(tx, t.rows, key)? else {
         return Error(Missing("started step"))
     }
     if saved.contract != f.step.fingerprint.contract {
@@ -190,6 +193,14 @@ fn control(mut tx: store.Tx, t: Tables, a: triggers.Attempt, take command: Comma
     match take command {
         Enter(take b) => start_outside(mut tx, t, a, take b),
         Finalize(take f) => finish_outside(mut tx, t, a, take f),
+        Park(index) => {
+            let key = row_key(a, index)?
+            let Some(Started(_, first_started, _)) = store.fetch(tx, t.rows, key)? else {
+                return Error(Missing("in-doubt step"))
+            }
+            trigger_write(triggers.park_doubt(mut tx, t.triggers, a, index, first_started))?
+            Ok(Held)
+        },
     }
 }
 
@@ -240,8 +251,14 @@ pub fn schedule[A](mut tx: store.Tx, t: Tables, entries: triggers.Entries, targe
 }
 
 pub fn run[G: send, A: codec, R: codec, E: codec](route: runner.TriggerContext, take grants: Map[u64, G], take a: A, body: fn(mut Ctx[G], take A) -> Result[R, StepError[E]] waits) -> Result[R, StepError[E]] waits {
-    let mut ctx = Ctx(route: view route, grants: take grants, index: 0u64)
-    body(mut ctx, take a)
+    let mut ctx = Ctx(route: view route, grants: take grants, index: 0u64, in_doubt: false)
+    let result = body(mut ctx, take a)
+    if ctx.in_doubt {
+        let parked: Result[Reply, StepError[E]] = dispatch(ctx.route, code.describe(control), Park(ctx.index))
+        let _ = (take parked)?
+        return Error(InDoubt(next_id(ctx)))
+    }
+    take result
 }
 
 pub fn next_id[G: send](ctx: Ctx[G]) -> StepId {
@@ -255,6 +272,7 @@ pub fn outside_key(id: StepId) -> Result[Bytes, store.Error] {
 fn reply_value[G: send, R: codec, E: codec](mut ctx: Ctx[G], take reply: Reply) -> Result[R, StepError[E]] {
     match take reply {
         Replay(take raw) => {
+            ctx.in_doubt = false
             ctx.index += 1u64
             let found: Result[Result[R, E], store.Error] = decode(raw)
             match take found {
@@ -263,7 +281,11 @@ fn reply_value[G: send, R: codec, E: codec](mut ctx: Ctx[G], take reply: Reply) 
                 Error(_) => fail("step wrapper: decode result"),
             }
         },
-        Doubt => Error(InDoubt(next_id(ctx))),
+        Doubt => {
+            ctx.in_doubt = true
+            Error(InDoubt(next_id(ctx)))
+        },
+        Unstarted => Error(InDoubt(next_id(ctx))),
         Held => Error(StaleAttempt),
         Capped => Error(Cap),
         Ready => fail("step wrapper: no result"),
@@ -323,11 +345,13 @@ pub fn step[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, f
     unkeyed_outside(mut ctx, take a, take request, f)
 }
 
-pub fn resend[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, take a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
+/// Repeats an ambiguous send only within the provider's idempotency horizon,
+/// measured in milliseconds from the first durable start.
+pub fn resend[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, horizon_ms: u64, take a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
     if id != next_id(ctx) {
         return Error(StaleAttempt)
     }
-    let request = outside_request(ctx.index, a, f, Resend)
+    let request = outside_request(ctx.index, a, f, Resend(horizon_ms))
     unkeyed_outside(mut ctx, take a, take request, f)
 }
 
@@ -345,11 +369,13 @@ pub fn keyed[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, 
     keyed_outside(mut ctx, take a, take request, f)
 }
 
-pub fn resend_keyed[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, take a: A, f: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
+/// Repeats an ambiguous send only within the provider's idempotency horizon,
+/// measured in milliseconds from the first durable start.
+pub fn resend_keyed[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, horizon_ms: u64, take a: A, f: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
     if id != next_id(ctx) {
         return Error(StaleAttempt)
     }
-    let request = keyed_request(ctx.index, a, f, Resend)
+    let request = keyed_request(ctx.index, a, f, Resend(horizon_ms))
     keyed_outside(mut ctx, take a, take request, f)
 }
 
@@ -378,7 +404,7 @@ fn transaction_body[App: inert + send, A: codec, R: codec, E: codec](mut tx: sto
             }
             return Ok(Replay(take raw))
         },
-        Some(Started(_, take saved)) => return hold(mut tx, t, a, index, saved, encoded),
+        Some(Started(_, _, take saved)) => return hold(mut tx, t, a, index, saved, encoded),
         None => (),
     }
     let arg: A = decode(request.arg)?

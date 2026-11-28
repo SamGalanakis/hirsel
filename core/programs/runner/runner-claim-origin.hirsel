@@ -1,0 +1,50 @@
+// A keyed operation belongs to one Store. Its physical name is NUL, the
+// 16-byte StoreId, then the logical HTTP operation. valid_op admits 39
+// characters and at most 64 of them. Three base-40 digits fit in a u16,
+// so even the longest physical name fits the Store's 64-byte operation key.
+// Zero pads the final word. Logical names never contain the padding digit.
+const CLAIM_OP_ALPHABET: FrozenBytes = b" abcdefghijklmnopqrstuvwxyz0123456789_-."
+
+fn claim_origin(db: store.Db) -> Bytes {
+    let (hi, lo) = store.identity_words(db)
+    let mut prefix: Bytes = list.with_capacity(17)
+    list.push(mut prefix, 0u8)
+    std.codec.put_u64(hi, mut prefix)
+    std.codec.put_u64(lo, mut prefix)
+    take prefix
+}
+
+fn claim_operation(prefix: Bytes, name: Bytes) -> Bytes {
+    let mut stored: Bytes = clone(prefix)
+    let mut at = 0u64
+    while at < list.len(name) {
+        let mut packed = 0u16
+        for _ in 0u64 .. 3u64 {
+            packed *= 40u16
+            if at < list.len(name) {
+                let digit = option.unwrap(list.find_byte(bytebuf.as_bytes(CLAIM_OP_ALPHABET), 1, 40, name[at]))
+                packed += int.narrow(digit)
+                at += 1
+            }
+        }
+        std.codec.put_u16(packed, mut stored)
+    }
+    take stored
+}
+
+fn claim_operation_name(stored: Bytes) -> Result[Bytes, store.Error] {
+    let mut name: Bytes = list.new()
+    let mut at = 17u64
+    while at < list.len(stored) {
+        let packed = std.codec.take_u16(stored, mut at) ?=> Decode
+        if packed >= 64000 {
+            return Error(Missing("keyed operation name"))
+        }
+        for digit in[packed / 1600, (packed / 40) % 40, packed % 40] {
+            if digit != 0 {
+                list.push(mut name, bytebuf.as_bytes(CLAIM_OP_ALPHABET)[int.widen(digit)])
+            }
+        }
+    }
+    Ok(take name)
+}

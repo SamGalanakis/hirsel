@@ -119,9 +119,12 @@ fn trigger_law_config(take entries: triggers.Entries) -> TriggerConfig {
 
 // The law's attempt mint, served by a grant task the law starts beside the
 // drive and keeps: dropping a PlaceGrants cancels its worker.
+fn trigger_law_mints() -> Grants[TriggerContext, TriggerLawTables, ()] {
+    Grants(attempt: Some(Mint(seed: (), mint: trigger_law_grants, mint_bytes: 65536u64, mint_steps: DEFAULT_STEPS)), call: None, claim: None, bind: None)
+}
+
 fn trigger_law_grant_task(tasks: Tasks, h: TriggerLawTables) -> PlaceGrants[TriggerContext] {
-    let given: Grants[TriggerContext, TriggerLawTables, ()] = Grants(attempt: Some(Mint(seed: (), mint: trigger_law_grants, mint_bytes: 65536u64, mint_steps: DEFAULT_STEPS)), call: None, claim: None, bind: None)
-    start_grants(tasks, h, grant_start(take given))
+    start_grants(tasks, h, grant_start(trigger_law_mints()))
 }
 
 fn trigger_law_attempts(running: PlaceGrants[TriggerContext]) -> Option[Sender[MintRequest[TriggerContext, TriggerContext]]] {

@@ -580,7 +580,7 @@ pub fn journal_law_steps_fence(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
     if let Doubt = law_control(mut reopened, current, Enter(outside_request(1u64, 6u64, code.describe(law_outside), First))) {} else {
         return false
     }
-    let retry = outside_request(1u64, 6u64, code.describe(law_outside), Resend)
+    let retry = outside_request(1u64, 6u64, code.describe(law_outside), Resend(60000))
     if let Ready = law_control(mut reopened, current, Enter(clone(retry))) {} else {
         return false
     }
@@ -922,4 +922,32 @@ pub fn journal_steps_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args,
     } else {
         Error(Exit(status: 1u8))
     }
+}
+
+@test
+fn resend_expires_from_first_send(d: Dir, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let (c, take hand) = provide.clock(0, 1000)
+    let mut wall = take hand
+    let mut law = law_open(d, c, r, tasks)
+    let id = law_enroll(mut law, 1)
+    let first = law_attempt(mut law, id, b"r1")
+    law_pending_step(mut law, first, 0)
+    let _ = law_outside(c, 6)
+    let mut recovered = law_reopen(take law)
+    clock.set_wall(mut wall, 1009)
+    let second = law_attempt(mut recovered, id, b"r1")
+    let send = code.describe(law_outside)
+    if let Doubt = law_control(mut recovered, second, Enter(outside_request(0, 6u64, send, First))) {} else {
+        fail("reentry repeated an ambiguous send")
+    }
+    let retry = outside_request(0, 6u64, send, Resend(10))
+    if let Ready = law_control(mut recovered, second, Enter(clone(retry))) {} else {
+        fail("explicit ten millisecond horizon refused at age nine")
+    }
+    clock.set_wall(mut wall, 1010)
+    let third = law_attempt(mut recovered, id, b"r1")
+    if let Doubt = law_control(mut recovered, third, Enter(take retry)) {} else {
+        fail("resend admitted at the first send's ten millisecond horizon")
+    }
+    Ok(())
 }

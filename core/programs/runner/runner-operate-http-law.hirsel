@@ -24,7 +24,7 @@ fn operate_http_law_config(c: Clock, r: Random, tasks: Tasks, cfg: std.http.Conf
     result.unwrap(std.router.add(mut raw, "GET", "/", std.router.raw(operate_http_law_asset)))
     let mint = Mint(seed: (), mint: operate_http_law_mint, mint_bytes: 8192u64, mint_steps: DEFAULT_STEPS)
     let grants = HttpGrants(check: wire(code.describe(sse_law_bind), 8192u64, DEFAULT_STEPS), bind: take mint, claim: None)
-    HttpPlaceConfig(backing: Memory, options: result.unwrap(store.sized(Memory, 67108864u64)), selection: Reopen, place: code.describe(operate_http_law_place), schema: code.describe(sse_law_schema), on_migrate: None, listener: take listener, raw: take raw, http: clone(cfg), relay: RelayConfig(http_max: 4u64, sends_max: 4u64, positions_max: 4u64, arg_max: 4096u64), grants: Some(take grants), clock: c, tasks, random: r, n_place: HTTP_LAW_PLACE_BYTES, n_publisher: 8388608u64, n_server: 16777216u64, state_bytes: 2097152u64, request_bytes: 65536u64, frame_bytes: 65536u64, stream_queue: 4u64)
+    HttpPlaceConfig(backing: Memory, options: result.unwrap(store.sized(Memory, 67108864u64)), selection: Reopen, place: code.describe(operate_http_law_place), schema: code.describe(sse_law_schema), on_migrate: None, listener: take listener, raw: take raw, http: clone(cfg), relay: RelayConfig(http_max: 4u64, sends_max: 4u64, positions_max: 4u64, arg_max: 4096u64), grants: Some(take grants), triggers: None, clock: c, tasks, random: r, n_place: HTTP_LAW_PLACE_BYTES, n_publisher: 8388608u64, n_server: 16777216u64, state_bytes: 2097152u64, request_bytes: 65536u64, frame_bytes: 65536u64, stream_queue: 4u64)
 }
 
 type HttpOperateLaw: send {

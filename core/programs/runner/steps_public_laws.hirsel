@@ -18,7 +18,7 @@ type Control: send {
     lookups: Sender[LookupCall]
 }
 
-type Recovery: codec + send = Resolve | Resend
+type Recovery: codec + send = Resolve | Resend | Park
 
 type RunArg: codec + send {
     recovery: Recovery,
@@ -66,8 +66,9 @@ fn process(mut ctx: steps.Ctx[Control], take arg: RunArg) -> Result[u64, steps.S
         fail("steps public law: expected an in-doubt step on reentry")
     }
     let value = match arg.recovery {
+        Park => return Error(InDoubt(id)),
         Resolve => steps.resolve(mut ctx, id, arg.value, send, code.describe(lookup))?,
-        Resend => steps.resend(mut ctx, id, arg.value, send)?,
+        Resend => steps.resend(mut ctx, id, 60000, arg.value, send)?,
     }
     // This second step is the test's happens-after edge: the wrapper cannot
     // reach it before the first step's result row is durable.
@@ -85,11 +86,27 @@ fn make_grants(seed: Control, _handles: LawHandles, ctx: runner.TriggerContext) 
 }
 
 fn run(g: Grants, _caller: runner.Caller, take arg: RunArg) -> Result[u64, Capacity] waits {
+    if let Park = arg.recovery {
+        if triggers.number(runner.trigger_attempt(g.context)) == 1 {
+            let none: Map[u64, Control] = map.new()
+            let probe = steps.run(g.context, take none, arg.value, fn(mut ctx: steps.Ctx[Control], take value: u64) -> Result[u64, steps.StepError[LawError]] waits {
+                let id = steps.next_id(ctx)
+                steps.resend(mut ctx, id, 60000, value, code.describe(effect))
+            })
+            if let Error(InDoubt(_)) = probe {} else {
+                fail("resend before a step starts must return InDoubt")
+            }
+        }
+    }
     let mut allowed: Map[u64, Control] = map.new()
     map.insert(mut allowed, 0u64, control_copy(g.control))
     map.insert(mut allowed, 1u64, control_copy(g.control))
     match steps.run(g.context, take allowed, take arg, process) {
         Ok(value) => Ok(value),
+        Error(InDoubt(_)) => {
+            let _ = lookup(g.control, 0)
+            Ok(0u64)
+        },
         Error(_) => Ok(0u64),
     }
 }
@@ -243,6 +260,29 @@ fn public_api_law(parent: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, recove
     let second_settings = settings_for(dir, c, r, tasks, n, Control(effects: channel.sender(effects), lookups: channel.sender(lookups)))
     let second_place = start_place(tasks, take second_settings)
     let expected = match recovery {
+        Park => {
+            // The wrapper has returned InDoubt. Inspect its durable hold after shutdown.
+            let acknowledged = option.unwrap(receive_within(lookup_in, c, 5000))
+            stop_place(take second_place)
+            let mut parked_db = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
+            let h = result.unwrap(store.bind_declaration(mut parked_db, Open, law_schema))
+            let snap = store.snapshot(parked_db)
+            let rdr = result.unwrap(store.reader(parked_db, store.READER_PIN_MIN))
+            let held = result.unwrap(triggers.hold_mark(rdr, snap, h.triggers, run_id))
+            let ended = result.unwrap(triggers.outcome(rdr, snap, h.triggers, run_id))
+            let sent = channel.try_receive(effect_in)
+            result.unwrap(store.close(take parked_db))
+            if let Some(InDoubt(2, 0, _)) = held {} else {
+                return false
+            }
+            if let None = ended {} else {
+                return false
+            }
+            if let Ok(_) = sent {
+                return false
+            }
+            return acknowledged.value == 0
+        },
         Resolve => {
             let Some(answer) = receive_within(lookup_in, c, 5000u64) else {
                 fail("steps public law: resolve did not call lookup")
@@ -287,6 +327,15 @@ fn steps_public_resolve(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Re
 @test
 fn steps_public_resend(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     if public_api_law(d, c, r, tasks, n, Resend) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn steps_public_in_doubt_parks(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if public_api_law(d, c, r, tasks, n, Park) {
         Ok(())
     } else {
         Error(())

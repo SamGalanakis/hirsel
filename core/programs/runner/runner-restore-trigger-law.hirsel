@@ -1,0 +1,72 @@
+// The restore changes the StoreId while preserving branch zero and all rows.
+@test
+fn restored_child_leaves_parent_work_inert(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let parent = triggers.law_directory(d)
+    let backup = triggers.law_directory(d)
+    let child = triggers.law_directory(d)
+    let options = result.unwrap(store.sized(Directory, 268435456u64))
+    let mut db = store.open(tasks, parent, c, r, options)?
+    let h = store.bind_declaration(mut db, Migrate, trigger_law_schema)?
+    let target = result.unwrap(triggers.transact(code.describe(trigger_law_body)))
+    let mut entries = triggers.empty_entries()
+    result.unwrap(triggers.allow(mut entries, target))
+    let made = store.run(mut db, None, (store.copy_env(h.triggers), store.copy_env(entries), store.copy_env(target)), fn(mut tx, env) -> Result[triggers.Id, triggers.Error] {
+        triggers.write(mut tx, env.0, env.1, env.2, 1u64, AfterCommit)
+    })?
+    let Committed(done) = made else {
+        fail("parent trigger did not commit")
+    }
+    let id = done.value
+    store.durable(mut db, done.ticket)?
+    let principal = store.Caller(issuer: 2, subject: b"alice")
+    // The 64-character logical operation and delivery key survive scoping.
+    let op = "abcdefghijklmnopqrstuvwxyz0123456789_-.abcdefghijklmnopqrstuvwxy"
+    let parent_key = store.ClaimKey(op: clone(string.as_bytes(op)), caller: clone(principal), key: b"delivery")
+    let digest = store.request_digest(b"charge", b"args")
+    let Accepted(_) = admit_runner_claim(mut db, parent_key, digest, b"args", Some(recovery_law_policy()))? else {
+        fail("parent claim did not open")
+    }
+    let job = result.unwrap(store.begin_backup(mut db, backup, backup_law_attempt(1)))
+    let _ = result.unwrap(store.export_copy(take job))
+    store.release_export(mut db, backup_law_attempt(1))
+    store.close(take db)?
+    let stamp = result.unwrap(store.restore(tasks, backup, child, c, r, options, Latest, store.restore_attempt(r)))
+    let mut restored = store.open(tasks, child, c, r, options)?
+    let child_key = store.ClaimKey(op: clone(string.as_bytes(op)), caller: take principal, key: b"delivery")
+    let Accepted(_) = admit_runner_claim(mut restored, child_key, digest, b"args", Some(recovery_law_policy()))? else {
+        fail("child claim did not open")
+    }
+    let snap = store.snapshot(restored)
+    let rdr = store.reader(restored, store.READER_PIN_MIN)?
+    let tables = trigger_law_tables(mut restored)
+    let before = result.unwrap(triggers.row_value(option.unwrap(triggers.pending_at(rdr, snap, tables, id)?)))
+    let mut scan = triggers.scan_pending(rdr, snap, tables)?
+    let skipped = none(triggers.next_scanned(rdr, mut scan)?)
+    let Ok(Some(take claims)) = startup_claims(mut restored, recovery_law_retired_op(op, 2)) else {
+        fail("child did not recover its local claim")
+    }
+    let mut state = box.unbox(take claims)
+    let recovered = recovery_law_order(mut state.queue)
+    let local_only = list.len(recovered) == 1 && recovered[0] == store.claim_key_bytes(law_claim_key(restored, child_key))?
+    let child_handles = store.bind_declaration(mut restored, Open, trigger_law_schema)?
+    let reg = result.unwrap(placed(code.describe(trigger_law_places), 1048576u64))
+    let (to, _): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(4u64)
+    let dormant = none(open_trigger_drive(restored, child_handles, reg, c, tasks, channel.sender(to), 1048576u64, None, None)?)
+    let (take head, _, take mints) = trigger_law_head(take restored, c, tasks, take to, take entries)
+    let mut hd = take head
+    let advanced = advance_triggers(mut hd)?
+    let after = store.snapshot(hd.db)
+    let unchanged = match triggers.pending_at(rdr, after, tables, id)? {
+        Some(row) => result.unwrap(triggers.row_value(row)) == before,
+        None => false,
+    }
+    let sent = trigger_law_value(hd)
+    let terminal = trigger_law_outcome(hd, id)
+    stop_grants(Some(take mints))
+    let Head(db: take kept, ..) = take hd
+    store.close(take kept)?
+    if stamp.child == stamp.point.token.parent || !skipped || !dormant || advanced || sent != None || !none(terminal) || !unchanged || !local_only {
+        fail("restored child dispatched or rewrote parent work, or recovered the wrong claims")
+    }
+    Ok(())
+}

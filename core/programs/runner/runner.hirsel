@@ -2368,29 +2368,6 @@ fn make_trigger_drive[G: send](take tables: triggers.Tables, clock: Clock, tasks
     Ok(box.new(take drive))
 }
 
-fn open_trigger_drive[G: send, H: shareable + inert + send](db: store.Db, h: H, reg: Registry[G, H], clock: Clock, tasks: Tasks, take to: Sender[HeadInput], n_place: u64, take config: Option[TriggerConfig], take grants: Option[Sender[MintRequest[TriggerContext, G]]]) -> Result[Option[Box[TriggerDrive[G]]], store.Error] waits {
-    let snapshot = store.snapshot(db)
-    let tables = declared_triggers(reg, h, snapshot)?
-    if let Some(take configured) = take config {
-        if !triggers.is_empty(configured.entries) {
-            let Some(take opened_tables) = take tables else {
-                return Error(Missing("trigger table selector"))
-            }
-            return Ok(Some(make_trigger_drive(take opened_tables, clock, tasks, take to, trigger_stamp(reg.t.exported, reg.t.bindings, n_place)?, take configured, take grants)?))
-        }
-    }
-    let Some(take opened_tables) = take tables else {
-        return Ok(None)
-    }
-    let read_handle = store.reader(db, store.READER_PIN_MIN)?
-    let mut remaining = triggers.scan_pending(read_handle, snapshot, opened_tables)?
-    if let None = triggers.next_scanned(read_handle, mut remaining)? {
-        return Ok(None)
-    }
-    let drive: TriggerDrive[G] = TriggerDrive(tables: take opened_tables, revision: trigger_stamp(reg.t.exported, reg.t.bindings, n_place)?, clock: clock, tasks: tasks, to: take to, entries: triggers.empty_entries(), author: store.Caller(issuer: 0u8, subject: list.new()), grants: None, active: map.new(), timer: None)
-    Ok(Some(box.new(take drive)))
-}
-
 fn arm_trigger_timer[G: send](mut drive: Box[TriggerDrive[G]], at: u64) -> Result[(), store.Error] waits {
     let prior = replace(mut drive.timer, None)
     drive.timer = Some(arm_wall_timer(take prior, drive.tasks, drive.clock, drive.to, at))
@@ -2865,7 +2842,7 @@ pub fn apply_attempt[G: send, H: shareable + inert + send](mut db: store.Db, reg
         Some(Transact(_, _, _, _, go)) => (go.attempt)(mut db, h, author, trigger_tables, a, arg),
         Some(Fenced(_, _, go)) => go(mut db, h, trigger_tables, a, arg),
         _ => store.run(mut db, None, (store.copy_env(trigger_tables), store.copy_env(a)), fn(mut tx, env) -> Result[Outcome, FencedRefusal] {
-            check_attempt(tx, env.0, env.1)?
+            check_attempt(mut tx, env.0, env.1)?
             Error(BodyOutcome(Refused(NoEntry)))
         }),
     }

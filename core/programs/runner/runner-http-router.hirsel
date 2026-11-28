@@ -163,7 +163,7 @@ pub fn http_retirements[G: send, H: shareable + inert + send](db: store.Db, regi
     let mut policies: Map[Bytes, store.KeyedPolicy] = map.new()
     for (name, keyed) in registered.t.keyed {
         if none(keyed.policy) {
-            if let Some(take saved) = store.keyed_policy(db, name) ?=> Store {
+            if let Some(take saved) = store.keyed_policy(db, claim_operation(claim_origin(db), name)) ?=> Store {
                 map.insert(mut policies, clone(name), take saved)
             }
         }

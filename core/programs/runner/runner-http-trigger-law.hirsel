@@ -1,0 +1,113 @@
+// The callback acknowledges only after its fenced write returns from the head
+// that admitted the HTTP delivery.
+type WebhookTriggerGrant: send = Front | Attempt(TriggerContext, Sender[u64])
+
+fn webhook_trigger_mint(ack: Sender[u64], _h: TriggerLawTables, ctx: TriggerContext) -> Result[WebhookTriggerGrant, Capacity] {
+    Ok(Attempt(share_trigger_context(ctx), channel.sender(ack)))
+}
+
+fn webhook_front_mint(_ack: Sender[u64], _h: TriggerLawTables, _input: ()) -> Result[WebhookTriggerGrant, Capacity] {
+    Ok(Front)
+}
+
+fn webhook_trigger_wire(_grant: WebhookTriggerGrant, _credentials: Bytes) -> Result[BoundCaller, BindRefusal] {
+    Error(Rejected)
+}
+
+fn webhook_trigger_claim(_grant: WebhookTriggerGrant, _request: ClaimRequest) -> Result[Claimed, ()] {
+    Ok(Claimed(caller: store.Caller(issuer: 9, subject: b"provider"), key: b"delivery"))
+}
+
+fn webhook_trigger_send(grant: WebhookTriggerGrant, caller: Caller, take digit: u64) -> Result[u64, Capacity] waits {
+    let Attempt(ctx, seen) = view grant else {
+        fail("trigger ran without its attempt mint")
+    }
+    let number = trigger_law_granted_body(ctx, caller, digit)?
+    result.unwrap(channel.send(seen, number))
+    Ok(number)
+}
+
+fn webhook_trigger_entries() -> triggers.Entries {
+    let mut entries = triggers.empty_entries()
+    result.unwrap(triggers.allow(mut entries, result.unwrap(triggers.granted(code.describe(webhook_trigger_send)))))
+    take entries
+}
+
+fn webhook_trigger_schedule(mut tx: store.Tx, h: TriggerLawTables, _caller: Caller, take arg: WebhookLawInput) -> Result[u64, ()] {
+    let target = result.unwrap(triggers.granted(code.describe(webhook_trigger_send)))
+    let id = triggers.write(mut tx, h.triggers, webhook_trigger_entries(), target, int.widen(arg.test), AfterCommit) ?=> |_| ()
+    Ok(id.index)
+}
+
+fn webhook_trigger_place(mut r: Registry[WebhookTriggerGrant, TriggerLawTables]) -> Result[(), RegisterError] {
+    use_trigger_tables(mut r, fn(h: TriggerLawTables) -> triggers.Tables {
+        clone(h.triggers)
+    })
+    transact(mut r, code.describe(webhook_trigger_schedule), 131072, DEFAULT_STEPS)?
+    transact(mut r, code.describe(trigger_law_body), 131072, DEFAULT_STEPS)?
+    granted(mut r, code.describe(webhook_trigger_send), 131072, DEFAULT_STEPS)?
+    let mut fields: List[FieldSource] = list.new()
+    list.push(mut fields, FieldSource(field: "test", source: Body))
+    let binding = HttpBinding(op: "hook", method: Post, path: "/hook", entry: http_law_key(r.t.exported[0]), fields: take fields, mode: Keyed, ok_status: 201, error_status: 422, body_max: 1024, arg_max: 4096, deadline_ms: 1000, steps: DEFAULT_STEPS)
+    let claim = Claim(f: code.describe(webhook_trigger_claim), headers: list.new(), claim_bytes: 8192, claim_steps: DEFAULT_STEPS)
+    bind_keyed(mut r, take binding, KeyedRule(claim: take claim, retention_ms: 60000, keys_max: 1, principal_keys_max: 1))
+}
+
+type WebhookTriggerClient: send {
+    addr: Addr,
+    net: Net,
+    clock: Clock,
+    ack: Receiver[u64],
+    stop: Sender[()]
+}
+
+fn webhook_trigger_client(take client: WebhookTriggerClient) -> bool waits {
+    let first = webhook_law_request(client.net, client.clock, client.addr, b"/hook", b"", b"{\"test\":1}")
+    let delivered = channel.receive_until(client.ack, At(client.clock, std.clock.deadline_after_ms(host.mono_ns(client.clock), 2000)))
+    let duplicate = webhook_law_request(client.net, client.clock, client.addr, b"/hook", b"", b"{\"test\":1}")
+    result.unwrap(channel.send(client.stop, ()))
+    let once = match delivered {
+        Ok(1u64) => true,
+        _ => false,
+    }
+    once && first.status == 201 && first.committed && !first.replayed && duplicate.status == 201 && duplicate.replayed
+}
+
+fn webhook_trigger_config(c: Clock, r: Random, tasks: Tasks, take listener: Listener, take ack: Sender[u64]) -> HttpPlaceConfig[WebhookTriggerGrant, TriggerLawTables, Sender[u64]] {
+    let bind_mint = Mint(seed: channel.sender(ack), mint: webhook_front_mint, mint_bytes: 8192, mint_steps: DEFAULT_STEPS)
+    let claim_mint = Mint(seed: channel.sender(ack), mint: webhook_front_mint, mint_bytes: 8192, mint_steps: DEFAULT_STEPS)
+    let grants = HttpGrants(check: wire(code.describe(webhook_trigger_wire), 8192, DEFAULT_STEPS), bind: take bind_mint, claim: Some(take claim_mint))
+    let trigger_mint = Mint(seed: take ack, mint: webhook_trigger_mint, mint_bytes: 65536, mint_steps: DEFAULT_STEPS)
+    let triggering = HttpTriggers(drive: trigger_law_config(webhook_trigger_entries()), attempt: take trigger_mint)
+    let config: HttpPlaceConfig[WebhookTriggerGrant, TriggerLawTables, Sender[u64]] = HttpPlaceConfig(backing: Memory, options: result.unwrap(store.sized(Memory, 67108864)), selection: Reopen, place: code.describe(webhook_trigger_place), schema: code.describe(trigger_law_schema), on_migrate: None, listener: take listener, raw: std.router.builder(), http: http_law_config(), relay: RelayConfig(http_max: 2, sends_max: 2, positions_max: 2, arg_max: 4096), grants: Some(take grants), triggers: Some(take triggering), clock: c, tasks, random: r, n_place: HTTP_LAW_PLACE_BYTES, n_publisher: 8388608, n_server: 16777216, state_bytes: 2097152, request_bytes: 65536, frame_bytes: 65536, stream_queue: 4)
+    take config
+}
+
+@test
+fn http_trigger_tables_require_drive(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    let (take listener, _) = result.unwrap(host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
+    let (ack, _): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let mut config = webhook_trigger_config(c, r, tasks, take listener, take ack)
+    config.triggers = None
+    let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1)
+    result.unwrap(channel.send(stop, ()))
+    match operate_http(take config, take stopping) {
+        Error(PlaceStart(Open(Store(Missing(reason))))) if reason == "HTTP trigger drive" => Ok(()),
+        _ => fail("HTTP Place accepted declared trigger tables without a drive"),
+    }
+}
+
+@test
+fn webhook_executes_trigger_on_http_head(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    let (take listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
+    let (ack, seen): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1)
+    let client = WebhookTriggerClient(addr, net: n, clock: c, ack: take seen, stop: take stop)
+    let running = task.spawn(tasks, bytes 1048576, take client, webhook_trigger_client)
+    let config = webhook_trigger_config(c, r, tasks, take listener, take ack)
+    result.unwrap(operate_http(take config, take stopping))
+    if !result.unwrap(task.join(take running)) {
+        fail("keyed webhook did not execute its granted trigger on the HTTP head")
+    }
+    Ok(())
+}

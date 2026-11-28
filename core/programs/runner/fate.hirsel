@@ -15,7 +15,7 @@ pub type Fates: codec + send {
 
 // `Cut` is a started run that is not parked; `same_code` is true when the row's
 // revision stamp equals NEW's identity digest.
-pub type HeldBy: codec + key + send = Cut | Revision(bool) | Request(bool)
+pub type HeldBy: codec + key + send = Cut | Revision(bool) | Request(bool) | InDoubt(bool)
 
 pub type HeldGroup: codec + send {
     path: Bytes,
@@ -114,7 +114,8 @@ pub fn held_by(p: triggers.Pending, image: Bytes) -> HeldBy {
     match triggers.parked_by(p) {
         None => Cut,
         Some(Revision(_, _)) => Revision(same),
-        Some(_) => Request(same),
+        Some(InDoubt(_, _, _)) => InDoubt(same),
+        Some(Request(..)) => Request(same),
     }
 }
 
@@ -197,14 +198,14 @@ pub fn settle_read(read_handle: store.Reader, snap: store.Snapshot, mut staged: 
 /// for each stored row of OLD's pending table at the exported base, in key order, its key,
 /// the value it must hold after the import, and whether `settle` changes it. None when a row
 /// does not decode, or a held row has no fate in `f`.
-pub fn expected_settlement(base: List[(Bytes, Bytes)], image: Bytes, shown: Map[(bool, Bytes, Bytes, HeldBy), (HeldFate, u64, u64)]) -> Option[List[(Bytes, Bytes, bool)]] {
+pub fn expected_settlement(origin: store.StoreId, base: List[(Bytes, Bytes)], image: Bytes, shown: Map[(bool, Bytes, Bytes, HeldBy), (HeldFate, u64, u64)]) -> Option[List[(Bytes, Bytes, bool)]] {
     let mut out: List[(Bytes, Bytes, bool)] = list.new()
     let mut actual: Map[(bool, Bytes, Bytes, HeldBy), (u64, u64)] = map.new()
     for (key, value) in base {
         let Some(p) = triggers.stored_pending(key, value) else {
             return None
         }
-        if !triggers.on_main(p) || !is_held(p, image) {
+        if !triggers.serving_origin(triggers.pending_id(p), origin) || !is_held(p, image) {
             list.push(mut out, (clone(key), clone(value), false))
             continue
         }
@@ -259,6 +260,8 @@ pub fn push_report(mut line: String, report: HeldReport) {
             Cut => " hold=cut",
             Revision(true) => " hold=revision(same_code)",
             Revision(false) => " hold=revision",
+            InDoubt(true) => " hold=in_doubt(same_code)",
+            InDoubt(false) => " hold=in_doubt",
             Request(true) => " hold=request(same_code)",
             Request(false) => " hold=request",
         })

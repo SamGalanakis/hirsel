@@ -25,3 +25,30 @@ fn declared_triggers[G: send, H: shareable + inert + send](r: Registry[G, H], h:
     }
     Ok(None)
 }
+
+fn open_trigger_drive[G: send, H: shareable + inert + send](db: store.Db, h: H, reg: Registry[G, H], clock: Clock, tasks: Tasks, take to: Sender[HeadInput], n_place: u64, take config: Option[TriggerConfig], take grants: Option[Sender[MintRequest[TriggerContext, G]]]) -> Result[Option[Box[TriggerDrive[G]]], store.Error] waits {
+    let snapshot = store.snapshot(db)
+    let tables = declared_triggers(reg, h, snapshot)?
+    if none(grants) {
+        return Ok(None)
+    }
+    let explicit = !none(config)
+    let configured = match take config {
+        Some(take cfg) => take cfg,
+        None => TriggerConfig(entries: triggers.empty_entries(), author: store.Caller(issuer: 0, subject: list.new())),
+    }
+    let Some(take opened) = take tables else {
+        if triggers.is_empty(configured.entries) {
+            return Ok(None)
+        }
+        return Error(Missing("trigger table selector"))
+    }
+    if !explicit {
+        let rdr = store.reader(db, store.READER_PIN_MIN)?
+        let mut cursor = triggers.scan_pending(rdr, snapshot, opened)?
+        if none(triggers.next_scanned(rdr, mut cursor)?) {
+            return Ok(None)
+        }
+    }
+    Ok(Some(make_trigger_drive(take opened, clock, tasks, take to, trigger_stamp(reg.t.exported, reg.t.bindings, n_place)?, take configured, take grants)?))
+}

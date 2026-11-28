@@ -1,12 +1,25 @@
+fn law_claim_key(db: store.Db, key: store.ClaimKey) -> store.ClaimKey {
+    store.ClaimKey(op: claim_operation(claim_origin(db), key.op), caller: clone(key.caller), key: clone(key.key))
+}
+
+fn admit_runner_claim(mut db: store.Db, key: store.ClaimKey, digest: store.RequestDigest, raw: Bytes, take policy: Option[store.KeyedPolicy]) -> Result[store.ClaimAdmission, store.Error] waits {
+    let scoped_key = law_claim_key(db, key)
+    store.admit_claim(mut db, scoped_key, digest, raw, take policy)
+}
+
 fn recovery_law_claim(clock_value: Clock, _request: ClaimRequest) -> Result[Claimed, ()] waits {
     host.sleep_until(clock_value, host.mono_ns(clock_value))
     Error(())
 }
 
 fn recovery_law_retired(declared: u64) -> Registry[Clock, ()] {
+    recovery_law_retired_op("pay", declared)
+}
+
+fn recovery_law_retired_op(name: String, declared: u64) -> Registry[Clock, ()] {
     let mut reg: Registry[Clock, ()] = registry()
     let claim = Claim(f: code.describe(recovery_law_claim), headers: list.new(), claim_bytes: 8192, claim_steps: DEFAULT_STEPS)
-    result.unwrap(bind_retired(mut reg, "pay", Post, "/pay", Retirement(claim: take claim, keys_max: declared)))
+    result.unwrap(bind_retired(mut reg, name, Post, "/pay", Retirement(claim: take claim, keys_max: declared)))
     take reg
 }
 
@@ -50,7 +63,7 @@ fn retired_quota_checked_before_idle_keyed_recovery(d: Dir, random: Random, task
     let mut db = store.open(tasks, dir, time, random, options)?
     let claim = store.ClaimKey(op: b"pay", caller: store.Caller(issuer: 2, subject: b"alice"), key: b"one")
     let digest = store.request_digest(b"charge", b"args")
-    let Accepted(_) = store.admit_claim(mut db, claim, digest, b"args", Some(recovery_law_policy()))? else {
+    let Accepted(_) = admit_runner_claim(mut db, claim, digest, b"args", Some(recovery_law_policy()))? else {
         fail("fixture claim did not admit")
     }
     store.close(take db)?
@@ -96,7 +109,7 @@ fn retired_quota_checked_before_idle_keyed_recovery(d: Dir, random: Random, task
     let Head(db: take kept, ..) = take hd
     let mut finished = take kept
     let no_policy: Option[store.KeyedPolicy] = None
-    let Duplicate(reply_bytes) = store.admit_claim(mut finished, claim, digest, b"args", take no_policy)? else {
+    let Duplicate(reply_bytes) = admit_runner_claim(mut finished, claim, digest, b"args", take no_policy)? else {
         fail("idle timer did not recover the unmatched retired claim")
     }
     let codec: std.codec.Codec[Outcome] = std.codec.of()
@@ -162,7 +175,7 @@ fn recovery_queue_runs_each_claim_once() -> Result[(), ()] {
 fn recovery_law_reply(mut db: store.Db, entry: Bytes, raw: Bytes, key: Bytes) -> u64 waits {
     let claim = store.ClaimKey(op: b"increment", caller: store.Caller(issuer: 7u8, subject: b"law"), key: clone(key))
     let no_policy: Option[store.KeyedPolicy] = None
-    let Ok(Duplicate(reply_bytes)) = store.admit_claim(mut db, claim, store.request_digest(entry, raw), raw, take no_policy) else {
+    let Ok(Duplicate(reply_bytes)) = admit_runner_claim(mut db, claim, store.request_digest(entry, raw), raw, take no_policy) else {
         fail("a claim found at a quiet reopen was not replied by the recovery timer")
     }
     let outcomes: std.codec.Codec[Outcome] = std.codec.of()
@@ -199,7 +212,7 @@ fn quiet_reopen_recovers_bound_claims_once(d: Dir, random: Random, tasks: Tasks)
     }
     for key in[b"held", b"other"] {
         let claim = store.ClaimKey(op: b"increment", caller: store.Caller(issuer: 7u8, subject: b"law"), key: clone(key))
-        let Ok(Accepted(_)) = store.admit_claim(mut seeded, claim, store.request_digest(entry, raw), raw, Some(clone(policy))) else {
+        let Ok(Accepted(_)) = admit_runner_claim(mut seeded, claim, store.request_digest(entry, raw), raw, Some(clone(policy))) else {
             fail("a seeded claim did not admit")
         }
     }
@@ -324,7 +337,7 @@ fn front_admit(mut db: store.Db, entry: Bytes, policy: store.KeyedPolicy, key: B
     let mut raw: Bytes = list.new()
     result.unwrap(std.codec.encode(inputs, HttpOpInput(name: clone(name)), mut raw))
     let claim = store.ClaimKey(op: b"increment", caller: store.Caller(issuer: 7u8, subject: b"law"), key: clone(key))
-    let Ok(Accepted(_)) = store.admit_claim(mut db, claim, store.request_digest(entry, raw), raw, Some(clone(policy))) else {
+    let Ok(Accepted(_)) = admit_runner_claim(mut db, claim, store.request_digest(entry, raw), raw, Some(clone(policy))) else {
         fail("an L21r claim did not admit")
     }
 }
@@ -335,7 +348,7 @@ fn front_reply(mut db: store.Db, entry: Bytes, key: Bytes, name: String) -> Outc
     result.unwrap(std.codec.encode(inputs, HttpOpInput(name: clone(name)), mut raw))
     let claim = store.ClaimKey(op: b"increment", caller: store.Caller(issuer: 7u8, subject: b"law"), key: clone(key))
     let no_policy: Option[store.KeyedPolicy] = None
-    let Ok(Duplicate(reply_bytes)) = store.admit_claim(mut db, claim, store.request_digest(entry, raw), raw, take no_policy) else {
+    let Ok(Duplicate(reply_bytes)) = admit_runner_claim(mut db, claim, store.request_digest(entry, raw), raw, take no_policy) else {
         fail("an L21r claim was not replied by the end of the open")
     }
     let outcomes: std.codec.Codec[Outcome] = std.codec.of()

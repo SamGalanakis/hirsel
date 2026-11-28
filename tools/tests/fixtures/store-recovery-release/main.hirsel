@@ -62,7 +62,30 @@ pub fn main(n: Net, directory: Dir, c: Clock, random: Random, tasks: Tasks, a: A
 }
 
 pub fn indexed(n: Net, directory: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, process: Process, errors: Stderr) -> Result[(), Exit] waits {
+    if args.get(a, 0) == Some("seed-index") {
+        seed_index(directory, c, random, tasks) ?=> |_| Exit(status: 1u8)
+        return Ok(())
+    }
     run_with(code.describe(indexed_schema), n, directory, c, random, tasks, a, process, errors)
+}
+
+fn seed_index(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let options = result.unwrap(store.sized(Directory, 2147483648u64))
+    let mut db = store.open(tasks, d, c, r, options)?
+    let h = store.bind_declaration(mut db, Migrate, indexed_schema)?
+    let written = store.run(mut db, None, store.copy_env(h.rows), fn(mut tx, rows) -> Result[(), store.Error] {
+        for key in 1u64 .. 3u64 {
+            let mut payload: Bytes = list.with_capacity(100)
+            list.fill(mut payload, 100, int.truncate(key))
+            store.put(mut tx, rows, key, payload)?
+        }
+        Ok(())
+    })?
+    let Committed(store.Done(ticket: ticket, ..)) = written else {
+        fail("index repair fixture: rows did not commit")
+    }
+    store.durable(mut db, ticket)?
+    store.close(take db)
 }
 
 fn run_with(binding: StaticFn[fn(mut store.Declare) -> Result[Handles, store.Error]], n: Net, directory: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, process: Process, errors: Stderr) -> Result[(), Exit] waits {

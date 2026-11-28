@@ -174,7 +174,7 @@ if __name__ == "__main__":
                                 "--grant", "Clock", "--grant", "Random", "--grant", "Tasks",
                                 "--grant", "Process", "--grant", "Stderr", "--limit", "2147483648",
                                 "-o", artifact], cwd=root, check=True)
-        check_index_repair(compiler, indexed, root, FIXTURE.parent / "store-index-damage-format14.json")
+        check_index_repair(compiler, indexed, root)
         check_archive_gap(compiler, release, root, FIXTURE.parent / "store-archive-gap-format14.json")
         with ArchiveServer(FIXTURE) as archive:
             drill(compiler, archive, root, release)

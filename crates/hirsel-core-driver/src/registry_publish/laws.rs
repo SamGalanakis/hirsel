@@ -158,8 +158,10 @@ fn single_publish_and_recipe_publish_use_distinct_commands() {
     let recipe = fixture.run(
         "recipe",
         &[
-            "publish",
+            "build",
             ".",
+            "--emit",
+            "recipe",
             "--libraries",
             fixture.libraries.to_str().unwrap(),
             "--code-store",

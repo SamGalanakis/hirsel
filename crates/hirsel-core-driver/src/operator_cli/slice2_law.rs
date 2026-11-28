@@ -41,7 +41,11 @@ fn terminal_and_document_choose_identical_wire_bytes() {
         launcher::session::{Grants, Wire},
         operator::*,
     };
-    use std::{fs::File, io::Write};
+    use std::{
+        fs::File,
+        io::{self, Write},
+        thread,
+    };
     let operation = vec![0x42; 16];
     let plan = DeployPlan {
         recovery: None,
@@ -86,12 +90,25 @@ fn terminal_and_document_choose_identical_wire_bytes() {
     };
     let hash = [0x56; 32];
     let (master, slave) = crate::terminal_fixture::pty();
-    let (mut master, mut terminal) = (File::from(master), File::from(slave));
+    let mut master = File::from(master);
     master.write_all(b"approve\neach\ncancel\n").unwrap();
-    let mut reader = std::io::BufReader::new(terminal.try_clone().unwrap());
-    let entered = decision::interactive(&plan, &hash, &mut reader, &mut terminal)
-        .ok()
-        .unwrap();
+    let entered = thread::scope(|scope| {
+        let mut terminal = File::from(slave);
+        let mut reader = io::BufReader::new(terminal.try_clone().unwrap());
+        let drain = scope.spawn(move || {
+            if let Err(error) = io::copy(&mut master, &mut io::sink()) {
+                // Linux reports EIO when the last slave closes.
+                assert_eq!(error.raw_os_error(), Some(libc::EIO), "{error}");
+            }
+        });
+        let entered = decision::interactive(&plan, &hash, &mut reader, &mut terminal);
+        drop(reader);
+        drop(terminal);
+        drain.join().unwrap();
+        entered
+    })
+    .ok()
+    .unwrap();
     let file = format!(
         "host_v1.Decision(plan_digest: \"{}\", verdict: Approve, entries: [(\"orders/send\", Cancel)])",
         "56".repeat(32)

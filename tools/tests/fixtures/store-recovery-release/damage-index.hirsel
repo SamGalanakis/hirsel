@@ -1,0 +1,39 @@
+// This entry is compiled in a scratch copy of the Store module for the R4 drill.
+pub fn damage_recovery_index(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
+    options.create = false
+    let mut db = open(tasks, d, c, r, options)?
+    for entry in catalog_entries(snapshot(db))? {
+        if entry.table == "rows" && entry.name == "cover" {
+            let edited = run(mut db, None, entry.id, damage_cover)?
+            let Committed(Done(ticket: committed, ..)) = edited else {
+                fail("index repair fixture: index edits did not commit")
+            }
+            durable(mut db, committed)?
+            let _ = checkpoint(mut db)?
+            return close(take db)
+        }
+    }
+    Error(Missing("cover"))
+}
+
+fn fixture_cover_key(key: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(16)
+    std.codec.encode_key(std.codec.key_u64(), key, mut out)
+    std.codec.encode_key(std.codec.key_u64(), key, mut out)
+    take out
+}
+
+fn fixture_put_cover(mut tx: Tx, id: u32, key: u64, width: u64) -> Result[(), Error] {
+    let p = failure_result_from_rep(catalog.logical_key(id, fixture_cover_key(key)))?
+    failure_result_from_rep(txn.put_impl(mut tx.inner, id, 0, std.codec.of_u64(), list.new(), take p, width, false, point_event))
+}
+
+fn damage_cover(mut tx: Tx, id: u32) -> Result[(), Error] {
+    // Remove row 1's entry, replace row 2's width, and add an entry for absent row 3.
+    if !failure_result_from_rep(txn.delete_impl(mut tx.inner, id, 0, list.new(), fixture_cover_key(1), point_event))? {
+        return Error(Missing("row 1 cover entry"))
+    }
+    fixture_put_cover(mut tx, id, 2, 101)?
+    fixture_put_cover(mut tx, id, 3, 100)
+}

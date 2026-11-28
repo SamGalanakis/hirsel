@@ -1,18 +1,27 @@
 """R4. The fixture's primary rows are intact. Its covering index has all three logical faults."""
-from base64 import b64decode
-import json
 from pathlib import Path
 import shutil
 import subprocess
 
 
-def check_index_repair(hirsel, release, root, fixture):
+def check_index_repair(hirsel, release, root):
     damaged = root / "damaged"
     damaged.mkdir()
-    saved = {k: b64decode(v, validate=True) for k, v in json.loads(fixture.read_bytes()).items()}
-    for name, data in saved.items():
-        (damaged / name).write_bytes(data)
-    (damaged / "LOCK").touch()
+    subprocess.run([release, "seed-index"], cwd=damaged, check=True)
+
+    # Build the fault injector in an isolated Store package so only the drill
+    # can make these edits. The indexed release supplies its own catalog.
+    package = root / "store-fixture"
+    shutil.copytree("core/programs/store", package)
+    source = Path("tools/tests/fixtures/store-recovery-release/damage-index.hirsel")
+    with (package / "store.hirsel").open("ab") as module:
+        module.write(b"\n" + source.read_bytes())
+    injector = root / "damage-recovery-index"
+    subprocess.run([hirsel, "build", package, "--entry", "store@1/store/damage_recovery_index",
+                    "--dir", "/proc/self/cwd", "--grant", "Clock", "--grant", "Random", "--grant", "Tasks",
+                    "--limit", "2147483648", "-o", injector], cwd=root, check=True)
+    subprocess.run([injector], cwd=damaged, check=True)
+    saved = {path.name: path.read_bytes() for path in damaged.iterdir()}
 
     def run(*args, code=0):
         p = subprocess.run([hirsel, "store", *args], text=True, capture_output=True)
@@ -31,7 +40,7 @@ def check_index_repair(hirsel, release, root, fixture):
     subprocess.run([release, "check-cut"], cwd=repaired, check=True)
     physical = root / "combined"
     shutil.copytree(damaged, physical)
-    pack = physical / "p-3"
+    pack = max(physical.glob("p-*"), key=lambda path: int(path.name[2:]))
     body = bytearray(pack.read_bytes())
     body[len(body) // 2] ^= 1
     pack.write_bytes(body)

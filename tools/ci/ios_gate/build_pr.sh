@@ -46,24 +46,28 @@ HIRSEL_REPO="$checkout" python3 "$host/cli/setup-toolchain.py"
 mkdir -p "$app"
 cp -R "$host/package" "$workspace/ios"
 cp -R "$checkout/core/programs/store" "$workspace/store"
-cat > "$workspace/hirsel.hcfg" <<'HCFG'
-pkg_v1.Workspace(members: ["app", "ios", "store"])
-HCFG
+# The pinned PR #11 compiler reads TOML manifests.
+cat > "$workspace/hirsel.toml" <<'TOML'
+[workspace]
+members = ["app", "ios", "store"]
+TOML
 cp "$here/pr_counter.hirsel" "$app/main.hirsel"
 cp "$here/counter.hirsel" "$app/counter.hirsel"
-cat > "$app/hirsel.hcfg" <<'HCFG'
-pkg_v1.Package(
-    name: "pr_counter",
-    version: "1.0.0",
-    charge: ChargeV1,
-    sources: [("main.hirsel", "main"), ("counter.hirsel", "counter")],
-    dependencies: [
-        ("std", Toolchain(package: "std", major: 1, authority: [])),
-        ("ios", Path(package: "ios", major: 1, path: "../ios", authority: [])),
-        ("store", Path(package: "store", major: 1, path: "../store", authority: [])),
-    ],
-)
-HCFG
+cat > "$app/hirsel.toml" <<'TOML'
+[package]
+name = "pr_counter"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+ios = { major = 1, path = "../ios" }
+store = { major = 1, path = "../store" }
+
+[sources]
+"main.hirsel" = "main"
+"counter.hirsel" = "counter"
+TOML
 "$host/.toolchain/hirsel" build "$app" --libraries "$checkout/core" --target aarch64-apple-ios-sim \
   --staticlib --limit 1073741824 --grant Tasks --grant Clock --grant Random \
   --grant Foreign=ios@1/ios/Ios --dir xdg-data:counter -o "$app/libpr_counter.a"

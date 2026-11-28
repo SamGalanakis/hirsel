@@ -123,8 +123,7 @@ fn http_subscription_input(take caller: Caller, take key: Bytes, take arg: Bytes
     Ok(subscription_hold_for(mut quota, take caller, take key, take arg, true) ?=> |c| Budget(capacity_room(c)))
 }
 
-fn http_subscribe(access: HttpReadAccess, take sent: Send, budget: u64) -> Result[HttpOwner, Refusal] {
-    let Send(stream: store.StreamKey(caller: take caller, ..), key: take key, arg: take arg, ..) = take sent
+fn http_subscribe(access: HttpReadAccess, take caller: Caller, take key: Bytes, take arg: Bytes, budget: u64) -> Result[HttpOwner, Refusal] {
     let input = http_subscription_input(take caller, take key, take arg, budget, access.frame_limit)?
     let (take owner, take ports) = http_owner(access.publisher, 3u64)?
     http_join(owner, take ports, take input, None)?
@@ -188,11 +187,11 @@ fn http_initial_frame(mut owner: HttpOwner, clock: Clock, tasks: Tasks, deadline
     take frame
 }
 
-fn http_one_shot(req: std.http.Request, resp: std.http.Responder, access: HttpReadAccess, operation: HttpOperation, take sent: Send, budget: u64, clock: Clock, tasks: Tasks) -> Result[std.http.Response, std.http.HandlerError] waits {
+fn http_one_shot(req: std.http.Request, resp: std.http.Responder, access: HttpReadAccess, operation: HttpOperation, take caller: Caller, take key: Bytes, take arg: Bytes, budget: u64, clock: Clock, tasks: Tasks) -> Result[std.http.Response, std.http.HandlerError] waits {
     let Some(take permit) = std.http.read_slot(resp, tasks) else {
         return http_refusal(Overloaded)
     }
-    let mut owner = match http_subscribe(access, take sent, budget) {
+    let mut owner = match http_subscribe(access, take caller, take key, take arg, budget) {
         Ok(take running) => take running,
         Error(take problem) => {
             std.http.read_done(take permit)
@@ -255,9 +254,7 @@ type HttpStreamSeed: codec + send {
     expires_at_ms: Option[u64]
 }
 
-fn http_stream_offer(req: std.http.Request, take sent: Send, budget: u64) -> Result[std.stream.Spec, std.http.HandlerError] {
-    let Send(stream: store.StreamKey(caller: take caller, ..), key: take key, arg: take arg, expires_at_ms, ..) = take sent
-    let seed = HttpStreamSeed(route: std.http.route_tag(req), caller: take caller, key: take key, arg: take arg, budget: budget, expires_at_ms)
+fn http_stream_offer(req: std.http.Request, take seed: HttpStreamSeed) -> Result[std.stream.Spec, std.http.HandlerError] {
     let mut stream = std.stream.spec_managed(req, seed)?
     std.stream.expire_at(mut stream, seed.expires_at_ms)
     std.stream.header(mut stream, b"Content-Type", b"text/event-stream")?

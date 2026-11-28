@@ -578,6 +578,11 @@ pub fn prepare[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admit
 }
 
 fn prepare_call[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admitted, take key: Bytes, stream_id: StreamId, p: u64, take arg: Bytes, relative: u64) -> Result[Send, Refusal] {
+    let deadline = validate_call(r, a, key, arg, relative)?
+    Ok(prepare_send(a, take key, stream_id, p, take arg, deadline))
+}
+
+fn validate_call[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admitted, key: Bytes, arg: Bytes, relative: u64) -> Result[u64, Refusal] {
     let known = !none(registered_ordinal(r, key))
     if !known && !map.contains(r.t.gone, key) {
         return Error(NoEntry)
@@ -607,13 +612,17 @@ fn prepare_call[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admi
             return Error(take why)
         }
     }
-    let digest = store.request_digest(key, arg)
     let subject_size = list.len(a.caller.subject)
     if subject_size > SUBJECT_MAX {
         return Error(Budget(Room(requested: subject_size, available: SUBJECT_MAX)))
     }
+    Ok(end)
+}
+
+fn prepare_send(a: Admitted, take key: Bytes, stream_id: StreamId, p: u64, take arg: Bytes, deadline: u64) -> Send {
+    let digest = store.request_digest(key, arg)
     let stream = store.StreamKey(caller: clone(a.caller), id: stream_id)
-    Ok(Send(stream: take stream, key: take key, p: p, arg: take arg, digest: digest, deadline: end, budget: a.budget, expires_at_ms: a.expires_at_ms, claim: None))
+    Send(stream: take stream, key: take key, p: p, arg: take arg, digest: digest, deadline: deadline, budget: a.budget, expires_at_ms: a.expires_at_ms, claim: None)
 }
 
 fn prepared_request(lease: HeadLease, take seed: Option[Arc[OwnerNumber]], take prepared: Send, take target: ReplyTarget) -> Req {

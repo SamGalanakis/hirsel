@@ -381,8 +381,8 @@ fn http_generated_handler[G: send, H: shareable + inert + send](req: std.http.Re
             FencedCaller => return Ok(Reply(http_reply(403u16, "{\"refused\":\"fenced\"}", false, false, false)?)),
         }
     }
-    let sent = match prepare_call(state.registered, context, std.http.copy_bytes(binding.entry), stream_id, position, take payload, binding.deadline_ms) {
-        Ok(take send) => take send,
+    let call_deadline = match validate_call(state.registered, context, binding.entry, payload, binding.deadline_ms) {
+        Ok(end) => end,
         Error(take why) => {
             let response = if binding.mode == Stream {
                 http_refused_attempt(req, take why)?
@@ -394,13 +394,14 @@ fn http_generated_handler[G: send, H: shareable + inert + send](req: std.http.Re
     }
     match operation.kind {
         Transact => {
+            let sent = prepare_send(context, std.http.copy_bytes(binding.entry), stream_id, position, take payload, call_deadline)
             if sent.stream.caller.issuer == 1u8 {
                 latest.publish(state.retire, arc.new(Some(clone(sent.stream.caller.subject))))
             }
             let delivery = relay_call(state.relay, take sent, state.clock, state.tasks, deadline)
             Ok(Reply(http_render_delivery(req, binding, operation.output, take delivery)?))
         },
-        Compute => match call(state.registered, sent.key, sent.arg) {
+        Compute => match call(state.registered, binding.entry, payload) {
             Returned(take data) => Ok(Reply(http_json_reply(binding.ok_status, take data, 0u64, operation.output, operation.output.root, false)?)),
             Failed(detail) => Ok(Reply(http_fault(detail, false)?)),
             Refused(take why) => Ok(Reply(http_refusal(take why)?)),
@@ -411,12 +412,13 @@ fn http_generated_handler[G: send, H: shareable + inert + send](req: std.http.Re
                 return Ok(Reply(http_refusal(Overloaded)?))
             }
             if binding.mode == Read {
-                let mut response = http_one_shot(req, resp, reads, operation, take sent, state.budget, state.clock, state.tasks)?
+                let mut response = http_one_shot(req, resp, reads, operation, clone(context.caller), std.http.copy_bytes(binding.entry), take payload, state.budget, state.clock, state.tasks)?
                 std.http.guard_read(mut response, std.stream_watch.copy_guard(context.guard), context.expires_at_ms)
                 Ok(Reply(take response))
             } else {
-                let mut stream = http_stream_offer(req, take sent, state.budget)?
-                let Admitted(guard: take guard, ..) = take context
+                let Admitted(caller: take caller, guard: take guard, expires_at_ms, ..) = take context
+                let seed = HttpStreamSeed(route: std.http.route_tag(req), caller: take caller, key: std.http.copy_bytes(binding.entry), arg: take payload, budget: state.budget, expires_at_ms)
+                let mut stream = http_stream_offer(req, take seed)?
                 if let Some(take check) = take guard {
                     std.stream.guard_release(mut stream, take check)
                 }

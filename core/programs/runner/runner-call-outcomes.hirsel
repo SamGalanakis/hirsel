@@ -113,11 +113,29 @@ pub fn law_calls_store_refusal(c: Clock, r: Random, tasks: Tasks, n: Net) -> boo
     served_in(c, r, tasks, n, o, drive_store_refusal)
 }
 
-fn joins(cn: Conn, stream: Bytes, p: u64, version: u64) -> () waits {
-    want(match down(cn) {
-        Batched(b) => b.version == version && list.len(b.rows) == 0u64 && list.len(b.outcomes) == 2u64 && b.outcomes[0].stream == stream && b.outcomes[1].stream == stream && b.outcomes[0].p == p && b.outcomes[1].p == p && ok_value(b.outcomes[0].outcome) == Some(version) && is(b.outcomes[0].outcome, b.outcomes[1].outcome),
-        _ => false,
-    }, "one_outcome: both joined sends are in the same Batch")
+// G1 may coalesce the Releases for the predecessor and its held successor.
+fn held_replies(cn: Conn, stream: u64, predecessor: u64, sends: u64) -> () waits {
+    let stream_id = sid(stream)
+    let Batched(take first) = down(cn) else {
+        fail("held call: expected the predecessor's Batch")
+    }
+    want(list.len(first.rows) == 0u64 && list.len(first.outcomes) != 0u64, "held call: expected outcome rows")
+    want(first.outcomes[0].stream == stream_id && first.outcomes[0].p == 1u64 && ok_value(first.outcomes[0].outcome) == Some(predecessor), "held call: p1 commits first")
+    let (take batch, offset) = if list.len(first.outcomes) == 1u64 {
+        want(first.version == predecessor, "held call: predecessor-only Batch version")
+        let Batched(take next) = down(cn) else {
+            fail("held call: expected the successor's Batch")
+        }
+        (take next, 0u64)
+    } else {
+        (take first, 1u64)
+    }
+    let successor = predecessor + 2u64
+    want(batch.version == successor && list.len(batch.rows) == 0u64 && list.len(batch.outcomes) == offset + sends, "held call: successor Batch version and outcome count")
+    for i in offset .. offset + sends {
+        let got = view batch.outcomes[i]
+        want(got.stream == stream_id && got.p == 2u64 && ok_value(got.outcome) == Some(successor) && is(got.outcome, batch.outcomes[offset].outcome), "held call: one identical p2 reply per send")
+    }
 }
 
 // Rule 5: every send ends in exactly one Outcome (review 1042, law_abandoned_no_resend).
@@ -127,7 +145,7 @@ fn joins(cn: Conn, stream: Bytes, p: u64, version: u64) -> () waits {
 //   at 5; p2 runs behind it at 7 and produces no further outcome row.
 // - Another stream proceeds at 9, then stream 0's p3 commits at 11.
 // - Stream 2: p0 at 13. Two sends of p2 wait behind p1 (15) and receive two outcomes in
-//   one frame at 17.
+//   one frame at 17, which can also carry p1.
 // - Stream 3: p0 at 19. A p2 that expires and is re-sent twice waits behind p1 (21) and
 //   receives two outcomes at 23. Its next position commits at 25.
 // - Stream 4: p0 at 27. p2 Abandoned in a session that then ends: a different session
@@ -154,9 +172,7 @@ fn drive_one_outcome_per_send(take d: Drive) -> () waits {
     ask(s0, d.clock, 2u64, 2u64, k_write(), u64_arg(202u64), LATER)
     ask(s0, d.clock, 2u64, 2u64, k_write(), u64_arg(202u64), LATER)
     ask(s0, d.clock, 2u64, 1u64, k_write(), u64_arg(201u64), LATER)
-    let d1 = frame(s0)
-    want(d1.stream == sid(2u64) && d1.p == 1u64 && ok_value(d1.outcome) == Some(15u64), "one_outcome: the predecessor runs at 15")
-    joins(s0, sid(2u64), 2u64, 17u64)
+    held_replies(s0, 2u64, 15u64, 2u64)
     ask(s0, d.clock, 3u64, 0u64, k_write(), u64_arg(300u64), LATER)
     want(ok_value(frame(s0).outcome) == Some(19u64), "one_outcome: stream 3 p0 at 19")
     ask(s0, d.clock, 3u64, 2u64, k_write(), u64_arg(302u64), 2000000u64)
@@ -165,9 +181,7 @@ fn drive_one_outcome_per_send(take d: Drive) -> () waits {
     ask(s0, d.clock, 3u64, 2u64, k_write(), u64_arg(302u64), LATER)
     ask(s0, d.clock, 3u64, 2u64, k_write(), u64_arg(302u64), LATER)
     ask(s0, d.clock, 3u64, 1u64, k_write(), u64_arg(301u64), LATER)
-    let e1 = frame(s0)
-    want(e1.p == 1u64 && ok_value(e1.outcome) == Some(21u64), "one_outcome: stream 3 p1 at 21")
-    joins(s0, sid(3u64), 2u64, 23u64)
+    held_replies(s0, 3u64, 21u64, 2u64)
     ask(s0, d.clock, 3u64, 3u64, k_write(), u64_arg(303u64), LATER)
     let e3 = frame(s0)
     want(e3.p == 3u64 && ok_value(e3.outcome) == Some(25u64), "one_outcome: stream 3 p3 next")
@@ -197,8 +211,9 @@ pub fn law_calls_one_outcome_per_send(c: Clock, r: Random, tasks: Tasks, n: Net)
 // L7/deadline_held (v2.4), on the real head. p0 commits at 3. p2, sent before p1, waits in
 // the head's FIFO (S7: Rejected(0)); the session answers Abandoned at its deadline (V1), at
 // its last version 3, and keeps the slot (V2). Then p1 is sent and p2 re-sent: p1 commits
-// at 5, and p2, which the re-send joins locally, runs once and commits at 7. The next
-// position is the next frame, at 9, so p2 was answered once. (A new stream admits only
+// at 5, and p2, which the re-send joins locally, runs once and commits at 7. The
+// publisher can deliver both replies in the Batch at 7. The next position is the next
+// frame, at 9, so p2 was answered once. (A new stream admits only
 // p0, STORE-SPEC §1.8, so the held successor follows a committed p0.)
 fn drive_deadline_held(take d: Drive) -> () waits {
     let s0 = conn(d, 1u64)
@@ -210,10 +225,7 @@ fn drive_deadline_held(take d: Drive) -> () waits {
     want(is(a.outcome, Abandoned) && a.p == 2u64 && a.version == 3u64, "deadline_held: Abandoned at the deadline")
     ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(11u64), LATER)
     ask(s0, d.clock, 0u64, 2u64, k_write(), u64_arg(12u64), LATER)
-    let f1 = frame(s0)
-    want(f1.p == 1u64 && ok_value(f1.outcome) == Some(5u64) && f1.version == 5u64, "deadline_held: p1 at 5")
-    let f2 = frame(s0)
-    want(f2.p == 2u64 && ok_value(f2.outcome) == Some(7u64) && f2.version == 7u64, "deadline_held: p2 once, at 7")
+    held_replies(s0, 0u64, 5u64, 1u64)
     ask(s0, d.clock, 0u64, 3u64, k_write(), u64_arg(13u64), LATER)
     let f3 = frame(s0)
     want(f3.p == 3u64 && ok_value(f3.outcome) == Some(9u64), "deadline_held: p2 answered once")

@@ -303,6 +303,18 @@ print(json.dumps({"tests": rows}))
             _, entries = prepare.contract_inputs(contracts, Path(held))
         self.assertEqual(entries.keys(), contracts.keys())
 
+    def test_the_store_crash_sim_requires_its_verified_outcome_witnesses(self):
+        # Each label follows the check it names (store_crash_sim_laws.hirsel),
+        # so a campaign that verifies none of one outcome is a reach red.
+        probes = {}
+        laws = prepare.seeded_package_laws("store", probes)
+        self.assertIn("store@1/store/claim_regenerated_admissions", laws)
+        self.assertEqual(probes["store@1/store/test_store_crash_sim"], {
+            "crash sim recovered from a power cut": False,
+            "crash sim recovered past the durable floor": False,
+            "crash sim restored a backup leased on Tiered": True,
+        })
+
 
 if __name__ == "__main__":
     unittest.main()

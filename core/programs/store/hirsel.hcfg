@@ -393,6 +393,7 @@ pkg_v1.Package(
             ("store_crash_install_laws.hirsel", "store"),
             ("store_law_schema.hirsel", "store"),
             ("store_claim_crash_laws.hirsel", "store"),
+            ("store_claim_fuzz_laws.hirsel", "store"),
             ("store_claim_quota_laws.hirsel", "store"),
             ("follower_crash_laws.hirsel", "store"),
             ("store_journal_laws.hirsel", "store"),
@@ -574,6 +575,12 @@ pkg_v1.Package(
             ("store@1/store/test_store_crash_sim", TestRun(
                 limit: Some(536870912),
                 grant_change: Some(ReplaceNonDir([Tasks, Env(["HIRSEL_TEST_SIM_SEED", "HIRSEL_TEST_CSIM_REPLAY"])])),
+            )),
+            ("store@1/store/test_store_crash_outcome_coverage", TestRun(limit: Some(536870912))),
+            ("store@1/store/test_store_crash_outcome_coverage_negative", TestRun(limit: Some(536870912))),
+            ("store@1/store/claim_regenerated_admissions", TestRun(
+                limit: Some(268435456),
+                grant_change: Some(ReplaceNonDir([Tasks, Env(["HIRSEL_TEST_SIM_SEED"])])),
             )),
             ("store@1/store/test_store_retention_trace", TestRun(limit: Some(536870912), grant_change: Some(ReplaceNonDir([Tasks, Stdout])))),
             ("store@1/store/test_l69_random_arm", TestRun(

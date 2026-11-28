@@ -1,0 +1,326 @@
+// Keyed-claim regeneration fuzzer (STORE AL2/AN2). A caller keeps one small
+// secondary seed per request and regenerates the whole request from it for
+// every reissue: before the reply, after it, and after a reopen. A separate
+// draw keeps the identity and alters one argument byte. The oracle is a map
+// of what each identity was admitted with and replied; it never reads the
+// store. Each admission is counted under the outcome the oracle named, after
+// the store returned that outcome and its bytes matched.
+type ClaimFuzzRequest {
+    name: String,
+    key: ClaimKey,
+    args: Bytes
+}
+
+type ClaimFuzzRow = FuzzPending(Bytes) | FuzzCompleted(Bytes, Bytes)
+
+type ClaimFuzz {
+    rows: Map[String, ClaimFuzzRow],
+    // The completion this open last handed out per slot. A reopen drops them.
+    held: List[Option[ClaimCompletion]],
+    // Verified admissions by CF_*.
+    reached: Inline[u64, 5],
+    wall: u64
+}
+
+const CF_ACCEPTED: u64 = 0
+
+const CF_OWNERLESS: u64 = 1
+
+const CF_DUPLICATE: u64 = 2
+
+const CF_MISMATCH: u64 = 3
+
+const CF_MISSING: u64 = 4
+
+const CLAIM_FUZZ_SLOTS: u64 = 4
+
+const CLAIM_FUZZ_START: u64 = 1000
+
+fn claim_fuzz_name(outcome: u64) -> String {
+    let names: Inline[String, 5] =["Accepted", "Ownerless", "Duplicate", "Mismatch", "MissingClaim"]
+    string.from(names[outcome])
+}
+
+fn claim_fuzz_bytes(mut draw: std.rand.Pcg, width: u64) -> Bytes {
+    let mut data: Bytes = list.with_capacity(width)
+    for _ in 0u64 .. width {
+        list.push(mut data, int.truncate(std.rand.next(mut draw)))
+    }
+    take data
+}
+
+// The whole request from its secondary seed. The seed is in the key, so two
+// seeds never name one claim.
+fn claim_fuzz_request(secondary: u64) -> ClaimFuzzRequest {
+    let mut draw = std.rand.new(secondary, 0x2ac63ad7f024e15b)
+    let mut name = string.from("key-")
+    string.push_u64(mut name, secondary)
+    let op: Bytes = if std.rand.below(mut draw, 2) == 0 {
+        b"charge"
+    } else {
+        b"reserve"
+    }
+    let issuer: u8 = int.truncate(std.rand.below(mut draw, 4))
+    let subject = claim_fuzz_bytes(mut draw, 8)
+    let width = 1 + std.rand.below(mut draw, 24)
+    let args = claim_fuzz_bytes(mut draw, width)
+    let key = ClaimKey(op: take op, caller: Caller(issuer, subject: take subject), key: string.into_bytes(clone(name)))
+    ClaimFuzzRequest(name: take name, key: take key, args: take args)
+}
+
+// The same identity with one argument byte changed.
+fn claim_fuzz_changed(mut draw: std.rand.Pcg, args: Bytes) -> Bytes {
+    let mut changed: Bytes = clone(args)
+    let at = std.rand.below(mut draw, list.len(changed))
+    changed[at] = changed[at] ^ int.truncate(1 + std.rand.below(mut draw, 255))
+    take changed
+}
+
+// AL2 from the oracle alone. A live row is compared before the policy is
+// read, and no row here is ever past its retention.
+fn claim_fuzz_expect(rows: Map[String, ClaimFuzzRow], name: String, args: Bytes, offer: bool) -> u64 {
+    let Some(row) = map.get(rows, name) else {
+        return if offer {
+            CF_ACCEPTED
+        } else {
+            CF_MISSING
+        }
+    }
+    match row {
+        FuzzPending(first) => if args == first {
+            CF_OWNERLESS
+        } else {
+            CF_MISMATCH
+        },
+        FuzzCompleted(first, _) => if args == first {
+            CF_DUPLICATE
+        } else {
+            CF_MISMATCH
+        },
+    }
+}
+
+fn claim_fuzz_reply(rows: Map[String, ClaimFuzzRow], name: String) -> Bytes {
+    let Some(row) = map.get(rows, name) else {
+        fail("keyed fuzzer: the oracle has no row for a Duplicate")
+    }
+    match row {
+        FuzzCompleted(_, reply) => clone(reply),
+        FuzzPending(_) => fail("keyed fuzzer: the oracle row for a Duplicate has no reply"),
+    }
+}
+
+// One admission with its digest computed from the arguments sent. Returns
+// the verified outcome.
+fn claim_fuzz_admit(mut db: Db, mut fz: ClaimFuzz, slot: u64, request: ClaimFuzzRequest, args: Bytes, offer: bool) -> Result[u64, Error] waits {
+    let supplied: Option[KeyedPolicy] = if offer {
+        Some(claim_law_policy())
+    } else {
+        None
+    }
+    let expected = claim_fuzz_expect(fz.rows, request.name, args, offer)
+    let got = admit_claim(mut db, request.key, request_digest(request.key.op, args), args, take supplied)?
+    match take got {
+        Accepted(take completion) if expected == CF_ACCEPTED => {
+            map.insert(mut fz.rows, clone(request.name), FuzzPending(clone(args)))
+            fz.held[slot] = Some(take completion)
+        },
+        Ownerless(take completion) if expected == CF_OWNERLESS => {
+            fz.held[slot] = Some(take completion)
+        },
+        Duplicate(saved) if expected == CF_DUPLICATE => {
+            if saved != claim_fuzz_reply(fz.rows, request.name) {
+                fail("keyed fuzzer: Duplicate returned bytes other than the reply the oracle holds")
+            }
+        },
+        Mismatch if expected == CF_MISMATCH => (),
+        MissingClaim if expected == CF_MISSING => (),
+        other => {
+            let mut text = string.from("keyed fuzzer: the oracle expected ")
+            string.push(mut text, claim_fuzz_name(expected))
+            string.push(mut text, " for ")
+            string.push(mut text, request.name)
+            string.push(mut text, " and the store returned ")
+            string.push(mut text, claim_fuzz_name(match other {
+                Accepted(_) => CF_ACCEPTED,
+                Ownerless(_) => CF_OWNERLESS,
+                Duplicate(_) => CF_DUPLICATE,
+                Mismatch => CF_MISMATCH,
+                MissingClaim => CF_MISSING,
+            }))
+            fail(take text)
+        },
+    }
+    fz.reached[expected] += 1
+    Ok(expected)
+}
+
+// The admission, which the schedule built to have one outcome.
+fn claim_fuzz_must(mut db: Db, mut fz: ClaimFuzz, slot: u64, request: ClaimFuzzRequest, args: Bytes, offer: bool, outcome: u64) -> Result[(), Error] waits {
+    if claim_fuzz_admit(mut db, mut fz, slot, request, args, offer)? != outcome {
+        let mut text = string.from("keyed fuzzer: the schedule no longer reaches ")
+        string.push(mut text, claim_fuzz_name(outcome))
+        fail(take text)
+    }
+    Ok(())
+}
+
+// Replies with fresh bytes when this open holds the slot's completion.
+fn claim_fuzz_conclude(mut db: Db, mut fz: ClaimFuzz, slot: u64, request: ClaimFuzzRequest, mut replies: std.rand.Pcg) -> Result[bool, Error] waits {
+    let Some(take completion) = replace(mut fz.held[slot], None) else {
+        return Ok(false)
+    }
+    let first: Bytes = {
+        let Some(row) = map.get(fz.rows, request.name) else {
+            fail("keyed fuzzer: a completion is held for an identity the oracle never admitted")
+        }
+        match row {
+            FuzzPending(admitted) => clone(admitted),
+            FuzzCompleted(_, _) => fail("keyed fuzzer: a completion is held for a replied claim"),
+        }
+    }
+    let width = 4 + std.rand.below(mut replies, 48)
+    let reply = claim_fuzz_bytes(mut replies, width)
+    let _ = conclude_claim(mut db, take completion, reply)?
+    map.insert(mut fz.rows, clone(request.name), FuzzCompleted(take first, take reply))
+    Ok(true)
+}
+
+fn claim_fuzz_tick(mut fz: ClaimFuzz, mut hand: ClockHand, mut order: std.rand.Pcg) {
+    fz.wall += std.rand.below(mut order, 40)
+    clock.set_wall(mut hand, fz.wall)
+}
+
+fn claim_fuzz_forget(mut fz: ClaimFuzz) {
+    for slot in 0u64 .. CLAIM_FUZZ_SLOTS {
+        fz.held[slot] = None
+    }
+}
+
+fn claim_fuzz_run(tasks: Tasks, seed: u64) -> Result[(), Error] waits {
+    let mut order = std.rand.new(seed, 0x6ea1873fbc22b509)
+    let mut alter = std.rand.new(seed, 0xd8b4c729d725e196)
+    let mut replies = std.rand.new(seed, 0x67d058efb12c0d83)
+    // Four identities stay below the policy's quota of five.
+    let mut seeds: Inline[u64, 4] =[0, 0, 0, 0]
+    for slot in 0u64 .. CLAIM_FUZZ_SLOTS {
+        seeds[slot] = CLAIM_FUZZ_SLOTS * std.rand.below(mut order, 65536) + slot
+    }
+    // `late` is not replied before the last reopen; `early` is replied before it.
+    let late = std.rand.below(mut order, CLAIM_FUZZ_SLOTS)
+    let early = (late + 1 + std.rand.below(mut order, CLAIM_FUZZ_SLOTS - 1)) % CLAIM_FUZZ_SLOTS
+    let (c, started) = provide.clock(0, CLAIM_FUZZ_START)
+    let mut hand = take started
+    let r = provide.random(seed)
+    let (root, server) = sim_disk_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(seed), CSIM_ROOM)
+    result.unwrap(host.mkdir(root, "s"))
+    result.unwrap(host.sync_dir(root))
+    let mut options = claim_crash_options()
+    let mut db = open(tasks, result.unwrap(host.open_dir(root, "s")), c, r, clone(options))?
+    options.create = false
+    let mut fz = ClaimFuzz(rows: map.new(), held: list.new(), reached: [0, 0, 0, 0, 0], wall: CLAIM_FUZZ_START)
+    for _ in 0u64 .. CLAIM_FUZZ_SLOTS {
+        list.push(mut fz.held, None)
+    }
+    // The missing-policy case: no claim is live and the caller offers none.
+    {
+        let request = claim_fuzz_request(seeds[late])
+        claim_fuzz_must(mut db, mut fz, late, request, request.args, false, CF_MISSING)?
+    }
+    for _ in 0u64 .. 32 {
+        claim_fuzz_tick(mut fz, mut hand, mut order)
+        let slot = std.rand.below(mut order, CLAIM_FUZZ_SLOTS)
+        let request = claim_fuzz_request(seeds[slot])
+        let action = std.rand.below(mut order, 8)
+        let offer = std.rand.below(mut order, 2) == 0
+        if action < 3 {
+            let _ = claim_fuzz_admit(mut db, mut fz, slot, request, request.args, action < 2)?
+        } else if action < 5 {
+            // A changed argument meets the row its identity already has.
+            if map.contains(fz.rows, request.name) {
+                let changed = claim_fuzz_changed(mut alter, request.args)
+                claim_fuzz_must(mut db, mut fz, slot, request, changed, offer, CF_MISMATCH)?
+            } else {
+                let _ = claim_fuzz_admit(mut db, mut fz, slot, request, request.args, offer)?
+            }
+        } else if action < 7 {
+            if slot != late {
+                let _ = claim_fuzz_conclude(mut db, mut fz, slot, request, mut replies)?
+            }
+        } else {
+            let closing = take db
+            close(take closing)?
+            claim_fuzz_forget(mut fz)
+            db = open(tasks, result.unwrap(host.open_dir(root, "s")), c, r, clone(options))?
+        }
+    }
+    // Before the reply: the regenerated request finds its own pending claim.
+    {
+        claim_fuzz_tick(mut fz, mut hand, mut order)
+        let request = claim_fuzz_request(seeds[late])
+        if !map.contains(fz.rows, request.name) {
+            claim_fuzz_must(mut db, mut fz, late, request, request.args, true, CF_ACCEPTED)?
+        }
+        let again = claim_fuzz_request(seeds[late])
+        claim_fuzz_must(mut db, mut fz, late, again, again.args, std.rand.below(mut order, 2) == 0, CF_OWNERLESS)?
+        let changed = claim_fuzz_changed(mut alter, again.args)
+        claim_fuzz_must(mut db, mut fz, late, again, changed, true, CF_MISMATCH)?
+    }
+    // After the reply: it gets the reply's exact bytes.
+    {
+        claim_fuzz_tick(mut fz, mut hand, mut order)
+        let request = claim_fuzz_request(seeds[early])
+        let _ = claim_fuzz_admit(mut db, mut fz, early, request, request.args, true)?
+        let _ = claim_fuzz_conclude(mut db, mut fz, early, request, mut replies)?
+        let again = claim_fuzz_request(seeds[early])
+        claim_fuzz_must(mut db, mut fz, early, again, again.args, std.rand.below(mut order, 2) == 0, CF_DUPLICATE)?
+        let changed = claim_fuzz_changed(mut alter, again.args)
+        claim_fuzz_must(mut db, mut fz, early, again, changed, false, CF_MISMATCH)?
+    }
+    close(take db)?
+    claim_fuzz_forget(mut fz)
+    let mut reopened = open(tasks, result.unwrap(host.open_dir(root, "s")), c, r, options)?
+    // After the reopen: the pending claim is Ownerless, the replied one is a
+    // Duplicate, and every identity ends replied.
+    {
+        let pending = claim_fuzz_request(seeds[late])
+        claim_fuzz_must(mut reopened, mut fz, late, pending, pending.args, false, CF_OWNERLESS)?
+        let replied = claim_fuzz_request(seeds[early])
+        claim_fuzz_must(mut reopened, mut fz, early, replied, replied.args, false, CF_DUPLICATE)?
+    }
+    for slot in 0u64 .. CLAIM_FUZZ_SLOTS {
+        claim_fuzz_tick(mut fz, mut hand, mut order)
+        let request = claim_fuzz_request(seeds[slot])
+        let _ = claim_fuzz_admit(mut reopened, mut fz, slot, request, request.args, true)?
+        let _ = claim_fuzz_conclude(mut reopened, mut fz, slot, request, mut replies)?
+        let again = claim_fuzz_request(seeds[slot])
+        claim_fuzz_must(mut reopened, mut fz, slot, again, again.args, false, CF_DUPLICATE)?
+        let changed = claim_fuzz_changed(mut alter, again.args)
+        claim_fuzz_must(mut reopened, mut fz, slot, again, changed, true, CF_MISMATCH)?
+    }
+    close(take reopened)?
+    let _ = sim_disk_unmount(take root, take server)
+    if fz.wall - CLAIM_FUZZ_START >= claim_law_policy().retention_ms {
+        fail("keyed fuzzer: the run left the retention window")
+    }
+    for outcome in 0u64 .. 5 {
+        if fz.reached[outcome] == 0 {
+            let mut text = string.from("keyed fuzzer: no admission reached ")
+            string.push(mut text, claim_fuzz_name(outcome))
+            fail(take text)
+        }
+    }
+    Ok(())
+}
+
+// With --seed, that one seed; otherwise four fixed ones.
+@test
+fn claim_regenerated_admissions(tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    if let Some(seed) = std.sim.world.test_seed(seed_grant) {
+        return claim_fuzz_run(tasks, seed)
+    }
+    for seed in 3460u64 .. 3464 {
+        claim_fuzz_run(tasks, seed)?
+    }
+    Ok(())
+}

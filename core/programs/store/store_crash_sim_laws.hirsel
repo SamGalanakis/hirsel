@@ -60,6 +60,10 @@ type CsimState {
     stats: Inline[u64, 20],
     at: u64,
     note: String,
+    // Verified outcomes by CO_* (store_crash_sim_corpus.hirsel), each counted
+    // after its check passed, and whether the last unmount took a power cut.
+    outcomes: Inline[u64, 5],
+    cut: bool,
     // The retention trace recorder (store_retention_trace_laws.hirsel).
     trace: Option[RtTrace]
 }
@@ -228,6 +232,7 @@ fn csim_check_views(db: Db, rows: Table[u64, Bytes], mut st: CsimState) -> Resul
 // (a): the reopened store is one allowed world of the history.
 // `mark` is how many journal receipts were drained before the open.
 fn csim_recovered(db: Db, rows: Table[u64, Bytes], mut st: CsimState, mark: u64) -> Result[bool, String] waits {
+    let after_cut = replace(mut st.cut, false)
     let observed = csim_observe(db, rows)
     csim_drain(mut st)
     let seen = match observed {
@@ -274,10 +279,18 @@ fn csim_recovered(db: Db, rows: Table[u64, Bytes], mut st: CsimState, mark: u64)
         return Error(csim_fail(st, take text))
     }
     st.stats[16] += 1
+    if after_cut {
+        st.outcomes[CO_POWER] += 1
+        // vopr probe
+        let _ = std.prop.sometimes("crash sim recovered from a power cut", true)
+    }
     if found > st.floor {
+        st.outcomes[CO_ABOVE_FLOOR] += 1
+        // vopr probe
         let _ = std.prop.sometimes("crash sim recovered past the durable floor", true)
     }
     if found < st.floor {
+        st.outcomes[CO_D6] += 1
         let _ = std.prop.sometimes("crash sim D6 rollback past an acknowledgment", true)
     }
     if found + 1 != n {
@@ -559,12 +572,16 @@ fn csim_step(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: 
         },
         op if op == CS_RESIDENCY => {
             let to_tiered = st.tiered != 1
+            let empty = csim_main_empty(cur) && csim_tiered_now(db, rows.id)
             match set_residency(mut db, rows.id, if to_tiered {
                 Tiered
             } else {
                 Memory
             }) {
                 Ok(()) => {
+                    if !to_tiered && empty && !csim_tiered_now(db, rows.id) {
+                        st.outcomes[CO_EMPTY_TO_MEMORY] += 1
+                    }
                     st.tiered = if to_tiered {
                         1
                     } else {
@@ -612,13 +629,9 @@ fn csim_backup(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options
     }
     let mut attempt: Bytes = list.with_capacity(16)
     list.fill(mut attempt, 16, int.truncate(st.at % 251))
+    let leased_tiered = csim_tiered_now(db, rows.id)
     let job = match begin_backup(mut db, target, clone(attempt)) {
-        Ok(job) => {
-            if st.tiered != 0 || csim_tiered_holder(st, cur) {
-                let _ = std.prop.sometimes("crash sim backup leased on Tiered", true)
-            }
-            job
-        },
+        Ok(job) => job,
         Error(Store(e)) => return csim_error(mut st, "begin_backup", e, None),
         Error(Scratch(e)) => return csim_error(mut st, "begin_backup", e, None),
         Error(other) => {
@@ -693,6 +706,11 @@ fn csim_backup(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options
         csim_show_rows(leased_rows, mut text)
         return Error(csim_fail(st, take text))
     }
+    if leased_tiered {
+        st.outcomes[CO_TIERED_RESTORE] += 1
+        // vopr probe rare
+        let _ = std.prop.sometimes("crash sim restored a backup leased on Tiered", true)
+    }
     Ok(Go)
 }
 
@@ -720,11 +738,17 @@ fn csim_case(take case: std.prop.Case[CsimPlan]) -> Result[(), String] waits {
 
 // One crash-sim case; with a recorder, the retention trace it observed.
 fn csim_run(take case: std.prop.Case[CsimPlan], take trace: Option[RtTrace]) -> Result[Option[RtTrace], String] waits {
+    let (take kept, _) = csim_run_outcomes(take case, take trace)?
+    Ok(take kept)
+}
+
+// The same, with the verified outcome counts.
+fn csim_run_outcomes(take case: std.prop.Case[CsimPlan], take trace: Option[RtTrace]) -> Result[(Option[RtTrace], Inline[u64, 5]), String] waits {
     let std.prop.Case(value: take plan, world_seed, tasks, ..) = take case
     let (c, _hand) = provide.clock(0, 0)
     let r = provide.random(world_seed)
     let write_faults = plan.faults.corrupt + plan.faults.misdirect + plan.faults.lost_write > 0
-    let mut st = CsimState(history: list.new(), held: list.new(), tiered: 0, write_faults, damage_seen: false, tap: None, ev: csim_evidence(int.widen(plan.options.group_commits)), floor: 0, tiered_names: map.new(), faulted: false, stats: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], at: 0, note: string.new(), trace: take trace)
+    let mut st = CsimState(history: list.new(), held: list.new(), tiered: 0, write_faults, damage_seen: false, tap: None, ev: csim_evidence(int.widen(plan.options.group_commits)), floor: 0, tiered_names: map.new(), faulted: false, stats: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], at: 0, note: string.new(), outcomes: [0, 0, 0, 0, 0], cut: false, trace: take trace)
     list.push(mut st.history, csim_empty())
     // A clean setup mount: the store directory and the one table.
     let (clean, clean_server) = sim_disk_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(world_seed), CSIM_ROOM)
@@ -908,24 +932,17 @@ fn csim_run(take case: std.prop.Case[CsimPlan], take trace: Option[RtTrace]) -> 
             st.stats[17] += 1
             let mut cut = std.sim.world.plan(std.prop.world_seed(world_seed, 5000 + epoch))
             std.sim.fs.crash(mut image, mut cut)
-            let _ = std.prop.sometimes("crash sim power cut", true)
+            st.cut = true
         }
     }
     if terminal {
         let _ = std.prop.sometimes("crash sim damage ended the run", true)
     }
-    Ok(replace(mut st.trace, None))
+    Ok((replace(mut st.trace, None), st.outcomes))
 }
 
 fn csim_seed(tasks: Tasks, seed_grant: Env, seed: u64) -> Result[(), ()] waits {
-    let mut cfg = std.prop.config()
-    cfg.seed = seed
-    cfg.sim_seed = Some(seed)
-    cfg.cases = 1
-    cfg.max_choices = 2048
-    cfg.max_shrinks = 200
-    cfg.case_bytes = 335544320
-    cfg.case_steps = (CSIM_STEPS + 8) * 400000000
+    let cfg = csim_config(seed)
     let replayable = match env.get(seed_grant, "HIRSEL_TEST_CSIM_REPLAY") {
         Ok(Some(token)) => std.prop.replay(take cfg, token),
         _ => take cfg,

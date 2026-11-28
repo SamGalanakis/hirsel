@@ -11,3 +11,314 @@
 // Seed 11: promote_cut_holder returned Corrupt(catalog) on an empty-base
 // overlaid Snapshot (store-promote-overlay-3188).
 const CSIM_CORPUS: Inline[u64, 13] =[6, 7, 11, 31, 49, 96, 113, 124, 127, 139, 145, 150, 165]
+
+// ---- verified outcomes -----------------------------------------------------
+// What a crash-sim run reached and checked. csim_run_outcomes counts each one
+// after its check passed, never when the step was only attempted.
+// A recovery that passed oracle (a) on a mount that took a real power cut.
+const CO_POWER: u64 = 0
+
+// A verified recovery of a world newer than the durable floor.
+const CO_ABOVE_FLOOR: u64 = 1
+
+// A recovery below the floor that csim_rollback_allowed accepted as D6.
+const CO_D6: u64 = 2
+
+// A backup leased while the table was Tiered, restored to the leased rows.
+const CO_TIERED_RESTORE: u64 = 3
+
+// An empty table that was Tiered and became Memory.
+const CO_EMPTY_TO_MEMORY: u64 = 4
+
+const CO_ALL: u64 = 31
+
+fn csim_outcome_name(outcome: u64) -> String {
+    let names: Inline[String, 5] =["recovery from a power cut", "recovery above the durable floor", "D6 suffix loss", "Tiered backup and restore", "empty Tiered-to-Memory conversion"]
+    string.from(names[outcome])
+}
+
+fn csim_main_empty(w: CsimWorld) -> bool {
+    match map.get(w.heads, "") {
+        Some(main) => map.len(main) == 0,
+        None => false,
+    }
+}
+
+// Whether main's descriptor holds the table as Tiered now.
+fn csim_tiered_now(db: Db, id: u32) -> bool {
+    match residency_mode(db, id) {
+        Ok((_, ResidentTiered)) => true,
+        _ => false,
+    }
+}
+
+fn csim_config(seed: u64) -> std.prop.Config {
+    let mut cfg = std.prop.config()
+    cfg.seed = seed
+    cfg.sim_seed = Some(seed)
+    cfg.cases = 1
+    cfg.max_choices = 2048
+    cfg.max_shrinks = 200
+    cfg.case_bytes = 335544320
+    cfg.case_steps = (CSIM_STEPS + 8) * 400000000
+    take cfg
+}
+
+// ---- outcome gate ----------------------------------------------------------
+// A passing run that never reached its outcome is red here. Each row replays
+// one seed through csim_draw and the ordinary oracles, then requires the
+// outcomes in its mask.
+// Production rows: a seed whose plan has no write fault and no scripted
+// fault, then the CO_* bits it reaches. Each replays with --seed on
+// test_store_crash_sim.
+const CSIM_GATES: Inline[(u64, u64), 5] =[(96, 2), (124, 8), (139, 10), (145, 11), (165, 9)]
+
+// A historic failure or a rare outcome as a skeleton: the steps it needs, in
+// order, with drawn steps around them that keep its preconditions.
+type CsimShape: send = Production | EmptyTieredToMemory | TieredBackup | D6SuffixLoss
+
+// One position: a step the shape needs, or up to three drawn steps from
+// CSIM_AROUND[first .. first + n].
+type CsimSlot = Needs(u64, u64, u64) | Around(u64, u64)
+
+// The first five write only journal frames or nothing, so no cut-level point
+// forgives a damaged frame. The last ten change no row of main and no residency.
+const CSIM_AROUND: Inline[u64, 13] =[CS_PUT, CS_DURABLE, CS_DELETE, CS_CAPTURE, CS_RELEASE, CS_CUT, CS_PIN, CS_PIN_HELD, CS_UNPIN, CS_FORK, CS_DROP_BRANCH, CS_CRASH, CS_REOPEN]
+
+const CSIM_SHAPE_SEEDS: Inline[u64, 3] =[7, 96, 145]
+
+// D6SuffixLoss seeds whose damage lands in an acknowledged frame that
+// csim_rollback_allowed accepts. Other seeds of the shape are not all green:
+// 7, 15, 20 and 28 fail oracle (a), because a group write restarts at the
+// tail's 4096-byte block and its damage can reach an older frame than `group`
+// covers.
+const CSIM_D6_SEEDS: Inline[u64, 3] =[1, 6, 12]
+
+fn csim_skeleton(shape: CsimShape) -> List[CsimSlot] {
+    let mut slots: List[CsimSlot] = list.new()
+    match shape {
+        Production => (),
+        // Seed 7 (R1): the table holds no row when it goes Tiered and back.
+        EmptyTieredToMemory => {
+            list.push(mut slots, Around(3, 10))
+            list.push(mut slots, Needs(CS_RESIDENCY, 0, 0))
+            list.push(mut slots, Around(3, 10))
+            list.push(mut slots, Needs(CS_RESIDENCY, 0, 0))
+            list.push(mut slots, Around(3, 10))
+        },
+        // Seeds 6, 31, 49 (R2): a backup of a table with rows that has been
+        // Tiered. No drawn step changes the residency before the lease.
+        TieredBackup => {
+            list.push(mut slots, Around(0, 13))
+            list.push(mut slots, Needs(CS_DURABLE, 0, 2))
+            list.push(mut slots, Around(0, 13))
+            list.push(mut slots, Needs(CS_RESIDENCY, 0, 0))
+            list.push(mut slots, Around(0, 13))
+            list.push(mut slots, Needs(CS_BACKUP, 0, 0))
+            list.push(mut slots, Around(0, 13))
+        },
+        // D6 (STORE-SPEC 3.4): acknowledged commits, one frame each, on a disk
+        // that corrupts one write in ten or more, then a power cut. csim_draw's
+        // own rates are at most 7 in 10,000 writes, too few to pin a D6 seed.
+        D6SuffixLoss => {
+            list.push(mut slots, Around(0, 5))
+            list.push(mut slots, Needs(CS_DURABLE, 0, 0))
+            list.push(mut slots, Needs(CS_DURABLE, 0, 1))
+            list.push(mut slots, Needs(CS_DURABLE, 0, 2))
+            list.push(mut slots, Around(0, 5))
+            list.push(mut slots, Needs(CS_POWER, 0, 0))
+            list.push(mut slots, Around(0, 13))
+        },
+    }
+    take slots
+}
+
+// The drawn plan with a skeleton's steps in place of its own. The disk has no
+// faults, so each needed step runs, except for the damage D6 needs.
+fn csim_shaped(mut src: std.prop.Source, take drawn: CsimPlan, shape: CsimShape) -> CsimPlan {
+    let slots = csim_skeleton(shape)
+    if list.len(slots) == 0 {
+        return take drawn
+    }
+    let mut plan = take drawn
+    plan.faults = std.sim.world.WriteFaults(corrupt: 0, misdirect: 0, lost_write: 0)
+    plan.script_permille = 0
+    if let D6SuffixLoss = shape {
+        plan.faults.corrupt = 1000 + 500 * std.prop.below(mut src, 5)
+        plan.options.group_commits = 1
+    }
+    let mut steps: List[CsimStep] = list.new()
+    for slot in slots {
+        match slot {
+            Needs(op, a, b) => list.push(mut steps, CsimStep(op, a, b)),
+            Around(first, n) => {
+                for _ in 0u64 .. std.prop.below(mut src, 4) {
+                    list.push(mut steps, CsimStep(op: CSIM_AROUND[first + std.prop.below(mut src, n)], a: std.prop.below(mut src, 64), b: std.prop.below(mut src, 64)))
+                }
+            },
+        }
+    }
+    plan.steps = take steps
+    take plan
+}
+
+const CO_NONE: u64 = 5
+
+// The negative control's generator: the plan with what produces `off` taken
+// out. Every remaining step still runs under the ordinary oracles.
+fn csim_disabled(take given: CsimPlan, off: u64) -> CsimPlan {
+    let mut plan = take given
+    if off == CO_NONE {
+        return take plan
+    }
+    if off == CO_POWER || off == CO_D6 {
+        plan.faults = std.sim.world.WriteFaults(corrupt: 0, misdirect: 0, lost_write: 0)
+        plan.script_permille = 0
+    }
+    if off == CO_ABOVE_FLOOR {
+        list.clear(mut plan.steps)
+    }
+    let mut converted = false
+    for i in 0u64 .. list.len(plan.steps) {
+        let op = plan.steps[i].op
+        if off == CO_POWER && op == CS_POWER {
+            plan.steps[i].op = CS_CRASH
+        }
+        if off == CO_TIERED_RESTORE && op == CS_BACKUP {
+            plan.steps[i].op = CS_CUT
+        }
+        if off == CO_EMPTY_TO_MEMORY && op == CS_RESIDENCY {
+            if converted {
+                plan.steps[i].op = CS_CUT
+            }
+            converted = true
+        }
+    }
+    take plan
+}
+
+type CsimGated: send {
+    seed: u64,
+    plan: CsimPlan,
+    need: u64
+}
+
+fn csim_show_gated(g: CsimGated, mut out: String) {
+    string.push(mut out, "need=")
+    string.push_u64(mut out, g.need)
+    string.push(mut out, " ")
+    csim_show(g.plan, mut out)
+}
+
+fn csim_unreached(seed: u64, outcome: u64) -> String {
+    let mut text = string.from("outcome gate: every check passed and seed ")
+    string.push_u64(mut text, seed)
+    string.push(mut text, " reached no verified ")
+    string.push(mut text, csim_outcome_name(outcome))
+    take text
+}
+
+fn csim_gated_case(take case: std.prop.Case[CsimGated]) -> Result[(), String] waits {
+    let std.prop.Case(value: take gated, index: nth, world_seed, tasks) = take case
+    let CsimGated(seed, plan: take plan, need) = take gated
+    let (_, reached) = csim_run_outcomes(std.prop.Case(value: take plan, index: nth, world_seed, tasks), None)?
+    for outcome in 0u64 .. 5 {
+        if need & (1u64 << outcome) != 0 && reached[outcome] == 0 {
+            return Error(csim_unreached(seed, outcome))
+        }
+    }
+    Ok(())
+}
+
+type CsimGate: send {
+    tasks: Tasks,
+    seed: u64,
+    shape: CsimShape,
+    need: u64,
+    off: u64
+}
+
+// One gate row. A failed oracle or an unreached outcome fails the task.
+fn csim_gate(take gate: CsimGate) -> Result[(), ()] waits {
+    let CsimGate(tasks, seed, shape, need, off) = take gate
+    let mut cfg = csim_config(seed)
+    cfg.max_shrinks = 0
+    std.prop.check_tasks(tasks, cfg, std.prop.make(fn(mut src: std.prop.Source) -> CsimGated {
+        let drawn = csim_draw(mut src)
+        CsimGated(seed, plan: csim_disabled(csim_shaped(mut src, take drawn, shape), off), need)
+    }, csim_show_gated), csim_gated_case)
+}
+
+fn csim_gate_rows() -> List[(u64, CsimShape, u64)] {
+    let mut gates: List[(u64, CsimShape, u64)] = list.new()
+    for seed in CSIM_SHAPE_SEEDS {
+        list.push(mut gates, (seed, EmptyTieredToMemory, 1u64 << CO_EMPTY_TO_MEMORY))
+        list.push(mut gates, (seed, TieredBackup, 1u64 << CO_TIERED_RESTORE))
+    }
+    for seed in CSIM_D6_SEEDS {
+        list.push(mut gates, (seed, D6SuffixLoss, 1u64 << CO_D6))
+    }
+    for (seed, need) in CSIM_GATES {
+        list.push(mut gates, (seed, Production, need))
+    }
+    take gates
+}
+
+@test
+fn test_store_crash_outcome_coverage(tasks: Tasks) -> Result[(), String] waits {
+    let mut required = 0u64
+    for (seed, shape, need) in csim_gate_rows() {
+        if let Error(()) = csim_gate(CsimGate(tasks, seed, shape, need, off: CO_NONE)) {
+            return Error("outcome gate: a row failed")
+        }
+        required = required | need
+    }
+    if required != CO_ALL {
+        return Error("outcome gate: the rows no longer require every outcome")
+    }
+    Ok(())
+}
+
+// The gate's own negative control. For each outcome, the first row that
+// requires it runs again with a generator that no longer produces it. The
+// row must fail, and with the message csim_gated_case returns only after
+// every ordinary oracle passed.
+@test
+fn test_store_crash_outcome_coverage_negative(tasks: Tasks) -> Result[(), String] waits {
+    let rows = csim_gate_rows()
+    for off in 0u64 .. 5 {
+        let mut ran = false
+        for (seed, shape, need) in rows {
+            if ran || need & (1u64 << off) == 0 {
+                continue
+            }
+            ran = true
+            let child = task.spawn(tasks, bytes 402653184, CsimGate(tasks, seed, shape, need: 1u64 << off, off), csim_gate)
+            let wanted = csim_unreached(seed, off)
+            let mut text = string.from("outcome gate: with no generator for ")
+            string.push(mut text, csim_outcome_name(off))
+            match task.join(take child) {
+                Error(Failed(causes)) => {
+                    let mut named = false
+                    for cause in causes {
+                        if let Fail(said) = cause.kind {
+                            named = named || string.find(said, 0, wanted) != None
+                        }
+                    }
+                    if !named {
+                        string.push(mut text, " the row failed for another reason")
+                        return Error(take text)
+                    }
+                },
+                _ => {
+                    string.push(mut text, " the row stayed green")
+                    return Error(take text)
+                },
+            }
+        }
+        if !ran {
+            return Error("outcome gate: an outcome has no row")
+        }
+    }
+    Ok(())
+}

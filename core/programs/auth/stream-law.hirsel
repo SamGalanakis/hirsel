@@ -86,3 +86,35 @@ fn revoke_open_response(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(),
     let _ = std.task.cancel_join(take worker)
     Ok(())
 }
+
+@test
+fn idle_revocation_with_clock_rollback(real: Clock, tasks: Tasks) -> Result[(), ()] waits {
+    let (c, take hand) = provide.clock(0u64, 10000u64)
+    let mut time = take hand
+    let (to, requests): (Sender[std.stream_watch.Probe], Receiver[std.stream_watch.Probe]) = channel.new(2)
+    let (finished, done): (Sender[bool], Receiver[bool]) = channel.new(1)
+    let until = At(real, std.clock.deadline_after_ms(host.mono_ns(real), 2000))
+    let check = Some(std.stream_watch.release_guard(to, b"binding"))
+    let alarm = option.unwrap(std.stream_watch.guard_alarm(tasks, c, Some(20000u64), check, finished, true))
+    let first = result.unwrap(channel.receive_until(requests, until))
+    clock.set_wall(mut time, 0u64)
+    result.unwrap(channel.send(first.reply, true))
+    // Advance elapsed time until the next probe. Wall time stays below even
+    // the first probe's wall reading throughout this wait.
+    loop {
+        clock.advance_to(mut time, int.saturating_add(host.mono_ns(c), 100000000u64))
+        if let Ok(take next) = channel.try_receive(requests) {
+            result.unwrap(channel.send(next.reply, false))
+            break
+        }
+        if let At(_, limit) = until {
+            if host.mono_ns(real) >= limit {
+                fail("rollback stalled the revocation monitor")
+            }
+        }
+        std.clock.sleep_ns(real, 1000000u64)
+    }
+    let _ = result.unwrap(channel.receive_until(done, until))
+    result.unwrap(task.join(take alarm))
+    Ok(())
+}

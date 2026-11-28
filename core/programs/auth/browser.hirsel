@@ -35,5 +35,12 @@ fn request_policy(method: Bytes, cookie: bool, upgrade: bool, origin_matches: bo
 
 /// A cookie that opens a long-lived response requires same-origin evidence.
 pub fn check_stream(req: std.http.Request, origin: BrowserOrigin) -> Result[(), Error] {
-    request_policy(std.http.method(req), std.http.field(req, b"cookie") != None, true, one_field(req, b"origin", string.as_bytes(origin.text)), one_field(req, b"sec-fetch-site", b"same-origin"))
+    stream_policy(std.http.method(req), std.http.field(req, b"cookie") != None, std.http.field(req, b"upgrade") != None, std.http.field(req, b"origin") != None, one_field(req, b"origin", string.as_bytes(origin.text)), one_field(req, b"sec-fetch-site", b"same-origin"))
+}
+
+fn stream_policy(method: Bytes, cookie: bool, upgrade: bool, has_origin: bool, origin_matches: bool, same_site: bool) -> Result[(), Error] {
+    // Browsers omit Origin on a same-origin fetch GET. An upgrade or mutation
+    // always requires it, and a supplied Origin must match exactly.
+    let browser_get = method == b"GET" && !upgrade && !has_origin
+    request_policy(method, cookie, true, origin_matches || browser_get, same_site)
 }

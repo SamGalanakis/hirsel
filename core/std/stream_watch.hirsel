@@ -130,6 +130,7 @@ pub fn revoked(check: Option[Guard], c: Clock) -> bool waits {
 }
 
 type GuardAlarm[E: send]: send {
+    tasks: Tasks,
     clock: Clock,
     expires: Option[u64],
     guard: Guard,
@@ -137,22 +138,40 @@ type GuardAlarm[E: send]: send {
     event: E
 }
 
+fn signal_wall_expiry(take job: (Clock, u64, Sender[bool])) waits {
+    let (c, end, take answer) = take job
+    host.sleep_until_wall(c, end)
+    let _ = channel.send(answer, false)
+}
+
 fn await_guard[E: send](take job: GuardAlarm[E]) waits {
-    let GuardAlarm(clock: c, expires, guard: take check, to: take to, event: take event) = take job
+    let GuardAlarm(tasks, clock: c, expires, guard: take check, to: take to, event: take event) = take job
+    // The wall deadline can interrupt either the pending probe or the idle
+    // interval. Elapsed time between probes is independent of wall adjustments.
+    let (reply, answers): (Sender[bool], Receiver[bool]) = channel.new(2u64)
+    let _wall: Option[Task[()]] = match expires {
+        Some(end) => match task.try_spawn(tasks, bytes 128, (c, end, channel.sender(reply)), signal_wall_expiry) {
+            Ok(take timer) => Some(take timer),
+            Error(_) => {
+                let _ = channel.send(to, take event)
+                return
+            },
+        },
+        None => None,
+    }
     loop {
-        let now = host.wall_ms(c)
-        let next = int.saturating_add(now, 100u64)
-        if probe_denied(check, c) {
+        let next = clock.deadline_after_ms(host.mono_ns(c), 100u64)
+        let probe = Probe(key: arc.share(check.key), reply: channel.sender(reply))
+        if let Error(_) = channel.try_send(check.service, take probe) {
             break
         }
-        if let Some(end) = expires {
-            if now >= end {
-                break
-            }
-            host.sleep_until_wall(c, order.min(next, end))
-        } else {
-            host.sleep_until_wall(c, next)
+        if let Ok(true) = channel.receive_until(answers, At(c, next)) {} else {
+            break
         }
+        if let Error(Empty) = channel.receive_until(answers, At(c, next)) {
+            continue
+        }
+        break
     }
     let _ = channel.send(to, take event)
 }
@@ -161,7 +180,7 @@ fn await_guard[E: send](take job: GuardAlarm[E]) waits {
 /// also check at release. Deadline-only transports keep their one-shot alarm.
 pub fn guard_alarm[E: send](tasks: Tasks, c: Clock, expires: Option[u64], check: Option[Guard], to: Sender[E], take event: E) -> Option[Task[()]] {
     if let Some(take watch) = copy_guard(check) {
-        return Some(task.spawn(tasks, bytes 4096, GuardAlarm(clock: c, expires, guard: take watch, to: channel.sender(to), event: take event), await_guard))
+        return Some(task.spawn(tasks, bytes 4096, GuardAlarm(tasks, clock: c, expires, guard: take watch, to: channel.sender(to), event: take event), await_guard))
     }
     match expires {
         Some(end) => Some(clock.wall_alarm(tasks, c, end, to, take event)),

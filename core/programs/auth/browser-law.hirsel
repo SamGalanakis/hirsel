@@ -14,3 +14,20 @@ fn cookie_origin_policy() -> Result[(), ()] {
     let _ = result.unwrap(request_policy(b"GET", true, true, true, true))
     Ok(())
 }
+
+@test
+fn browser_stream_get() -> Result[(), ()] {
+    if let Error(_) = stream_policy(b"GET", true, false, false, false, true) {
+        fail("same-origin browser GET without Origin must open")
+    }
+    if let Ok(_) = stream_policy(b"GET", true, false, true, false, true) {
+        fail("mismatched Origin on stream")
+    }
+    if let Ok(_) = stream_policy(b"GET", true, true, false, false, true) {
+        fail("upgrade without Origin")
+    }
+    if let Ok(_) = stream_policy(b"GET", true, false, false, false, false) {
+        fail("stream without same-origin evidence")
+    }
+    Ok(())
+}

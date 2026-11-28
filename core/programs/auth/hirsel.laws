@@ -1,5 +1,7 @@
 hirsel.laws 1
+auth@1/auth/browser_stream_get src=82fdf88a6a41aa64 sig=b920903f24f4d18e run=5ffc56bae06a36d7 bug=- oracle=- rows=pending
 auth@1/auth/cookie_origin_policy src=2e876c7bbcd96cf5 sig=64478513b639bd7b run=5ffc56bae06a36d7 bug=- oracle=- rows=pending
+auth@1/laws/idle_revocation_with_clock_rollback src=917e1721ee5bcc24 sig=5b7fb3db072eacd3 run=b9acc5aaec8cf9a9 bug=- oracle=- rows=pending
 auth@1/laws/oidc_exchange_and_consume src=ce6e8f5c1f68dcae sig=49ecb88fefe93b70 run=db4e4334fc7b99e2 bug=- oracle=- rows=pending
 auth@1/laws/passkey_ed25519 src=c4ed4f3820245b13 sig=368b5c13faa3ca31 run=7338608ae6c89dee bug=- oracle=- rows=pending
 auth@1/laws/passkey_es256 src=ac658a499f0e4f8f sig=368b5c13faa3ca31 run=7338608ae6c89dee bug=- oracle=- rows=pending

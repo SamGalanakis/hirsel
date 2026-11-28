@@ -1,5 +1,5 @@
 hirsel.laws 1
-hirsel.ai/jwtbind@1/jwtbind/jwt_caller_map src=dd61e1c10e9b8fab sig=f6ab9b09f9748f74 run=a58227ecac7d1e85 bug=- oracle=- rows=pending
+hirsel.ai/jwtbind@1/jwtbind/jwt_caller_map src=dd61e1c10e9b8fab sig=c2494ed25e196d37 run=a58227ecac7d1e85 bug=- oracle=- rows=pending
 hirsel.ai/jwtbind@1/jwtbind/jwt_config_refused src=2d5f881587181ee3 sig=1eefd1e43f24e349 run=a58227ecac7d1e85 bug=- oracle=- rows=pending
 hirsel.ai/jwtbind@1/jwtbind/jwt_default_place src=93b5a9797342f824 sig=a42f93327e501d84 run=607dcf6bff52df2b bug=- oracle=- rows=pending
 hirsel.ai/jwtbind@1/jwtbind/jwt_expiry_instant src=5e6005efc2204050 sig=1f065ba6d22a6bc4 run=a58227ecac7d1e85 bug=- oracle=- rows=pending

@@ -2003,15 +2003,15 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
         return false
     }
     let small = Plan(n_e: 1024, s_e: plan.s_e, reply_max: plan.reply_max)
-    // MEM-24: log 24, issued cell 8, info flag 8 and view cell 136.
+    // MEM-24: log 24, issued cell 8, info flag 8, fetched-row map cell 24, view cell 136.
     // Option[TxView] is 8 + PageTree 64 + four u64s 32 + two options 32.
-    // An 800-byte reply leaves 48 of 1024. Its stored row needs round8(41 + 800) = 848.
+    // An 800-byte reply leaves 24 of 1024. Its stored row needs round8(41 + 800) = 848.
     let kept_inside = match serve(mut db, take complete, small, None, (), fn(mut tx, unused_env) -> Result[Bytes, Bytes] {
         let mut output: Bytes = list.with_capacity(800)
         list.fill(mut output, 800, 7u8)
         Ok(take output)
     }) {
-        Ok(Failed(_, OutOfBytes(problem))) => problem.requested == 848 && problem.available == 48,
+        Ok(Failed(_, OutOfBytes(problem))) => problem.requested == 848 && problem.available == 24,
         _ => false,
     }
     kept_inside && reserve_settles_pin(c, 10, plan) && reserve_settles_pin(c, 100000, plan)

@@ -9,8 +9,8 @@ It also contains `manifest.json`, generated from the same Describe response.
 [Embedding](embed.md#emb-5-swift-bindings-and-the-xcframework) specifies the Swift bindings
 from the same manifest, over the C embed ABI instead of WebSocket.
 
-A server using `runner` declares `runner = { major = 1 }` under
-`[dependencies]` in `hirsel.hcfg`.
+A server using `runner` lists `("runner", Toolchain(package: "runner", major: 1, authority: []))`
+in `Package.dependencies` in `hirsel.hcfg`.
 
 ## 4. Generated code
 
@@ -391,11 +391,11 @@ subscription, optimistic overlay or Batch observer. Each Call frame carries
 or its `signal` aborts before any delivery, its pending record is deleted, the
 position stays free, and the call is refused with Deadline (or rejected with
 the signal's reason). Once a delivery may have happened, the caller is answered
-LocallyUnknown and the lane keeps recovering under the same idempotency key,
-reporting the outcome to `onRecovered`; a deadline does not end a call the
-place still owes, since the place answers by the deadline it was sent. A
-reconnect aborts the old connection and replays every lane's pending call once
-under its unchanged key; answers from the old connection are dropped. Each
+LocallyUnknown and the lane keeps recovering under the same `(stream, position)`,
+reporting the outcome to `onRecovered`. The local observer's deadline does not
+settle a pending call at the Place. A reconnect closes the old connection and
+resends each recoverable call at its original `(stream, position)`. The client
+drops answers from the old connection. Each
 lane's first call mints a stream ID from the keyed time in Welcome and a cryptographic
 64-bit nonce. The client persists the stream ID, position, argument bytes and
 in-flight flag before sending. A stream position belongs to a stored call: a

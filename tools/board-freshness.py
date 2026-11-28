@@ -76,12 +76,36 @@ def nightly_alert(directory, now):
             continue
         if newest is None or finished > newest[0]:
             newest = finished, result.parent.name
+    unswept = unswept_night(directory, newest)
     if newest is None:
-        return "NIGHTLY-STALE age unavailable (no complete VOPR sweep)"
+        return f"NIGHTLY-STALE age unavailable (no complete VOPR sweep{unswept})"
     age = now - newest[0]
     if age > MAX_AGE:
-        return f"NIGHTLY-STALE {hours(age)} old (>{hours(MAX_AGE)}; {newest[1]})"
+        return f"NIGHTLY-STALE {hours(age)} old (>{hours(MAX_AGE)}; {newest[1]}{unswept})"
     return None
+
+
+UNSWEPT = {"sweep-deferred": "deferred by Boat", "sweep-not-run": "not run"}
+
+
+def unswept_night(directory, newest):
+    """Name a later night that swept no seeds, so the alert says why freshness did not move.
+
+    A complete night is one that swept seeds, whatever its reds. A night Boat deferred, or
+    whose sweep never dispatched a batch, is a receipt of that and not a fresh sweep."""
+    try:
+        lines = (directory / "receipts.ndjson").read_text().splitlines()
+    except FileNotFoundError:
+        return ""
+    for line in reversed(lines):
+        receipt = json.loads(line)
+        if receipt.get("scope") != "full":
+            continue
+        if newest is not None and receipt["night"] == newest[1]:
+            return ""
+        reason = UNSWEPT.get(receipt.get("phase"))
+        return f"; latest night {receipt['night']} {reason}, no seeds ran" if reason else ""
+    return ""
 
 
 def hours(seconds):
@@ -311,7 +335,10 @@ def service_failure(base, followups, tier="nightly"):
                else f"journalctl --user -u {unit}")
     if vopr:
         subject = "nightly VOPR sweep"
-        detail = f"failed (exit {status})" if status else detail
+        if exited and status == "75":
+            detail = "swept no seeds: Boat deferred it or no batch ran (exit 75)"
+        else:
+            detail = f"failed (exit {status})" if status else detail
     else:
         subject = f"{tier} board"
     if not vopr and tier == "nightly":

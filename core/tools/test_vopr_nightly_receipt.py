@@ -84,6 +84,45 @@ class NightlyReceipt(unittest.TestCase):
                 self.assertEqual(summary["batches_deferred"], len(rows))
                 self.assertFalse([error for error in summary["evidence_errors"] if "unexpected" in error])
 
+    def test_a_night_that_swept_no_seeds_says_so_instead_of_canary_missing_or_reach_red(self):
+        # 2026-11-28: Boat deferred the only batch, and the night read as canary_missing plus
+        # 27 runs-0 reach reds. A sweep that never dispatched a batch must read the same way.
+        tool = Path(__file__).with_name("vopr_nightly_receipt.py")
+        law = "store@1/store/test_model"
+        deferral = {"kind": "batch_deferred", "campaign": "night-001"}
+        for phase, batch, group in (
+            ("sweep-not-run", None, "sweep_not_run"),
+            ("sweep-deferred", [{"build": "commit", "law": law, "seed": 0, "status": 0}, deferral],
+             "batch_deferred"),
+        ):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                run = root / "night"
+                run.mkdir()
+                (run / "inventory").write_text(f"{law}\n{CANARY}\n")
+                source = root / "revision.c"
+                source.write_text("const unsigned char hirsel_code_revision[32] = {1};\n"
+                                  "int main(void) { return 0; }\n")
+                binary = root / "law"
+                subprocess.run(["cc", "-o", binary, source], check=True)
+                manifest = root / "manifest.json"
+                manifest.write_text(json.dumps([
+                    {"build": "commit", "law": name, "executable": str(binary), "recording": str(binary)}
+                    for name in (law, CANARY)
+                ]))
+                (run / "probe-declarations.json").write_text(json.dumps({law: {"64 or more commands": False}}))
+                if batch is not None:
+                    with gzip.open(run / "night-001.jsonl.gz", "wt") as stream:
+                        for row in batch:
+                            print(json.dumps(row), file=stream)
+                ran = subprocess.run([sys.executable, tool, run, manifest, "commit", phase, "75"])
+                self.assertEqual(ran.returncode, 75)
+                groups = [json.loads(line)["group"] for line in (run / "failure-groups.jsonl").read_text().splitlines()]
+                self.assertEqual(groups, [["boat-dispatch", group, None]])
+                self.assertFalse((run / "complete").exists())
+                receipt = json.loads((root / "receipts.ndjson").read_text())
+                self.assertEqual((receipt["phase"], receipt["status"], receipt["probes_missed"]), (phase, 75, []))
+
     def test_sometimes_counts_hits_per_seed_across_batches(self):
         from vopr_nightly_receipt import summarize
 

@@ -206,6 +206,14 @@ runpy.run_path(str(script))["prepare_web"](compiler, executable, web)
             before = time.time() - 26 * 3600 - 60
             os.utime(complete, (before, before))
             self.assertIn("NIGHTLY-STALE 26.0 h old", subprocess.check_output(command, text=True))
+            # A later night that swept no seeds stays stale, and the alert says why.
+            (nightly / "receipts.ndjson").write_text("".join(json.dumps(receipt) + "\n" for receipt in (
+                {"night": "older", "scope": "full", "phase": "finished"},
+                {"night": "newer", "scope": "full", "phase": "sweep-deferred"},
+                {"night": "probe", "scope": "focused", "phase": "finished"},
+            )))
+            self.assertIn("NIGHTLY-STALE 26.0 h old (>26.0 h; older; latest night newer deferred by Boat",
+                          subprocess.check_output(command, text=True))
             (newer / "complete").touch()
             self.assertNotIn("NIGHTLY-STALE", subprocess.check_output(command, text=True))
 

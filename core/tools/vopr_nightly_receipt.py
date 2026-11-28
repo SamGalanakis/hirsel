@@ -112,7 +112,8 @@ def summarize(run, manifest, commit):
         for label in entry.get("required_witnesses", []):
             probes[law, label]
     batches_deferred = 0
-    for batch in sorted(run.glob("*.jsonl.gz")):
+    batches = sorted(run.glob("*.jsonl.gz"))
+    for batch in batches:
         canaries = []
         rows = list(read_evidence(batch, errors))
         batch_deferred = deferred(rows)
@@ -164,9 +165,10 @@ def summarize(run, manifest, commit):
                "hits": count["hits"], "true_calls": count["true_calls"]}
         if label in declared.get(law, {}):
             rare = declared[law][label]
-            # A law Boat never ran this night has no reach evidence; the deferral is the red.
+            # With no batch swept, a law that never ran has no reach evidence; the
+            # deferral or the unswept night is the red.
             missed = (frequency_missed(row["hits"], row["runs"])
-                      and not (batches_deferred and not row["runs"]))
+                      and (row["runs"] or batches_deferred < len(batches)))
             row.update(rare=rare, divisor=PROBE_DIVISOR, severity=(30 if rare else 40) if missed else None)
             if missed:
                 misses.add((law, label))
@@ -238,11 +240,12 @@ def finish(run, manifest, commit, phase, status):
     negative_passed = {row["oracle"] for row in evidence["negative_controls"] if row["rejected"] is True}
     negatives_missing = [] if focused else sorted(set(CONTROL_NAMES) - negative_passed)
     evidence["negative_controls_unproven"] = negatives_missing
-    if phase in ("finished", "sweep-failed"):
+    if phase in ("finished", "sweep-failed", "sweep-deferred", "sweep-not-run"):
         probe_reds = ({**probe, "kind": "reach_red", "build": commit} for probe in evidence["probes"]
                       if probe.get("severity") is not None)
         try:
-            group_status = publish(run, require_canary=True, probe_reds=probe_reds)
+            group_status = publish(run, require_canary=True, probe_reds=probe_reds,
+                                   not_run=phase == "sweep-not-run")
             if phase == "finished" and group_status in (0, 3):
                 marker = "focused-complete" if focused else "complete"
                 (run / marker).touch()

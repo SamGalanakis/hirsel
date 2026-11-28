@@ -63,9 +63,9 @@ def expected_canary(row):
             and not any(key in row for key in ("recorded_run", "tape_divergence", "timed_out")))
 
 
-def publish(run, *, require_canary=False, probe_reds=()):
+def publish(run, *, require_canary=False, probe_reds=(), not_run=False):
     """Write all failure groups. Exit 2 for an unverified sweep, 75 when Boat deferred
-    every batch, 3 for preparation reds."""
+    every batch or the sweep dispatched none (`not_run`), 3 for preparation reds."""
     previous = set()
     for report in run.parent.glob("*/failure-groups.jsonl"):
         if report.parent != run:
@@ -77,7 +77,7 @@ def publish(run, *, require_canary=False, probe_reds=()):
     prepare = run / "prepare.jsonl"
     batches = sorted(run.glob("*.jsonl.gz"))
     receipts = ([prepare] if prepare.is_file() else []) + batches
-    canary_ok = not require_canary or bool(batches)
+    canary_ok = not require_canary or bool(batches) or not_run
     deferrals = 0
     for receipt in receipts:
         canary = []
@@ -110,6 +110,10 @@ def publish(run, *, require_canary=False, probe_reds=()):
         key = "boat-dispatch", "batch_deferred", None
         counts[key] = deferrals
         samples[key] = {"receipt": None, "build": None, "digest": None, "seed": None}
+    if not_run:
+        key = "boat-dispatch", "sweep_not_run", None
+        counts[key] = 1
+        samples[key] = {"receipt": None, "build": None, "digest": None, "seed": None}
     if require_canary and not canary_ok:
         print(f"{run}: no verified canary result", file=sys.stderr)
         key = CANARY, "canary_missing", None
@@ -136,6 +140,9 @@ def publish(run, *, require_canary=False, probe_reds=()):
     output.replace(run / "failure-groups.jsonl")
     if not canary_ok:
         return 2
+    if not_run:
+        print(f"{run}: the sweep dispatched no batch; no seeds ran", file=sys.stderr)
+        return os.EX_TEMPFAIL
     if require_canary and deferrals == len(batches) and batches:
         print(f"{run}: Boat deferred every batch; no seeds ran", file=sys.stderr)
         return os.EX_TEMPFAIL

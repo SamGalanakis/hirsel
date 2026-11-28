@@ -169,9 +169,24 @@ for tape in "$scratch"/*.tapes/*.tape; do
   mkdir -p "$run/tapes"
   cp -p -- "$tape" "$run/tapes/"
 done
+# A 75 means the sweep stopped before a batch or Boat deferred one. Batches that
+# swept seeds still make a complete night; without one the night says it never ran.
+if (( sweep_status == 75 )); then
+  swept=0
+  for receipt in "${receipts[@]}"; do
+    zgrep -q '"kind": "batch_deferred"' "$receipt" || swept=1
+  done
+  if (( swept )); then
+    sweep_status=0
+  elif (( ${#receipts[@]} )); then
+    phase=sweep-deferred
+  else
+    phase=sweep-not-run
+  fi
+fi
 if (( sweep_status != 0 )); then
   status=$sweep_status
-  phase=sweep-failed
+  [[ $phase != sweep ]] || phase=sweep-failed
 else
   if (( status == 0 && ${#law_filter[@]} == 0 )) && [[ -f "$scratch/cross-build-stage/manifest.json" ]]; then
     python3 core/tools/store_cross_build.py promote \

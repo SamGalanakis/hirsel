@@ -3,6 +3,34 @@
 use super::{Loans, Point, escaping, provenance, slots_with, targets};
 use crate::*;
 
+pub(super) fn preserve_guards(b: &Body, from: &[Vec<u32>], keep: &mut [bool]) {
+    // A true drop flag proves its owner's initialization. Sharing that flag
+    // with an unrelated boolean loses the implication in the merged IR.
+    let conditions: std::collections::HashSet<_> = b
+        .terminators
+        .iter()
+        .filter_map(|t| match t {
+            Terminator::Branch { condition, .. } => Some(*condition),
+            _ => None,
+        })
+        .collect();
+    for inst in &b.insts {
+        if let Inst::Read {
+            result, address, ..
+        } = inst
+            && conditions.contains(result)
+        {
+            for &slot in &from[b.values.len() + address.index()] {
+                if b.slots[slot as usize]
+                    == PlaceTy::Value(Ty::Scalar(hirsel_core_layout::Scalar::Bool))
+                {
+                    keep[slot as usize] = true;
+                }
+            }
+        }
+    }
+}
+
 /// Each candidate slot's needed ranges, as [`share_slots`] defines them:
 /// (block, from, to), inclusive, the block's length being its terminator; in
 /// block order, at most one a block.

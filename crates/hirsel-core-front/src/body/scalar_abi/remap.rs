@@ -252,7 +252,10 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
 }
 pub(super) fn addresses(inst: &mut Inst, f: &mut impl FnMut(&mut AddressId)) {
     match inst {
-        Inst::PromoteFrame { carrier } => f(carrier),
+        Inst::FrameAdmit { storage, .. }
+        | Inst::FrameActive { storage, .. }
+        | Inst::FrameRefund { storage }
+        | Inst::PromoteFrame { carrier: storage } => f(storage),
         Inst::Address { address, .. }
         | Inst::Read { address, .. }
         | Inst::Store { address, .. }
@@ -702,3 +705,7 @@ pub(super) fn calls(body: &mut Body) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "remap_tests.rs"]
+mod tests;

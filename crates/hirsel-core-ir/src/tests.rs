@@ -284,6 +284,54 @@ fn shared_slots_keep_every_use_inside_its_storage() {
 }
 
 #[test]
+fn sharing_preserves_conditional_initialization() {
+    let mut m = load(
+        "flags",
+        r#"core v1
+sig g0 = (bool) -> (u64)
+inst n0 = p@0/m/f [] []
+fn f0 = n0 g0 {
+  slot s0 = bool
+  slot s1 = bool
+  slot s2 = u64
+  addr a0 = s0 : bool
+  addr a1 = s1 : bool
+  addr a2 = s2 : u64
+b0(v0: bool):
+  live s0
+  address a0
+  store a0, v0
+  dead s0
+  live s1
+  live s2
+  address a1
+  address a2
+  v1: bool = const false
+  store a1, v1
+  v2: u64 = const 5
+  branch v0, b1, b2
+b1:
+  store a2, v2
+  v3: bool = const true
+  store a1, v3
+  jump b2
+b2:
+  v4: bool = read a1
+  branch v4, b3, b4
+b3:
+  v5: u64 = read a2
+  return v5
+b4:
+  return v2
+}
+"#,
+    );
+    wf::module(&m).unwrap();
+    crate::extent::share_slots(m.functions[0].body.as_mut().unwrap(), &m.signatures);
+    wf::module(&m).unwrap();
+}
+
+#[test]
 fn well_formedness_rejects_producer_mistakes() {
     let head = "core v1\nsig g0 = (i32, i32) -> (i32)\nsig g1 = (u64) -> (ptr)\nsig g2 = (u64) -> never\nsig g3 = () -> (ptr)\ninst n0 = p@0/m/f [] []\ninst n1 = p@0/m/stop [] []\nfn f0 = n0 g0 {\n";
     let tail = "fn f1 = n1 g2 extern\n";

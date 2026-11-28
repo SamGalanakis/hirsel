@@ -272,6 +272,7 @@ pub fn share_slots(b: &mut Body, signatures: &[Signature]) {
     }
     let from = provenance(b);
     let mut escapes = escaping(b, signatures, &from, Loans::Escape);
+    needed::preserve_guards(b, &from, &mut escapes);
     for address in b.frame_obligations() {
         if let AddressBase::Slot(slot) = b.addresses[address.index()].base {
             escapes[slot.index()] = true;

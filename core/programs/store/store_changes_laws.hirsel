@@ -386,7 +386,9 @@ pub fn law_abort_budget(c: Clock) -> bool {
     let values: Inline[u64, 2] =[7, 19]
     for i in 0u64 .. 2 {
         let value = values[i]
-        let outcome = result.unwrap(bound bytes LAW_EMPTY_DRAFT_BYTES {
+        // A writable draft also boxes the empty fetched-row Map carrier
+        // (two pointers and a capacity, 24 bytes under MEM-24).
+        let outcome = result.unwrap(bound bytes (LAW_EMPTY_DRAFT_BYTES + 24) {
             execute(mut db, 0, 1, None, fn(mut tx: Tx) -> Result[(), u64] {
                 let _ = info(mut tx)
                 Error(value)

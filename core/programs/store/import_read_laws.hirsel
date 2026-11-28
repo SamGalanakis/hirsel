@@ -215,28 +215,28 @@ fn prepared_read_boundary_sweep(d: Dir, tasks: Tasks) -> bool waits {
 
 pub fn disk_law_import_read_boundaries(d: Dir, c: Clock, tasks: Tasks) -> bool waits {
     let empty: Bytes = list.new()
-    // A zero-byte read spends only the 216-byte temporary charge.
+    // A zero-byte read spends only the 256-byte charge for the 252-byte EXPORT buffer.
     result.unwrap(std.file.write(d, "EXPORT", empty))
-    let empty_export = joined_read(tasks, ExportRead(d: d, c: c, limit: 216), law_export_read)
+    let empty_export = joined_read(tasks, ExportRead(d: d, c: c, limit: 256), law_export_read)
     match take empty_export {
         ReadReturned(Some(Store(Corrupt(fault)))) => if fault.offset != 0 {
             return false
         },
         _ => return false,
     }
-    let mut fixture: Bytes = list.with_capacity(217)
-    list.fill(mut fixture, 217, 0u8)
+    let mut fixture: Bytes = list.with_capacity(253)
+    list.fill(mut fixture, 253, 0u8)
     result.unwrap(std.file.write(d, "EXPORT", list.slice(fixture, 0, 1)))
     // d6b92dd2 made Store disk reads return their refusals (L85), so the short
     // read's 8-byte admission comes back as a value on the scratch side.
-    let short_export = joined_read(tasks, ExportRead(d: d, c: c, limit: 216), law_export_read)
+    let short_export = joined_read(tasks, ExportRead(d: d, c: c, limit: 256), law_export_read)
     match take short_export {
         ReadReturned(Some(Scratch(Full(Allocation(admission))))) => if admission.requested != 8 || admission.available != 0 {
             return false
         },
         _ => return false,
     }
-    result.unwrap(std.file.write(d, "EXPORT", list.slice(fixture, 0, 216)))
+    result.unwrap(std.file.write(d, "EXPORT", list.slice(fixture, 0, 252)))
     match open_export(d, c, empty, result.unwrap(sized(Directory, 2147483648u64))) {
         Error(Store(Corrupt(_))) => {},
         _ => return false,
@@ -244,7 +244,7 @@ pub fn disk_law_import_read_boundaries(d: Dir, c: Clock, tasks: Tasks) -> bool w
     result.unwrap(std.file.write(d, "EXPORT", fixture))
     match open_export(d, c, empty, result.unwrap(sized(Directory, 2147483648u64))) {
         Error(Scratch(Corrupt(fault))) => {
-            if fault.offset != 216 {
+            if fault.offset != 252 {
                 return false
             }
             if let Malformed = fault.why {} else {
@@ -277,10 +277,11 @@ pub fn disk_law_import_read_boundaries(d: Dir, c: Clock, tasks: Tasks) -> bool w
     let codec: std.codec.Codec[transfer.PreparedMeta] = std.codec.of()
     result.unwrap(failure_result_from_rep(transfer.write_prepared_frame(mut prepared_file, 0x0081, codec, meta)))
     result.unwrap(failure_result_from_rep(transfer.finish_frames(take prepared_file)))
-    // AP1b: a 32-byte description and no limits make a 248-byte payload. The four
-    // option words start at payload offset 192 (file offset 280).
-    let bytes_on_disk = result.unwrap(failure_result_from_rep(manifest.disk_read_paged_file(d, "PREPARED", 336)))
-    if list.len(bytes_on_disk) != 336 || format.read_le(bytes_on_disk, 72, 2) != 0x0081 || format.read_le(bytes_on_disk, 76, 4) != 248 || format.read_le(bytes_on_disk, 280, 8) != 1048576 || format.read_le(bytes_on_disk, 288, 8) != 1048576 || format.read_le(bytes_on_disk, 296, 8) != 67108864 || format.read_le(bytes_on_disk, 304, 8) != 268435456 {
+    // AP1b: a 32-byte description and no limits made a 248-byte payload.
+    // Format 14 adds a u32 length and 32 binding bytes before the options.
+    // The 284-byte payload starts at 88, and the four options start at 316.
+    let bytes_on_disk = result.unwrap(failure_result_from_rep(manifest.disk_read_paged_file(d, "PREPARED", 372)))
+    if list.len(bytes_on_disk) != 372 || format.read_le(bytes_on_disk, 72, 2) != 0x0081 || format.read_le(bytes_on_disk, 76, 4) != 284 || format.read_le(bytes_on_disk, 316, 8) != 1048576 || format.read_le(bytes_on_disk, 324, 8) != 1048576 || format.read_le(bytes_on_disk, 332, 8) != 67108864 || format.read_le(bytes_on_disk, 340, 8) != 268435456 {
         return false
     }
     if !prepared_read_boundary_sweep(d, tasks) {
@@ -543,7 +544,8 @@ fn disk_test_activation_rewrites(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     rewrite_law_refusals(mut staged, exported_rows)
     write_prepared(mut source, staged, scratch, rewrite_law_target())?
     let empty = scratch_result(failure_result_from_rep(manifest.disk_read_paged_file(scratch, "PREPARED", 1048576)))?
-    if list.len(empty) != 336 {
+    // The 72-byte HEADER and the 16-byte frame head precede the 284-byte 0x0081 payload.
+    if list.len(empty) != 372 {
         fail("L51(e″): preparation without rewrites has a suffix")
     }
     rewrite_law_append(scratch, empty, exported_rows.id, (3u64, None), false)?

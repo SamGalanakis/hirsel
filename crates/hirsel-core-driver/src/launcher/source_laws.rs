@@ -5,7 +5,6 @@ use super::admit::Tree;
 use super::laws::{Rig, attempt, group};
 use super::session::*;
 use std::collections::BTreeSet;
-use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -105,7 +104,6 @@ fn law_tree_limits_agree_with_launcher_hirsel() {
 fn source_publishes_with_the_normal_checker() {
     use super::stores::Stores;
     use crate::code_store::{CodeStore, ObjectKind};
-    use crate::native::tests::process::{CHILD_MARK, request_command_at};
 
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_owned();
@@ -114,22 +112,24 @@ fn source_publishes_with_the_normal_checker() {
         .canonicalize()
         .unwrap();
     let ffi = core.join("programs/ffi_laws");
-    let exe = std::env::current_exe().unwrap();
+    let exe = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(std::env::var_os("HIRSEL_DEV_TEST_DRIVER").unwrap())
+        .canonicalize()
+        .unwrap();
     let cache = root.join("cache");
     let child = Arc::new(move |args: &[String], at: &Path| {
         let mut args = args.to_vec();
         if args[0] == "build" {
             args.extend(["--libraries".into(), core.to_string_lossy().into_owned()]);
         }
-        let mut command = request_command_at(&exe, &args, at);
-        command.env("XDG_CACHE_HOME", &cache);
+        let mut command = Command::new(&exe);
+        command
+            .args(args)
+            .current_dir(at)
+            .env("XDG_CACHE_HOME", &cache);
         command
     });
-    let after = |bytes: &[u8]| {
-        let text = String::from_utf8_lossy(bytes).into_owned();
-        text.split_once(CHILD_MARK)
-            .map_or(text.clone(), |(_, t)| t.to_owned())
-    };
     let app = root.join("app");
     fs::create_dir_all(&app).unwrap();
     fs::write(
@@ -164,8 +164,8 @@ fn source_publishes_with_the_normal_checker() {
         let output = child(&args, &app).output().unwrap();
         (
             output.status.code(),
-            after(&output.stdout),
-            after(&output.stderr),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
         )
     };
     let tree = || {
@@ -304,10 +304,13 @@ fn source_publishes_with_the_normal_checker() {
         "a tree without its frozen lock was not refused: {answered:?}"
     );
 
-    let mut large = String::from("pub fn main() -> Result[(), Exit] { Ok(()) }\n");
-    for n in 0..12_000 {
-        writeln!(large, "pub fn value_{n}() -> u64 {{ {n}u64 }}").unwrap();
-    }
+    // The lexer retains a token, a significant index and a canonical offset
+    // for each punctuation byte. This stays within SOURCE_BYTES while taking
+    // more than one 64 MiB arena block before reachability can omit the body.
+    let large = format!(
+        "pub fn main() -> Result[(), Exit] {{ Ok(()) }}\nfn filler() {{ {} }}",
+        "();".repeat(1_300_000)
+    );
     fs::write(app.join("main.hirsel"), large).unwrap();
     *mode.lock().unwrap() = Compile::Capped;
     let answered = admit(&mut rig, 6, tree());

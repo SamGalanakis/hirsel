@@ -165,7 +165,7 @@ fn managed_head[G: send, H: shareable + inert + send, S: send](take job: Managed
     let ManagedHead(backing: take backing, options: take options, follower_plan: take follower_plan, selection: selection, tasks: tasks, clock: clock, random: random, placing: take placing, on_migrate: on_migrate, schema: schema, n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain, head_to: take head_to, cut: take cut, triggering: take triggering, granting: take granting, idle: idle, expected_store: expected_store) = take job
     let persistent = persistent_backing(backing)
     let mut opening = take options
-    let mut registration: Option[HeadRegistration[G, H]] = None
+    let mut registration: Option[(Registry[G, H], Bytes, ReleaseRecord)] = None
     launch_open_auth(mut opening) ?=> |problem| Open(Store(take problem))
     if !launch_env().wake {
         if let Some((hi, lo)) = expected_store {
@@ -185,7 +185,7 @@ fn managed_head[G: send, H: shareable + inert + send, S: send](take job: Managed
         let reg = instantiate(placing) ?=> |problem| Open(Place(take problem))
         let (take description, take record) = prepare_activation(reg, n_place, list.new()) ?=> |problem| Open(Place(take problem))
         opening.binding = Some(clone(record.binding))
-        registration = Some(HeadRegistration(registry: take reg, description: take description, record: take record))
+        registration = Some((take reg, take description, take record))
     }
     let (take opened, take temporary) = match open_backing(take backing, opening, tasks, clock, random) {
         Ok(take opened) => take opened,
@@ -210,7 +210,10 @@ fn managed_head[G: send, H: shareable + inert + send, S: send](take job: Managed
     if !head_advance(to, inbox, Recovered) {
         return head_closed(take db)
     }
-    let prepared = head_prepare_registered(mut db, selection, persistent, placing, on_migrate, schema, n_place, tasks, take registration)
+    let prepared = match take registration {
+        Some((take reg, take description, take record)) => head_prepare_registered(mut db, selection, persistent, placing.place, Ok(take reg), on_migrate, schema, n_place, tasks, Some((take description, take record))),
+        None => head_prepare_registered(mut db, selection, persistent, placing.place, instantiate(placing), on_migrate, schema, n_place, tasks, None),
+    }
     let (reg, local, release, replay_identity) = match take prepared {
         Ok(take values) => take values,
         Error(take problem) => {

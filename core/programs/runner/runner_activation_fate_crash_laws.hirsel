@@ -44,7 +44,7 @@ fn fate_crash_case(c: Clock, r: Random, tasks: Tasks, site: u64) -> FateCrashCut
     let n_place = 1048576u64
     let (dir, server) = fate_crash_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(0u64))
     let mut db = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
-    let (take reg1, take h, _, _) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(code.describe(fate_law_r1), n_place), None, code.describe(trigger_law_schema), n_place, tasks))
+    let (take reg1, take h, _, _) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, code.describe(fate_law_r1), None, code.describe(trigger_law_schema), n_place, tasks))
     let t: triggers.Tables = clone(h.triggers)
     let r1 = result.unwrap(trigger_stamp(reg1.t.exported, reg1.t.bindings, n_place))
     let r2 = {
@@ -62,7 +62,7 @@ fn fate_crash_case(c: Clock, r: Random, tasks: Tasks, site: u64) -> FateCrashCut
     let (dir2, server2) = fate_crash_mount(tasks, c, take image, take faults)
     if let Ok(take db2) = store.open(tasks, dir2, c, r, triggers.law_options()) {
         let mut installing = take db2
-        let _ = head_prepare(mut installing, Install(fate_crash_flags()), false, placing_at(code.describe(fate_law_r2), n_place), None, code.describe(trigger_law_schema), n_place, tasks)
+        let _ = head_prepare(mut installing, Install(fate_crash_flags()), false, code.describe(fate_law_r2), None, code.describe(trigger_law_schema), n_place, tasks)
         if let Some(Other(5)) = store.observe_teardown_poison(mut installing) {
             store.allow_unverified_teardown(mut installing)
         }

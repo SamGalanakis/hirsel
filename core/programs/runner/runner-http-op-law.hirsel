@@ -221,7 +221,7 @@ fn http_op_drive(take d: HttpOpDrive) waits {
 fn http_op_cycle(directory: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, place: HttpOpPlace, stage: u8, birth: u64) waits {
     let options = result.unwrap(store.sized(Directory, 2147483648u64))
     let mut db = result.unwrap(store.open(tasks, directory, c, r, options))
-    let prepared = head_prepare(mut db, Install(fate.none()), false, placing_at(place, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks)
+    let prepared = head_prepare(mut db, Install(fate.none()), false, place, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks)
     let (take registered, take handles, _, take identity) = match take prepared {
         Ok(take ready) => take ready,
         Error(take issue) => fail(start_text(Open(take issue))),

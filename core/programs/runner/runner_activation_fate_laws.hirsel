@@ -162,7 +162,7 @@ fn fate_law_setup(mut db: store.Db, t: triggers.Tables, h: TriggerLawTables, reg
 fn fate_law_unsettled(mut db: store.Db, t: triggers.Tables, rows: FateLawRows, flags: List[String], before: List[Bytes], tasks: Tasks) -> fate.HeldReport waits {
     let version = store.version(store.snapshot(db))
     let activation = result.unwrap(current_description(db))
-    let refused = head_prepare(mut db, Install(fate_law_flags(flags)), false, placing_at(code.describe(fate_law_r2), 1048576u64), None, code.describe(trigger_law_schema), 1048576u64, tasks)
+    let refused = head_prepare(mut db, Install(fate_law_flags(flags)), false, code.describe(fate_law_r2), None, code.describe(trigger_law_schema), 1048576u64, tasks)
     let Error(Unsettled(take report)) = take refused else {
         fail("L70 (c): an unsettled install was not refused Unsettled")
     }
@@ -219,7 +219,7 @@ fn activation_settles_held(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[
     let dir = triggers.law_directory(d)
     let n_place = 1048576u64
     let mut db = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
-    let (take reg1, take h, _, _) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(code.describe(fate_law_r1), n_place), None, code.describe(trigger_law_schema), n_place, tasks))
+    let (take reg1, take h, _, _) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, code.describe(fate_law_r1), None, code.describe(trigger_law_schema), n_place, tasks))
     let t: triggers.Tables = clone(h.triggers)
     let r1 = result.unwrap(trigger_stamp(reg1.t.exported, reg1.t.bindings, n_place))
     let r2 = {
@@ -243,7 +243,7 @@ fn activation_settles_held(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[
     string.push(mut entry_flag, "runner@1/runner/fate_law_c")
     string.push(mut entry_flag, "=cancel")
     let version = store.version(store.snapshot(db))
-    let (take reg2, take h2, _, _) = result.unwrap(head_prepare(mut db, Install(fate_law_flags(fate_law_two(string.from("--hirsel-held=release"), take entry_flag))), false, placing_at(code.describe(fate_law_r2), n_place), None, code.describe(trigger_law_schema), n_place, tasks))
+    let (take reg2, take h2, _, _) = result.unwrap(head_prepare(mut db, Install(fate_law_flags(fate_law_two(string.from("--hirsel-held=release"), take entry_flag))), false, code.describe(fate_law_r2), None, code.describe(trigger_law_schema), n_place, tasks))
     if store.version(store.snapshot(db)) != version + 1u64 {
         fail("L70 (a): the settle is not the activation's one commit")
     }

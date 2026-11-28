@@ -65,13 +65,9 @@ type HttpPlaceFront[G: send, H: shareable + inert + send]: send {
 /// and drains the listener within http.drain_ms before closing the Store.
 pub fn operate_http[G: send, H: shareable + inert + send, S: send](take config: HttpPlaceConfig[G, H, S], take stop: Receiver[()]) -> Result[(), HttpPlaceError] waits {
     let HttpPlaceConfig(backing: take backing, options: take options, selection: take selection, place, schema, on_migrate, listener: take listener, raw: take raw, http: take http, relay, grants: take grants, triggers: take triggering, clock, tasks, random, n_place, n_publisher, n_server, state_bytes, request_bytes, frame_bytes, stream_queue) = take config
-    let mut placing = placing_at(place, n_place)
-    let (template, rooms) = match placing.made {
-        Ok(made) => (arc.share(made.0), made.1),
-        Error(problem) => return Error(PlaceStart(Open(Place(clone(problem))))),
-    }
+    let activation = placed(place, n_place) ?=> |take problem| PlaceStart(Open(Place(take problem)))
     let mut has_subscriptions = false
-    for route in template.bindings {
+    for route in activation.t.bindings {
         if route.binding.mode == Subscribe {
             has_subscriptions = true
             break
@@ -82,7 +78,7 @@ pub fn operate_http[G: send, H: shareable + inert + send, S: send](take config: 
     let persistent = persistent_backing(backing)
     let (take db, take temporary) = open_backing(take backing, options, tasks, clock, random) ?=> |take problem| PlaceStart(backing_start_error(take problem))
     let mut owned = take db
-    let prepared = prepare_http_place(mut owned, selection, persistent, placing, on_migrate, schema, tasks, take raw, mail.to, frame_bytes)
+    let prepared = prepare_http_place(mut owned, selection, persistent, place, n_place, take activation, on_migrate, schema, tasks, take raw, mail.to, frame_bytes)
     let (take registered, take handles, take identity, take routes, take plans, take reads) = match take prepared {
         Ok(take value) => take value,
         Error(take problem) => {
@@ -90,7 +86,7 @@ pub fn operate_http[G: send, H: shareable + inert + send, S: send](take config: 
             return Error(take problem)
         },
     }
-    placing.made = Ok((arc.share(registered.t), rooms))
+    let placing = registered_placing(place, n_place, registered)
     let (take drive_config, take attempt) = match take triggering {
         Some(HttpTriggers(drive: take cfg, attempt: take mint)) => (Some(take cfg), Some(take mint)),
         None => (None, None),
@@ -149,8 +145,8 @@ fn serve_http_head[G: send, H: shareable + inert + send](take head: Head[G, H], 
     take served
 }
 
-fn prepare_http_place[G: send, H: shareable + inert + send](mut db: store.Db, selection: Selection, persistent: bool, placing: Placing[G, H], on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], tasks: Tasks, take raw: std.router.Builder[HttpConnection[G, H]], pub_to: Sender[PubIn], frame_bytes: u64) -> Result[(Registry[G, H], H, Bytes, std.router.Router[HttpConnection[G, H]], Arc[HttpRoutes], HttpReadAccess), HttpPlaceError] waits {
-    let (take registered, take handles, _, take identity) = head_prepare(mut db, selection, persistent, placing, on_migrate, schema, placing.n_place, tasks) ?=> |take problem| PlaceStart(Open(take problem))
+fn prepare_http_place[G: send, H: shareable + inert + send](mut db: store.Db, selection: Selection, persistent: bool, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, take activation: Registry[G, H], on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], tasks: Tasks, take raw: std.router.Builder[HttpConnection[G, H]], pub_to: Sender[PubIn], frame_bytes: u64) -> Result[(Registry[G, H], H, Bytes, std.router.Router[HttpConnection[G, H]], Arc[HttpRoutes], HttpReadAccess), HttpPlaceError] waits {
+    let (take registered, take handles, _, take identity) = head_prepare_registered(mut db, selection, persistent, place, Ok(take activation), on_migrate, schema, n_place, tasks, None) ?=> |take problem| PlaceStart(Open(take problem))
     let mut reg = take registered
     let previous = http_previous(db) ?=> |take problem| PlaceStart(Open(Store(take problem)))
     let retired = http_retirements(db, reg) ?=> |take problem| PlaceStart(Open(take problem))

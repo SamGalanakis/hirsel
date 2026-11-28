@@ -30,7 +30,7 @@ fn test_declaration_open(parent: Dir, clock: Clock, random: Random, tasks: Tasks
     let mut db = result.unwrap(store.open(tasks, directory, clock, random, options))
     let place = code.describe(declaration_law_place)
     let schema = code.describe(declaration_law_schema)
-    let install = head_prepare(mut db, Install(fate.none()), false, placing_at(place, 1048576u64), None, schema, 1048576u64, tasks)
+    let install = head_prepare(mut db, Install(fate.none()), false, place, None, schema, 1048576u64, tasks)
     if let Error(take problem) = take install {
         return Error(start_text(Open(take problem)))
     }
@@ -38,11 +38,11 @@ fn test_declaration_open(parent: Dir, clock: Clock, random: Random, tasks: Tasks
     if version != 1u64 {
         return Error("genesis did not publish one activation commit")
     }
-    let reopen = head_prepare(mut db, Current(version), false, placing_at(place, 1048576u64), Some(code.describe(declaration_law_migrate)), schema, 1048576u64, tasks)
+    let reopen = head_prepare(mut db, Current(version), false, place, Some(code.describe(declaration_law_migrate)), schema, 1048576u64, tasks)
     if let Error(take problem) = take reopen {
         return Error(start_text(Open(take problem)))
     }
-    let failed_open = head_prepare(mut db, Current(version), false, placing_at(place, 1048576u64), None, code.describe(declaration_law_missing), 1048576u64, tasks)
+    let failed_open = head_prepare(mut db, Current(version), false, place, None, code.describe(declaration_law_missing), 1048576u64, tasks)
     if let Error(Store(Missing(name))) = failed_open {
         if name != "other" {
             return Error("ordinary open reported the wrong missing table")
@@ -50,7 +50,7 @@ fn test_declaration_open(parent: Dir, clock: Clock, random: Random, tasks: Tasks
     } else {
         return Error("ordinary open changed the catalog or accepted a missing declaration")
     }
-    let failed_install = head_prepare(mut db, Install(fate.none()), false, placing_at(place, 1048576u64), None, code.describe(declaration_law_missing), 1048576u64, tasks)
+    let failed_install = head_prepare(mut db, Install(fate.none()), false, place, None, code.describe(declaration_law_missing), 1048576u64, tasks)
     if let Error(Migrate(Undeclared(take name))) = take failed_install {
         if name != "data" {
             return Error("install reported the wrong undeclared table")
@@ -67,7 +67,7 @@ fn test_declaration_open(parent: Dir, clock: Clock, random: Random, tasks: Tasks
     }
     let migration: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]] = Some(code.describe(declaration_law_drop))
     let target = code.describe(declaration_law_missing)
-    let upgraded = head_prepare(mut db, Install(fate.none()), false, placing_at(place, 1048576u64), migration, target, 1048576u64, tasks)
+    let upgraded = head_prepare(mut db, Install(fate.none()), false, place, migration, target, 1048576u64, tasks)
     if let Error(take problem) = take upgraded {
         return Error(start_text(Open(take problem)))
     }
@@ -75,7 +75,7 @@ fn test_declaration_open(parent: Dir, clock: Clock, random: Random, tasks: Tasks
     if next != version + 1u64 {
         return Error("drop and activation did not publish in one commit")
     }
-    let reopened = head_prepare(mut db, Current(next), false, placing_at(place, 1048576u64), migration, target, 1048576u64, tasks)
+    let reopened = head_prepare(mut db, Current(next), false, place, migration, target, 1048576u64, tasks)
     if let Error(take problem) = take reopened {
         return Error(start_text(Open(take problem)))
     }

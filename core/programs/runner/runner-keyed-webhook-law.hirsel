@@ -366,7 +366,7 @@ fn keyed_http_webhook_history(d: Dir, random: Random, tasks: Tasks, net: Net) ->
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
     let place = code.describe(webhook_law_place)
     let placing = placing_at(place, HTTP_LAW_PLACE_BYTES)
-    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing.place, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16)
     let mail = result.unwrap(mailbox(16))
     let history = task.spawn(tasks, bytes 16777216, WebhookLawHistory(head: take head, publisher: post(mail), wall: take wall, random, tasks, net), webhook_law_history)

@@ -203,12 +203,15 @@ pub fn placing_of[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[
     placing_at(p.place, launch_n_place(p))
 }
 
+fn registered_placing[G: send, H: shareable + inert + send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, r: Registry[G, H]) -> Placing[G, H] {
+    Placing(place: place, n_place: n_place, made: Ok((arc.share(r.t), fold_rooms(r))))
+}
+
 fn placing_at[G: send, H: shareable + inert + send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64) -> Placing[G, H] {
-    let made: Result[(Arc[Template[G]], RoomPlan), RegisterError] = match placed(place, n_place) {
-        Ok(r) => Ok((arc.share(r.t), fold_rooms(r))),
-        Error(take e) => Error(take e),
+    match placed(place, n_place) {
+        Ok(r) => registered_placing(place, n_place, r),
+        Error(take e) => Placing(place: place, n_place: n_place, made: Error(take e)),
     }
-    Placing(place: place, n_place: n_place, made: take made)
 }
 
 // Whether `held` was made for p's place under the n_place p launches with, so p may run on it.

@@ -79,7 +79,7 @@ fn fate_bucket_case(c: Clock, r: Random, tasks: Tasks, after: u64, applied: bool
     let n_place = 1048576u64
     let s = fate_bucket_sim(tasks, c, std.sim.s3.Cut(after, apply: applied, spare: Addr(ip: V4(2130706434u32), port: 8080u16)))
     let mut db = result.unwrap(fate_bucket_open(s, tasks, r, "spare.test", true))
-    let (take reg1, take h, _, _) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(code.describe(fate_law_r1), n_place), None, code.describe(trigger_law_schema), n_place, tasks))
+    let (take reg1, take h, _, _) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, code.describe(fate_law_r1), None, code.describe(trigger_law_schema), n_place, tasks))
     let t: triggers.Tables = clone(h.triggers)
     let r1 = result.unwrap(trigger_stamp(reg1.t.exported, reg1.t.bindings, n_place))
     let r2 = {
@@ -95,7 +95,7 @@ fn fate_bucket_case(c: Clock, r: Random, tasks: Tasks, after: u64, applied: bool
     let mut beyond = false
     if let Ok(take opened) = fate_bucket_open(s, tasks, r, "s3.test", false) {
         let mut installing = take opened
-        let installed = head_prepare(mut installing, Install(fate_crash_flags()), false, placing_at(code.describe(fate_law_r2), n_place), None, code.describe(trigger_law_schema), n_place, tasks)
+        let installed = head_prepare(mut installing, Install(fate_crash_flags()), false, code.describe(fate_law_r2), None, code.describe(trigger_law_schema), n_place, tasks)
         store.allow_unverified_teardown(mut installing)
         if let Ok(_) = installed {
             beyond = match store.close(take installing) {

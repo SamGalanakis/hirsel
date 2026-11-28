@@ -1455,8 +1455,7 @@ pub fn place_head[G: send, H: shareable + inert + send](take db: store.Db, place
 pub fn place_head_selected[G: send, H: shareable + inert + send](take db: store.Db, selection: Selection, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], take inbox: Receiver[HeadInput], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
     let mut owned = take db
     let persistent = store.is_disk(owned)
-    let made = placing_at(place, n_place)
-    let prepared = head_prepare(mut owned, selection, persistent, made, on_migrate, schema, n_place, tasks)
+    let prepared = head_prepare(mut owned, selection, persistent, place, on_migrate, schema, n_place, tasks)
     let (r, h, _, replay_identity) = match take prepared {
         Ok(take ready) => take ready,
         Error(take problem) => {
@@ -1464,6 +1463,7 @@ pub fn place_head_selected[G: send, H: shareable + inert + send](take db: store.
             return Error(take problem)
         },
     }
+    let made = registered_placing(place, n_place, r)
     let _ = run_head(take owned, take r, take replay_identity, take h, made, n_place, take inbox, take mail, tasks, n_publisher, None, None)?
     Ok(())
 }

@@ -198,3 +198,23 @@ fn one_realization_budget_named_slot_schema() -> Result[(), u64] {
     }
     Ok(())
 }
+
+fn head_slot_after_compute(mut reg: Registry[(), Qh]) -> Result[(), RegisterError] {
+    compute(mut reg, code.describe(placing_law_double), 4096u64, DEFAULT_STEPS)?
+    budget_named_slot(mut reg)
+}
+
+@test
+fn head_uses_registered_query_slot(clock: Clock, random: Random, tasks: Tasks) -> Result[(), u64] waits {
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let definition = code.describe(head_slot_after_compute)
+    let n = 1048576u64
+    let (take r, _, _, _) = head_prepare(mut db, Reopen, false, definition, None, code.describe(subs_data), n, tasks) ?=> |_| 1u64
+    let Some(Query(_, _, entry)) = registered_adapter(r, r.t.rows[1u64].key) else {
+        return Error(2u64)
+    }
+    if entry.slots.declared[0u64].description.name != r.t.exported[1u64].slots[0u64].name {
+        return Error(3u64)
+    }
+    Ok(())
+}

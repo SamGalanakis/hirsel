@@ -820,7 +820,7 @@ fn delivery_carry_cycle(dir: Dir, time: Clock, random: Random, tasks: Tasks, net
     options.stream_retention_ms = retention_ms
     let mut db = result.unwrap(store.open(tasks, dir, time, random, options))
     let definition: HttpOpPlace = code.describe(http_op_original)
-    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
     let mail = result.unwrap(mailbox(16u64))
     let seed = DeliveryCarryDrive(head: take head, publisher: post(mail), clock: time, random, tasks, net, stage, birth)
@@ -974,7 +974,7 @@ fn http_invisible_retry_keeps_one_effect(d: Dir, random: Random, tasks: Tasks, n
     options.streams_per_caller_max = 1u64
     let mut db = result.unwrap(store.open(tasks, dir, time, random, options))
     let definition: HttpOpPlace = code.describe(http_op_original)
-    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
     let mail = result.unwrap(mailbox(16u64))
     let seed = KeyedHorizonDrive(head: take head, publisher: post(mail), clock: time, hand: take wall, random, tasks, net)

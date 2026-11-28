@@ -244,7 +244,7 @@ fn keyed_http_law_cycle(dir: Dir, clock: Clock, random: Random, tasks: Tasks, ne
     let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
     options.create = stage == 0u8 || stage == 3u8
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
-    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let retired = if stage == 1u8 || stage == 2u8 || stage == KEYED_HTTP_REBUILT_RETIRED {
         Some(result.unwrap(http_retirements(db, reg)))
     } else {
@@ -272,7 +272,7 @@ fn keyed_http_dropped_open(dir: Dir, clock: Clock, random: Random, tasks: Tasks)
     options.create = false
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
     let definition: HttpOpPlace = code.describe(http_op_gone)
-    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
     let mail = result.unwrap(mailbox(16u64))
     match run_head(take db, take reg, take identity, take handles, placing_at(definition, HTTP_LAW_PLACE_BYTES), HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None) {
@@ -403,7 +403,7 @@ fn keyed_http_horizon_at_deciding_admission(d: Dir, random: Random, tasks: Tasks
     let options = result.unwrap(store.sized(Directory, 2147483648u64))
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
     let definition: HttpOpPlace = code.describe(keyed_http_place)
-    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
     let mail = result.unwrap(mailbox(16u64))
     let seed = KeyedHorizonDrive(head: take head, publisher: post(mail), clock, hand: take wall, random, tasks, net)
@@ -484,7 +484,7 @@ fn keyed_http_held_reply_across_expiry(d: Dir, random: Random, tasks: Tasks, net
     let options = result.unwrap(store.sized(Directory, 2147483648u64))
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
     let definition: HttpOpPlace = code.describe(keyed_http_place)
-    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
     let mail = result.unwrap(mailbox(16u64))
     let seed = KeyedHorizonDrive(head: take head, publisher: post(mail), clock, hand: take wall, random, tasks, net)
@@ -611,7 +611,7 @@ fn keyed_http_join_on_cold_read(d: Dir, random: Random, tasks: Tasks, net: Net) 
     sizes.resident_limit = Some(182375272u64)
     let mut options = result.unwrap(store.sized_with(Directory, 2147483648u64, sizes))
     let mut seeding = result.unwrap(store.open(tasks, dir, clock, random, options))
-    let (_, take seeded, _, _) = result.unwrap(head_prepare(mut seeding, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (_, take seeded, _, _) = result.unwrap(head_prepare(mut seeding, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let put = store.run(mut seeding, None, store.copy_env(seeded.counter), fn(mut tx: store.Tx, counter: store.Table[u64, u64]) -> Result[(), store.Error] {
         store.put(mut tx, counter, 0u64, 41u64)
     })
@@ -624,7 +624,7 @@ fn keyed_http_join_on_cold_read(d: Dir, random: Random, tasks: Tasks, net: Net) 
     result.unwrap(store.close(take seeding))
     options.create = false
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
-    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Reopen, false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Reopen, false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
     let mail = result.unwrap(mailbox(16u64))
     let seed = KeyedHorizonDrive(head: take head, publisher: post(mail), clock, hand: take wall, random, tasks, net)
@@ -718,7 +718,7 @@ fn keyed_http_refuse_changed_claim(dir: Dir, clock: Clock, random: Random, tasks
     options.create = false
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
     let placing = placing_at(definition, HTTP_LAW_PLACE_BYTES)
-    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing.place, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
     let _ = take head
     let mail = result.unwrap(mailbox(16u64))

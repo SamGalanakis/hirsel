@@ -15,7 +15,7 @@ macro_rules! rows {
             hirsel_core_alloc_byte_tail Metered,
             hirsel_core_alloc_file_buffer Metered,
             hirsel_core_alloc_file_partner Metered,
-            hirsel_core_arc_decrement_for_replay Launch,
+            hirsel_core_arc_decrement_for_replay Metered,
             hirsel_core_arc_initialized Metered,
             hirsel_core_arc_released Metered,
             hirsel_core_arc_shared Metered,

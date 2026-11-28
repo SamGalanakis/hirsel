@@ -258,7 +258,9 @@ fn the_row_table_is_strictly_sorted_for_lookup() {
 fn abi_revision_is_bumped_and_sites_section_is_validated() {
     use hirsel_core_layout::source_positions;
 
-    assert_eq!(crate::ABI, 5);
+    assert_eq!(crate::ABI, 6);
+    let release = crate::row("hirsel_core_arc_decrement_for_replay").unwrap();
+    assert_eq!(ROWS[release as usize].1, crate::Class::Metered);
     let owner_row = crate::row("hirsel_core_cause_owner").expect("cause owner row");
     assert_eq!(ROWS[owner_row as usize].1, crate::Class::Pure);
     for code_sym in [

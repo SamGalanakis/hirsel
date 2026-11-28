@@ -90,7 +90,7 @@ pub fn probe_overlap(c: Code[fn(Big, Big) -> Big]) -> Big {
 
 pub fn call_via_bind() -> Big {
     let c = code.bind(overlap_sum)
-    let b = Big(a: 11, b: 22, c: 33, d: 44)
+    let b = arc.new(Big(a: 11, b: 22, c: 33, d: 44))
     c(b, b)
 }
 "#;

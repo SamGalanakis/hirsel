@@ -146,6 +146,10 @@ The row table is closed. Each row has an identifier, a symbol, and one **class**
 | `exec` | process creation |
 | `launch` | launch, tape and test rows a standalone executable uses |
 
+In ABI revision 6, `hirsel_core_arc_decrement_for_replay` is a `metered` row.
+Compiled Arc cleanup transfers one live holder to the row, which decrements the
+count in replay order and returns whether the caller owns the final release.
+
 ### Fixups
 
 A fixup record is 16 bytes: `site: u32`, `kind: u8`, `bias: u8`, zero `u16`,
@@ -648,6 +652,9 @@ A row of these two classes also reaches the stops that belong to its caller's ow
 a checkpoint inside a row may run the scheduler, which serves the execution's other tasks
 and its units' connections. Those stops need a task, a unit or a socket, which only a row
 of class `task` or `provider` creates.
+
+Arc release during replay waits for the caller’s turn to commit the release event.
+It uses the replay state of the current execution and needs no launch capability.
 
 A row of any class that can reach a new stop is listed here with its reason, or is changed
 to return a failure. `crates/hirsel-core-rt/audit-stops.py` prints, for each row, the

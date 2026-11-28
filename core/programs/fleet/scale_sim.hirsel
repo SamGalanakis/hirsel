@@ -7,7 +7,7 @@
 //      takeover quarantine wait W, and out-of-bound drift refusal.
 //   3. Controller kill mid-move (`Crash` -> `ControllerTakeover` + scoped takeover barrier + Sieve check).
 //   4. Zone isolation (correlated-disruption circuit breaker `DisruptionFreeze` + Directory[K] independence).
-// Verifies all kernel + Directory[K] invariants and SM1 NDJSON/ITF traces at seed end.
+// Checks Place invariants at each transition and validates Directory[K] and SM1 output at seed end.
 const NS_PER_MS: u64 = 1000000
 
 const NUM_ZONES: u64 = 5
@@ -53,6 +53,7 @@ pub type SimReport: codec + key + send {
     dir_quarantine_refusals: u64,
     dir_drift_refusals: u64,
     dir_pause_expirations: u64,
+    place_steps: u64,
     sm1_rows: u64,
     sm1_ndjson_bytes: u64,
     sm1_itf_bytes: u64
@@ -213,21 +214,59 @@ fn record_sm1(mut capture: Option[std.sim.trace.Tape[ScaleSm1Event, move_kernel.
     count += 1u64
 }
 
-fn check_place_invariants(p: SimPlace) {
+type PlaceChecks {
+    seed: u64,
+    steps: u64
+}
+
+fn place_violation(p: SimPlace) -> Option[String] {
     if !move_kernel.valid_head_view(p.reg.head) {
-        fail("scale_sim invariant: invalid HeadView (O4)")
+        return Some("invalid HeadView (O4)")
     }
     if list.len(p.state.open_permits) > move_kernel.MAX_OPEN_PERMITS {
-        fail("scale_sim invariant: open_permits exceeded K3 cap")
+        return Some("open_permits exceeded K3 cap")
     }
     if list.len(p.state.outbox) > move_kernel.MAX_OUTBOX {
-        fail("scale_sim invariant: outbox exceeded K3 cap")
+        return Some("outbox exceeded K3 cap")
     }
-    if list.len(p.state.open_permits) == 2 {
-        if p.state.open_permits[0].expect != p.state.open_permits[1].expect {
-            fail("scale_sim invariant: Rule F1 violated across open_permits")
-        }
+    if list.len(p.state.settled_attempts) > move_kernel.MAX_HISTORY {
+        return Some("settled_attempts exceeded K3 cap")
     }
+    if list.len(p.state.open_permits) == 2 && p.state.open_permits[0].expect != p.state.open_permits[1].expect {
+        return Some("Rule F1 violated across open_permits")
+    }
+    None
+}
+
+fn check_place_step[T: codec](mut checks: PlaceChecks, p: SimPlace, input: T) {
+    checks.steps += 1
+    if let Some(reason) = place_violation(p) {
+        let format: std.json.Format[T] = result.unwrap(std.json.interop())
+        let mut msg = "scale_sim invariant: "
+        string.push(mut msg, reason)
+        string.push(mut msg, " seed=")
+        string.push_u64(mut msg, checks.seed)
+        string.push(mut msg, " step=")
+        string.push_u64(mut msg, checks.steps)
+        string.push(mut msg, " place=")
+        string.push_u64(mut msg, p.place_id)
+        string.push(mut msg, " input=")
+        string.push(mut msg, result.unwrap(std.json.to_string(format, input)))
+        fail(take msg)
+    }
+}
+
+fn step_place(mut p: SimPlace, ev: move_kernel.Event, mut checks: PlaceChecks) -> List[move_kernel.Action] {
+    let (next, actions) = move_kernel.step(p.state, ev)
+    p.state = take next
+    check_place_step(mut checks, p, ev)
+    take actions
+}
+
+fn step_cas(mut p: SimPlace, auth: move_kernel.ClaimAuth, mut checks: PlaceChecks) -> Result[move_kernel.HeadView, move_kernel.HeadPair] {
+    let applied = exec_register_cas(mut p.reg, p.place_id, auth)
+    check_place_step(mut checks, p, auth)
+    applied
 }
 
 fn pick_healthy_target(mut world: std.sim.world.World, hosts: List[SimHost], exclude_a: u64, exclude_b: u64) -> u64 {
@@ -347,6 +386,7 @@ pub fn run_scale_sim(cfg: SimConfig, tasks: Tasks) -> Result[SimReport, ()] wait
     // Wire queue for Fault 1 (std.sim.message holds) and SM1 trace capture.
     let mut msg_q: std.sim.message.Queue[SimWire] = std.sim.message.new()
     let mut capture: Option[std.sim.trace.Tape[ScaleSm1Event, move_kernel.Action, ScaleSm1State]] = Some(result.unwrap(std.sim.trace.start(cfg.seed)))
+    let mut checks = PlaceChecks(seed: cfg.seed, steps: 0)
     let mut sm1_count: u64 = 0u64
     let no_acts: List[move_kernel.Action] = list.new()
     // Counters for the report.
@@ -429,8 +469,7 @@ pub fn run_scale_sim(cfg: SimConfig, tasks: Tasks) -> Result[SimReport, ()] wait
         string.push_u64(mut hold_ev, r_i)
         std.sim.message.hold_until(mut msg_q, 0u64, target_b, "move_claim", clone(hold_ev))
         std.sim.message.hold_until(mut msg_q, inc, inc, "janitor_claim", clone(hold_ev))
-        let (st1, acts1) = move_kernel.step(clone(places[p_idx].state), RequestMove(target_b, 1u64, 1u64, 1u64))
-        places[p_idx].state = take st1
+        let acts1 = step_place(mut places[p_idx], RequestMove(target_b, 1u64, 1u64, 1u64), mut checks)
         let Some(auth_b) = find_claim_action(acts1) else {
             fail("scale_sim: primary RequestMove did not emit IssueClaim")
         }
@@ -441,19 +480,18 @@ pub fn run_scale_sim(cfg: SimConfig, tasks: Tasks) -> Result[SimReport, ()] wait
         let jan_auth = move_kernel.ClaimAuth(expect: Some(places[p_idx].reg.head.pair), attempt: move_kernel.id16_from_u64(50000u64 + r_i), class: Continue)
         std.sim.message.send(mut msg_q, std.sim.message.Message(from: inc, to: inc, name: "janitor_claim", value: WireJanitorContinue(p_idx, jan_auth)))
         // Recovery contender C shares exact expect (Rule F1) and wins immediately!
-        let (st2, acts2) = move_kernel.step(clone(places[p_idx].state), RequestRecovery(target_c, 1u64, 1u64, 1u64))
-        places[p_idx].state = take st2
+        let acts2 = step_place(mut places[p_idx], RequestRecovery(target_c, 1u64, 1u64, 1u64), mut checks)
         let Some(auth_c) = find_claim_action(acts2) else {
             fail("scale_sim: RequestRecovery did not emit IssueClaim")
         }
         map.insert(mut places[p_idx].reg.authorized_permits, auth_c.attempt.lo, option.unwrap(auth_c.expect))
         record_sm1(mut capture, EvRecoveryAuth(places[p_idx].place_id, target_c), acts2, places[p_idx], mut sm1_count)
-        let head_c = result.unwrap(exec_register_cas(mut places[p_idx].reg, places[p_idx].place_id, auth_c))
+        let head_c = result.unwrap(step_cas(mut places[p_idx], auth_c, mut checks))
         record_sm1(mut capture, EvCasWon(places[p_idx].place_id, head_c.pair.epoch), no_acts, places[p_idx], mut sm1_count)
         // Simulate lost H reply -> ClaimUndecided -> read-only HeadRead settles C Won and B Dead!
-        let (st3, _) = move_kernel.step(clone(places[p_idx].state), ClaimOutcome(auth_c.attempt, ClaimUndecided))
-        let (st4, acts4) = move_kernel.step(take st3, HeadRead(places[p_idx].reg.head))
-        places[p_idx].state = take st4
+        let _ = step_place(mut places[p_idx], ClaimOutcome(auth_c.attempt, ClaimUndecided), mut checks)
+        let head = places[p_idx].reg.head
+        let acts4 = step_place(mut places[p_idx], HeadRead(head), mut checks)
         if places[p_idx].state.incumbent_node != target_c || list.len(places[p_idx].state.open_permits) != 0 {
             fail("scale_sim: lost-H read-only settlement failed")
         }
@@ -468,7 +506,7 @@ pub fn run_scale_sim(cfg: SimConfig, tasks: Tasks) -> Result[SimReport, ()] wait
         let WireMoveClaim(bp, b_cmd) = msg_b.value else {
             fail("scale_sim: unexpected wire message for B")
         }
-        if let Error(_) = exec_register_cas(mut places[bp].reg, places[bp].place_id, b_cmd) {
+        if let Error(_) = step_cas(mut places[bp], b_cmd, mut checks) {
             stale_races_blocked += 1u64
             record_sm1(mut capture, EvCasSuperseded(places[bp].place_id, b_cmd.attempt.lo), no_acts, places[bp], mut sm1_count)
         } else {
@@ -480,7 +518,7 @@ pub fn run_scale_sim(cfg: SimConfig, tasks: Tasks) -> Result[SimReport, ()] wait
         let WireJanitorContinue(jp, j_cmd) = msg_j.value else {
             fail("scale_sim: unexpected wire message for janitor")
         }
-        if let Error(_) = exec_register_cas(mut places[jp].reg, places[jp].place_id, j_cmd) {
+        if let Error(_) = step_cas(mut places[jp], j_cmd, mut checks) {
             stale_races_blocked += 1u64
         } else {
             fail("scale_sim VIOLATION: held janitor Continue stole moved Place")
@@ -494,25 +532,24 @@ pub fn run_scale_sim(cfg: SimConfig, tasks: Tasks) -> Result[SimReport, ()] wait
         }
         let inc = places[idx].state.incumbent_node
         let tgt = pick_healthy_target(mut world, hosts, inc, inc)
-        let (st1, acts1) = move_kernel.step(clone(places[idx].state), RequestMove(tgt, 1u64, 2u64, 1u64))
-        places[idx].state = take st1
+        let acts1 = step_place(mut places[idx], RequestMove(tgt, 1u64, 2u64, 1u64), mut checks)
         if let Some(auth) = find_claim_action(acts1) {
             map.insert(mut places[idx].reg.authorized_permits, auth.attempt.lo, option.unwrap(auth.expect))
             places[idx].in_flight_attempt = Some(auth)
             // Execute half of the in-flight CAS ops BEFORE controller kill so recovery sees both Open and Won permits!
             if idx % 2 == 0 {
-                let _ = result.unwrap(exec_register_cas(mut places[idx].reg, places[idx].place_id, auth))
+                let _ = result.unwrap(step_cas(mut places[idx], auth, mut checks))
             }
         }
     }
     // Kill controller 1 mid-move across ALL Places!
     controller_kills += 1u64
     for idx in 0u64 .. cfg.places {
-        let (st_c, _) = move_kernel.step(clone(places[idx].state), Crash)
-        let (st_r, _) = move_kernel.step(take st_c, Restart)
-        let inc = st_r.incumbent_node
-        let (st_t, acts_t) = move_kernel.step(take st_r, ControllerTakeover(2u64, inc, places[idx].reg.head))
-        places[idx].state = take st_t
+        let _ = step_place(mut places[idx], Crash, mut checks)
+        let _ = step_place(mut places[idx], Restart, mut checks)
+        let inc = places[idx].state.incumbent_node
+        let head = places[idx].reg.head
+        let acts_t = step_place(mut places[idx], ControllerTakeover(2u64, inc, head), mut checks)
         if idx < 4u64 {
             record_sm1(mut capture, EvControllerKill(places[idx].place_id), acts_t, places[idx], mut sm1_count)
         }
@@ -521,15 +558,15 @@ pub fn run_scale_sim(cfg: SimConfig, tasks: Tasks) -> Result[SimReport, ()] wait
     for idx in 0u64 .. cfg.places {
         if idx % 2 == 0 {
             let inc = places[idx].state.incumbent_node
-            let (st_ok, _) = move_kernel.step(clone(places[idx].state), IncumbentProbeOk(inc, 1u64, places[idx].reg.head, 2u64))
-            places[idx].state = take st_ok
+            let head = places[idx].reg.head
+            let _ = step_place(mut places[idx], IncumbentProbeOk(inc, 1u64, head, 2u64), mut checks)
         } else {
             // Sieve check: stale epoch 1 controller cannot clear barrier, and move MUST be blocked while BarrierPending!
             let inc = places[idx].state.incumbent_node
-            let (st_s, _) = move_kernel.step(clone(places[idx].state), IncumbentProbeOk(inc, 1u64, places[idx].reg.head, 1u64))
+            let head = places[idx].reg.head
+            let _ = step_place(mut places[idx], IncumbentProbeOk(inc, 1u64, head, 1u64), mut checks)
             let tgt = pick_healthy_target(mut world, hosts, inc, inc)
-            let (st_try, try_acts) = move_kernel.step(take st_s, RequestMove(tgt, 1u64, 3u64, 1u64))
-            places[idx].state = take st_try
+            let try_acts = step_place(mut places[idx], RequestMove(tgt, 1u64, 3u64, 1u64), mut checks)
             if !has_move_refused(try_acts) {
                 fail("scale_sim VIOLATION: move not refused while scoped takeover barrier pending")
             }
@@ -539,15 +576,14 @@ pub fn run_scale_sim(cfg: SimConfig, tasks: Tasks) -> Result[SimReport, ()] wait
     // Expire barrier window on unprobed Places and settle any remaining in-flight mid-move attempts!
     for idx in 0u64 .. cfg.places {
         if let BarrierPending(_, _) = places[idx].state.barrier {
-            let (st_b, _) = move_kernel.step(clone(places[idx].state), Timeout(BarrierWindow(2u64)))
-            places[idx].state = take st_b
+            let _ = step_place(mut places[idx], Timeout(BarrierWindow(2u64)), mut checks)
         }
         if let Some(auth) = places[idx].in_flight_attempt {
-            let _ = exec_register_cas(mut places[idx].reg, places[idx].place_id, auth)
+            let _ = step_cas(mut places[idx], auth, mut checks)
             places[idx].in_flight_attempt = None
         }
-        let (st_fin, _) = move_kernel.step(clone(places[idx].state), HeadRead(places[idx].reg.head))
-        places[idx].state = take st_fin
+        let head = places[idx].reg.head
+        let _ = step_place(mut places[idx], HeadRead(head), mut checks)
         if list.len(places[idx].state.open_permits) != 0 {
             fail("scale_sim: mid-move permit failed to settle after controller takeover")
         }
@@ -564,8 +600,7 @@ pub fn run_scale_sim(cfg: SimConfig, tasks: Tasks) -> Result[SimReport, ()] wait
     }
     // Trip correlated-disruption circuit breaker across ALL Places!
     for idx in 0u64 .. cfg.places {
-        let (st_f, acts_f) = move_kernel.step(clone(places[idx].state), DisruptionFreeze(true))
-        places[idx].state = take st_f
+        let acts_f = step_place(mut places[idx], DisruptionFreeze(true), mut checks)
         if idx == 0 {
             record_sm1(mut capture, EvZoneFreeze(true), acts_f, places[idx], mut sm1_count)
         }
@@ -573,8 +608,7 @@ pub fn run_scale_sim(cfg: SimConfig, tasks: Tasks) -> Result[SimReport, ()] wait
         if idx < 32u64 {
             let inc = places[idx].state.incumbent_node
             let tgt = pick_healthy_target(mut world, hosts, inc, inc)
-            let (st_m, m_acts) = move_kernel.step(clone(places[idx].state), RequestMove(tgt, 1u64, 4u64, 1u64))
-            places[idx].state = take st_m
+            let m_acts = step_place(mut places[idx], RequestMove(tgt, 1u64, 4u64, 1u64), mut checks)
             if !has_move_refused(m_acts) || find_claim_action(m_acts) != None {
                 fail("scale_sim VIOLATION: discretionary move authorized during zone-isolation freeze")
             }
@@ -610,8 +644,7 @@ pub fn run_scale_sim(cfg: SimConfig, tasks: Tasks) -> Result[SimReport, ()] wait
         hosts[i].isolated = false
     }
     for idx in 0u64 .. cfg.places {
-        let (st_u, acts_u) = move_kernel.step(clone(places[idx].state), DisruptionFreeze(false))
-        places[idx].state = take st_u
+        let acts_u = step_place(mut places[idx], DisruptionFreeze(false), mut checks)
         if idx == 0 {
             record_sm1(mut capture, EvZoneFreeze(false), acts_u, places[idx], mut sm1_count)
         }
@@ -730,16 +763,15 @@ pub fn run_scale_sim(cfg: SimConfig, tasks: Tasks) -> Result[SimReport, ()] wait
             let inc = places[p_idx].state.incumbent_node
             let tgt = pick_healthy_target(mut world, hosts, inc, inc)
             let gen = places[p_idx].state.desired_generation + 1u64
-            let (st_d, _) = move_kernel.step(clone(places[p_idx].state), DesiredEdit(tgt, gen))
-            let (st_m, acts_m) = move_kernel.step(take st_d, RequestMove(tgt, 1u64, gen, (p_idx % NUM_ZONES) + 1u64))
-            places[p_idx].state = take st_m
+            let _ = step_place(mut places[p_idx], DesiredEdit(tgt, gen), mut checks)
+            let domain = (p_idx % NUM_ZONES) + 1u64
+            let acts_m = step_place(mut places[p_idx], RequestMove(tgt, 1u64, gen, domain), mut checks)
             let Some(auth) = find_claim_action(acts_m) else {
                 fail("scale_sim: steady-state move refused unexpectedly")
             }
             map.insert(mut places[p_idx].reg.authorized_permits, auth.attempt.lo, option.unwrap(auth.expect))
-            let h_new = result.unwrap(exec_register_cas(mut places[p_idx].reg, places[p_idx].place_id, auth))
-            let (st_s, acts_s) = move_kernel.step(clone(places[p_idx].state), HeadRead(h_new))
-            places[p_idx].state = take st_s
+            let h_new = result.unwrap(step_cas(mut places[p_idx], auth, mut checks))
+            let acts_s = step_place(mut places[p_idx], HeadRead(h_new), mut checks)
             if places[p_idx].state.incumbent_node != tgt || list.len(places[p_idx].state.open_permits) != 0 {
                 fail("scale_sim: steady-state move failed to converge")
             }
@@ -771,7 +803,6 @@ pub fn run_scale_sim(cfg: SimConfig, tasks: Tasks) -> Result[SimReport, ()] wait
     }
     // ---- PHASE F: End-of-seed kernel invariants + Directory[K] invariants + SM1 trace verification ----
     for idx in 0u64 .. cfg.places {
-        check_place_invariants(places[idx])
         if list.len(places[idx].state.open_permits) != 0 {
             fail("scale_sim end invariant: unsettled open permit")
         }
@@ -844,6 +875,7 @@ pub fn run_scale_sim(cfg: SimConfig, tasks: Tasks) -> Result[SimReport, ()] wait
         dir_quarantine_refusals: dir_quarantine_refusals,
         dir_drift_refusals: dir_drift_refusals,
         dir_pause_expirations: dir_pause_expirations,
+        place_steps: checks.steps,
         sm1_rows: lines,
         sm1_ndjson_bytes: list.len(string.as_bytes(ndjson)),
         sm1_itf_bytes: list.len(string.as_bytes(itf)),

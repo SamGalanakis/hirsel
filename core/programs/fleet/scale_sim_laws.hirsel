@@ -1,7 +1,7 @@
 // Scale fleet simulation laws at 50 and 1,000 simulated hosts (docs/spec/fleet.md FLT-8).
 // Exercises fleet@1 move_kernel, K10 advisory lattice, and partitioned Directory[u64] Places
 // under message hold, clock pause, controller kill mid-move, and zone isolation, checking
-// kernel invariants, Directory[K] invariants, and SM1 NDJSON/ITF traces at seed end.
+// kernel invariants at each Place transition and Directory[K] and SM1 traces at seed end.
 /// bug: Violate move_kernel safety, Directory[K] lease exclusivity/quarantine/drift bounds, or SM1 trace integrity at 50 simulated hosts under combined faults.
 /// oracle: docs/spec/fleet.md FLT-2..FLT-8 end-of-seed invariants and SM1 NDJSON/ITF traces at 50 hosts.
 @test
@@ -22,6 +22,9 @@ fn sim_fleet_scale_1000_hosts(tasks: Tasks) -> Result[(), ()] waits {
     let rep = result.unwrap(scale_sim.run_scale_sim(cfg, tasks))
     if rep.hosts != 1000 || rep.moves_completed == 0 || rep.stale_races_blocked == 0 || rep.controller_kills == 0 || rep.freeze_blocks == 0 || rep.dir_quarantine_refusals == 0 || rep.dir_drift_refusals == 0 || rep.sm1_rows == 0 {
         fail("1,000-host fleet sim did not exercise all fault classes and SM1 trace checks")
+    }
+    if rep.place_steps < 3 * rep.places || rep.sm1_rows > 256 {
+        fail("Place checks did not cover the crash, restart, and takeover chain independently of the SM1 cap")
     }
     Ok(())
 }
@@ -61,6 +64,58 @@ fn sim_fleet_credit_desk_gate() -> Result[(), ()] {
     }
     if recovery.double_redemptions != 0 || recovery.replay_attempts != 6 {
         fail("the desk did not reject all held and duplicate credits")
+    }
+    Ok(())
+}
+
+/// bug: A lost create strands a funded offer, or the next offer arrives before retirement of an occupied slot.
+/// oracle: COMP-3 and COMP-9. A stranded offer needs detection, a hold and three links. An occupied slot first needs its matching retirement receipt.
+@test
+fn sim_fleet_post_heal_reoffer() -> Result[(), ()] {
+    for seed in 0u64 .. 16 {
+        let recovery = placement_sim.require_reoffer(placement_sim.check_post_heal(seed, false))
+        let reoffer_bound: u64 = if seed % 2 == 0 {
+            6150
+        } else {
+            1050
+        }
+        if recovery.bound_us != reoffer_bound || recovery.reoffered_us == 0 || recovery.reoffered_us > reoffer_bound || recovery.double_redemptions != 0 {
+            fail("post-heal recovery missed the bound for its starting state")
+        }
+    }
+    Ok(())
+}
+
+/// bug: The safety checks pass and the event queue drains even though the standby never gets a reoffer.
+/// oracle: COMP-9 ReOffer. The heal-time obligation must expire with a reproducible deadline input even when no future deliveries remain.
+@test
+fn sim_fleet_post_heal_reoffer_suppressed() -> Result[(), ()] {
+    let seed: u64 = 3429 * 2
+    let Error(failure) = placement_sim.check_post_heal(seed, true) else {
+        fail("suppressing the reoffer escaped the liveness checker")
+    }
+    let observed: placement_sim.RecoveryInput = clone(failure.first_failing_input)
+    let Deadline = take observed else {
+        fail(placement_sim.recovery_diagnostic(failure))
+    }
+    let pending: Option[placement_sim.ReofferObligation] = clone(failure.oldest_pending_obligation)
+    let Some(obligation) = take pending else {
+        fail(placement_sim.recovery_diagnostic(failure))
+    }
+    if failure.seed != seed || failure.reason != "reoffer deadline expired" || failure.at_us != obligation.deadline_us || obligation.deadline_us - obligation.started_us != 6150 || obligation.desk != 2 || obligation.original.serial != 1 {
+        fail(placement_sim.recovery_diagnostic(failure))
+    }
+    let diagnostic = placement_sim.recovery_diagnostic(failure)
+    region doc {
+        let json = result.unwrap(std.json.parse(doc, diagnostic))
+        let encoded_seed = option.unwrap(std.json.pointer(json, "/seed"))
+        let Some(Str(input_tag)) = std.json.pointer(json, "/event/first_failing_input/tag") else {
+            fail(take diagnostic)
+        }
+        let _ = option.unwrap(std.json.pointer(json, "/event/oldest_pending_obligation"))
+        if std.json.as_u64(encoded_seed) != Some(seed) || text.as_string(input_tag) != "Deadline" {
+            fail(take diagnostic)
+        }
     }
     Ok(())
 }

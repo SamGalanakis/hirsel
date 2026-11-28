@@ -14,7 +14,9 @@ hirsel.ai/fleet@1/laws/sim_directory_no_dual_holders_across_suspend src=bcbbc705
 hirsel.ai/fleet@1/laws/sim_directory_refuses_drift_beyond_d src=b7ff03de92ea87bc sig=0ed1588e87aa06e2 run=b8720e32dc0c26eb bug=5615f4e5c2d22a2a oracle=7a67544e27c1999a rows=pending
 hirsel.ai/fleet@1/laws/sim_directory_takeover_waits_w src=f6437ecf21a9c5dc sig=31f9caa1c5cf49e7 run=db4e4334fc7b99e2 bug=283bd9d374806333 oracle=ea5a863af05c097e rows=pending
 hirsel.ai/fleet@1/laws/sim_fleet_credit_desk_gate src=12e65d7f129176dd sig=402ece2e2d00a7d7 run=5ffc56bae06a36d7 bug=d587ae9c61e675ce oracle=54981e9e14952a21 rows=pending
-hirsel.ai/fleet@1/laws/sim_fleet_scale_1000_hosts src=c57f0d7a5146bf89 sig=0786978be7f50337 run=c8f37220d8cae014 bug=094b7f5603c11ac8 oracle=554bbdac09ba3b78 rows=pending
+hirsel.ai/fleet@1/laws/sim_fleet_post_heal_reoffer src=38b5c4efcfa05741 sig=2b39c0be386caced run=5ffc56bae06a36d7 bug=525ef248be4dfd26 oracle=109dc032d98252f3 rows=pending
+hirsel.ai/fleet@1/laws/sim_fleet_post_heal_reoffer_suppressed src=9ab90c42bbb06612 sig=3dd4aa9f4e7675f4 run=5ffc56bae06a36d7 bug=022b413dcf39abb3 oracle=f98e18f10cfca163 rows=pending
+hirsel.ai/fleet@1/laws/sim_fleet_scale_1000_hosts src=2b27b3b60a1f277b sig=0786978be7f50337 run=c8f37220d8cae014 bug=094b7f5603c11ac8 oracle=554bbdac09ba3b78 rows=pending
 hirsel.ai/fleet@1/laws/sim_fleet_scale_50_hosts src=a5b38773e597ebb6 sig=0786978be7f50337 run=b8720e32dc0c26eb bug=00026f91da7ce7d2 oracle=08f576a2f697148b rows=pending
 hirsel.ai/fleet@1/laws/sim_lost_head_write_before_claim_settles_readonly src=b643483547720542 sig=f2c0ba4838a183b1 run=b8720e32dc0c26eb bug=106b3735f4b720b2 oracle=cadfa3430e4244cb rows=pending
 hirsel.ai/fleet@1/laws/sim_sieve_stale_controller_and_scoped_barrier src=a80f4f1e9776db6a sig=442898b4c51cd0d7 run=b8720e32dc0c26eb bug=8d6d415facd53ec1 oracle=c4d3051b3b030e54 rows=pending

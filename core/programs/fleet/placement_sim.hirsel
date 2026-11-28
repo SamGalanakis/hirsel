@@ -16,40 +16,61 @@ const SESSION: compute.worker.Session = compute.worker.Session(caller: 1, princi
 type World {
     workers: Map[u64, compute.worker.State[u64, u64]],
     desks: Map[u64, compute.desk.State[u64, u64]],
-    occupied: u64
+    occupied: u64,
+    audit: Option[RecoveryAudit]
 }
 
 fn worker_event(mut world: World, host: u64, take event: compute.worker.Event[u64, u64]) -> List[compute.worker.Action[u64, u64]] {
+    let input: Option[RecoveryInput] = if let Some(_) = world.audit {
+        Some(WorkerInput(host, clone(event)))
+    } else {
+        None
+    }
     let worker = option.unwrap(map.remove(mut world.workers, host))
     world.occupied -= compute.worker.occupied(worker)
     let (next, actions) = compute.worker.step(take worker, take event)
     world.occupied += compute.worker.occupied(next)
+    if let Some(mut audit) = world.audit {
+        audit_worker(mut audit, option.unwrap(take input), next, actions)
+    }
     map.insert(mut world.workers, host, take next)
     take actions
 }
 
 fn desk_event(mut world: World, desk: u64, take event: compute.desk.Event[u64, u64]) -> List[compute.desk.Action[u64, u64]] {
+    let input: Option[RecoveryInput] = if let Some(_) = world.audit {
+        Some(DeskInput(desk, clone(event)))
+    } else {
+        None
+    }
     let state = option.unwrap(map.remove(mut world.desks, desk))
     let (next, actions) = compute.desk.step(take state, take event)
+    if let Some(mut audit) = world.audit {
+        audit_desk(mut audit, option.unwrap(take input), actions)
+    }
     map.insert(mut world.desks, desk, take next)
     take actions
 }
 
 fn deliver(mut world: World, actions: List[compute.worker.Action[u64, u64]]) {
     for action in actions {
-        match action {
-            AssumeOwner(owner, host, worker_run, _, epoch) => {
-                let _ = desk_event(mut world, owner.member, Attach(host, worker_run, worker_run))
-                let _ = desk_event(mut world, owner.member, Assume(host, worker_run, worker_run, epoch))
-            },
-            Offer(desk, offer) => {
-                let _ = desk_event(mut world, desk, Offer(clone(offer), offer.credit.run))
-            },
-            DropOffer(desk, credit) => {
-                let _ = desk_event(mut world, desk, Withdraw(credit, credit.run))
-            },
-            _ => (),
-        }
+        deliver_action(mut world, action)
+    }
+}
+
+fn deliver_action(mut world: World, action: compute.worker.Action[u64, u64]) {
+    match action {
+        AssumeOwner(owner, host, worker_run, _, epoch) => {
+            let _ = desk_event(mut world, owner.member, Attach(host, worker_run, worker_run))
+            let _ = desk_event(mut world, owner.member, Assume(host, worker_run, worker_run, epoch))
+        },
+        Offer(desk, offer) => {
+            let _ = desk_event(mut world, desk, Offer(clone(offer), offer.credit.run))
+        },
+        DropOffer(desk, credit) => {
+            let _ = desk_event(mut world, desk, Withdraw(credit, credit.run))
+        },
+        _ => (),
     }
 }
 
@@ -63,8 +84,8 @@ fn all_resources(n: u64) -> compute.resources.Vector {
     compute.resources.Vector(memory_bytes: n, address_space: n, warm_stock: n, mappings: n, fds: n, connections: n, starts: n, stacks: n, cpu: n, disk_iops: n)
 }
 
-fn new_world(workers: u64, per_worker: u64, dispatchers: u64, standby: bool) -> World {
-    let mut world = World(workers: map.new(), desks: map.new(), occupied: 0)
+fn new_world(workers: u64, per_worker: u64, dispatchers: u64, standby: bool, take audit: Option[RecoveryAudit]) -> World {
+    let mut world = World(workers: map.new(), desks: map.new(), occupied: 0, audit: take audit)
     let n: u64 = if standby {
         2
     } else {
@@ -246,7 +267,7 @@ fn started(mut q: Queue[Event], mut r: Trial, mut latency: List[u64], cfg: Confi
 }
 
 fn trial(cfg: Config, seed: u64) -> Trial {
-    let mut world = new_world(cfg.workers, cfg.per_worker, cfg.dispatchers, false)
+    let mut world = new_world(cfg.workers, cfg.per_worker, cfg.dispatchers, false, None)
     let capacity = cfg.workers * cfg.per_worker
     let mut q: Queue[Event] = Queue(times: heap.new(), events: map.new(), sequence: 0)
     if let Burst = cfg.workload {
@@ -369,6 +390,150 @@ pub type Recovery: codec + key + send {
     double_redemptions: u64
 }
 
+pub type ReofferObligation: codec {
+    original: compute.protocol.Credit[u64, u64],
+    desk: u64,
+    demand: compute.desk.Ask,
+    started_us: u64,
+    deadline_us: u64
+}
+
+pub type RecoveryInput: codec = WorkerInput(u64, compute.worker.Event[u64, u64]) | DeskInput(u64, compute.desk.Event[u64, u64]) | Deadline
+
+pub type RecoveryFailure: codec {
+    seed: u64,
+    step: u64,
+    at_us: u64,
+    reason: String,
+    first_failing_input: RecoveryInput,
+    oldest_pending_obligation: Option[ReofferObligation]
+}
+
+type RecoveryAudit {
+    seed: u64,
+    step: u64,
+    now: u64,
+    pending: Option[ReofferObligation],
+    run: u64,
+    serial: u64,
+    live: Option[compute.protocol.Credit[u64, u64]],
+    granted: std.set.Set[compute.protocol.Credit[u64, u64]],
+    child: Option[compute.protocol.Checkout[u64, u64]],
+    started: bool
+}
+
+fn recovery_failure(audit: RecoveryAudit, take reason: String, take input: RecoveryInput) -> RecoveryFailure {
+    RecoveryFailure(seed: audit.seed, step: audit.step, at_us: audit.now, reason: take reason, first_failing_input: take input, oldest_pending_obligation: clone(audit.pending))
+}
+
+pub fn recovery_diagnostic(failure: RecoveryFailure) -> String {
+    let mut capture: Option[std.sim.trace.Tape[RecoveryFailure, (), ()]] = Some(result.unwrap(std.sim.trace.start(failure.seed)))
+    result.unwrap(std.sim.trace.record(mut capture, failure, list.new(), ()))
+    result.unwrap(std.sim.trace.ndjson(option.unwrap(take capture)))
+}
+
+fn safety_failure(audit: RecoveryAudit, take reason: String, input: RecoveryInput) {
+    fail(recovery_diagnostic(recovery_failure(audit, take reason, clone(input))))
+}
+
+// Independent ledger for this one cold, pure slot. Observe each reducer input and
+// emitted action, so a later replay or custody reset cannot hide an earlier fault.
+fn audit_worker(mut audit: RecoveryAudit, input: RecoveryInput, next: compute.worker.State[u64, u64], actions: List[compute.worker.Action[u64, u64]]) {
+    audit.step += 1
+    let observed: RecoveryInput = clone(input)
+    let WorkerInput(_, event) = take observed else {
+        fail("expected worker input")
+    }
+    match event {
+        Restart(prior, successor) => {
+            if prior == audit.run && successor != prior {
+                audit.run = successor
+                audit.serial = 0
+            }
+        },
+        CustodyEmpty(_, _) => {
+            // The fixture delivers this once, after the matching launcher fence.
+            audit.child = None
+            audit.started = false
+        },
+        Retire(checkout) => {
+            if checkout.credit.run == audit.run && audit.child == Some(checkout) {
+                audit.child = None
+                audit.started = false
+            }
+        },
+        _ => (),
+    }
+    let before = audit.live
+    for action in actions {
+        match action {
+            DropOffer(_, credit) => {
+                if audit.live != Some(credit) {
+                    safety_failure(audit, "withdrawal did not name the live credit", input)
+                }
+                audit.live = None
+            },
+            Offer(_, offer) => {
+                let credit = offer.credit
+                if audit.live != None || audit.child != None || credit.host != 0 || credit.slot != 0 || credit.run != audit.run || credit.serial <= audit.serial {
+                    safety_failure(audit, "mint duplicated an ordinal or offered an unavailable slot", input)
+                }
+                audit.serial = credit.serial
+                audit.live = Some(credit)
+            },
+            Launch(checkout, _) => {
+                let credit = checkout.credit
+                if before != Some(credit) || audit.live != None || audit.child != None || !std.set.contains(audit.granted, credit) {
+                    safety_failure(audit, "launch reused a spent or withdrawn grant", input)
+                }
+                audit.child = Some(checkout)
+            },
+            Redeemed(Admitted(checkout, _)) => {
+                if audit.child != Some(checkout) || audit.started {
+                    safety_failure(audit, "create admitted more than once", input)
+                }
+                if let Started(receipt) = event {
+                    if receipt != checkout {
+                        safety_failure(audit, "create admitted without its launcher receipt", input)
+                    }
+                } else {
+                    safety_failure(audit, "create admitted without a launcher receipt", input)
+                }
+                audit.started = true
+            },
+            ActivateUser(_) => safety_failure(audit, "pure child emitted an explicit activation", input),
+            _ => (),
+        }
+    }
+    let occupied = if audit.child == None {
+        0u64
+    } else {
+        1u64
+    }
+    let mut available = if occupied != 0 || audit.live != None {
+        all_resources(0)
+    } else {
+        all_resources(1)
+    }
+    if audit.started {
+        available.starts = 1
+    }
+    if compute.worker.occupied(next) != occupied || compute.worker.available(next) != available {
+        safety_failure(audit, "slot custody or resource accounting diverged", input)
+    }
+}
+
+fn audit_desk(mut audit: RecoveryAudit, input: RecoveryInput, actions: List[compute.desk.Action[u64, u64]]) {
+    audit.step += 1
+    for action in actions {
+        if let Grant(_, credit) = action {
+            if !std.set.insert(mut audit.granted, credit) {
+                safety_failure(audit, "desk granted the same credit twice", input)
+            }
+        }
+    }
+}
+
 fn replay(mut world: World, credit: compute.protocol.Credit[u64, u64], seq: u64, mut r: Recovery) {
     r.replay_attempts += 1
     if let Admitted(_, _) = redeem(mut world, credit, attempt(seq)) {
@@ -378,49 +543,135 @@ fn replay(mut world: World, credit: compute.protocol.Credit[u64, u64], seq: u64,
 
 const HEAL_US: u64 = 10000
 
-type DeskFault = DemandAtB | DemandAtWorker | Rotate | OfferAtB(List[compute.worker.Action[u64, u64]]) | CreateAtWorker(compute.protocol.Credit[u64, u64]) | AccountBeforeMint(compute.protocol.Checkout[u64, u64])
+type RecoveryEvent = DemandAtDesk | DemandAtWorker | Rotate | RetireChild(compute.protocol.Checkout[u64, u64]) | OfferAtDesk(List[compute.worker.Action[u64, u64]]) | CreateAtWorker(compute.protocol.Credit[u64, u64]) | ReplayAtWorker | AccountBeforeMint(compute.protocol.Checkout[u64, u64])
 
-fn recover_desk() -> Recovery {
-    let mut world = new_world(1, 1, 1, true)
-    let a_grant = option.unwrap(pop(mut world, PRIMARY, 1, 0, 1))
-    let mut wire: std.sim.message.Queue[compute.protocol.Credit[u64, u64]] = std.sim.message.new()
-    std.sim.message.hold_until(mut wire, 0, 1, "create", "rotate")
-    std.sim.message.send(mut wire, std.sim.message.Message(from: 0, to: 1, name: "create", value: a_grant))
-    if let Some(_) = std.sim.message.receive(mut wire, 1) {
-        fail("the original create crossed the held link")
+fn set_recovery_time(mut world: World, now: u64) {
+    if let Some(mut audit) = world.audit {
+        audit.now = now
     }
-    let mut r = Recovery(reoffered_us: 0, bound_us: DETECT_US + 3 * LINK_US + HOLD_US, replay_attempts: 0, double_redemptions: 0)
-    let mut faults: Queue[DeskFault] = Queue(times: heap.new(), events: map.new(), sequence: 0)
-    // A retains a healthy worker stream while demand moves to B.
-    enqueue(mut faults, HEAL_US + DETECT_US + LINK_US, DemandAtB)
-    while let Some((now, seq)) = heap.pop(mut faults.times) {
-        let event = option.unwrap(map.remove(mut faults.events, seq))
+}
+
+fn missed_reoffer(mut world: World, obligation: ReofferObligation) -> RecoveryFailure {
+    set_recovery_time(mut world, obligation.deadline_us)
+    let audit: RecoveryAudit = option.unwrap(clone(world.audit))
+    let mut failure = recovery_failure(audit, "reoffer deadline expired", Deadline)
+    failure.step += 1
+    take failure
+}
+
+type OriginalCreate = LostCreate | DeliveredCreate(u64)
+
+type FaultPrefix {
+    duplicate_offers: u64,
+    original_create: OriginalCreate
+}
+
+fn recover_desk(seed: u64, prefix: FaultPrefix, suppress_reoffer: bool) -> Result[Recovery, RecoveryFailure] {
+    let initial_audit = RecoveryAudit(seed: seed, step: 0, now: 0, pending: None, run: RUN, serial: 0, live: None, granted: std.set.new(), child: None, started: false)
+    let mut world = new_world(1, 1, 1, true, Some(take initial_audit))
+    let a_grant = option.unwrap(pop(mut world, PRIMARY, 1, 0, 1))
+    for _ in 0u64 .. prefix.duplicate_offers {
+        let offer = compute.protocol.Offer(credit: a_grant, class_id: 0, principals: one(PRINCIPAL))
+        let _ = desk_event(mut world, PRIMARY, Offer(take offer, RUN))
+        if pop(mut world, PRIMARY, 1, 0, 1) != None {
+            fail("the primary desk popped its outstanding grant again")
+        }
+    }
+    let mut queue: Queue[RecoveryEvent] = Queue(times: heap.new(), events: map.new(), sequence: 0)
+    let occupied_at_heal = if let DeliveredCreate(held_replays) = prefix.original_create {
+        let Admitted(child, _) = redeem(mut world, a_grant, attempt(1)) else {
+            fail("the original grant did not start its child")
+        }
+        // The child still has DETECT_US of bounded work when the network heals.
+        enqueue(mut queue, HEAL_US + DETECT_US, RetireChild(child))
+        for _ in 0u64 .. held_replays {
+            enqueue(mut queue, HEAL_US + LINK_US, ReplayAtWorker)
+        }
+        true
+    } else {
+        false
+    }
+    // If the original create was lost, recovery requires a handoff of the
+    // stranded offer. An occupied slot can only reoffer after actual retirement.
+    let (desk, reoffer_bound) = if occupied_at_heal {
+        (PRIMARY, DETECT_US + LINK_US)
+    } else {
+        (STANDBY, DETECT_US + HOLD_US + 3 * LINK_US)
+    }
+    let demand = compute.desk.Ask(connection: 1, class_id: 0, principal: PRINCIPAL, version: 2, count: 1)
+    let obligation = ReofferObligation(original: a_grant, desk: desk, demand: demand, started_us: HEAL_US, deadline_us: HEAL_US + reoffer_bound)
+    if let Some(mut audit) = world.audit {
+        audit.pending = Some(obligation)
+    }
+    let mut r = Recovery(reoffered_us: 0, bound_us: reoffer_bound, replay_attempts: 0, double_redemptions: 0)
+    enqueue(mut queue, if occupied_at_heal {
+        HEAL_US
+    } else {
+        HEAL_US + DETECT_US + LINK_US
+    }, DemandAtDesk)
+    // The heap delivers every ready event by (time, send order). A deadline
+    // applies even when the queue drains or only later inputs remain.
+    while let Some((now, seq)) = heap.pop(mut queue.times) {
+        if now > obligation.deadline_us && r.reoffered_us == 0 {
+            return Error(missed_reoffer(mut world, obligation))
+        }
+        set_recovery_time(mut world, now)
+        let event = option.unwrap(map.remove(mut queue.events, seq))
         match take event {
-            DemandAtB => enqueue(mut faults, now + LINK_US, DemandAtWorker),
-            DemandAtWorker => enqueue(mut faults, now + HOLD_US, Rotate),
+            DemandAtDesk => {
+                let _ = desk_event(mut world, desk, Demand(demand))
+                if !occupied_at_heal {
+                    enqueue(mut queue, now + LINK_US, DemandAtWorker)
+                }
+            },
+            DemandAtWorker => enqueue(mut queue, now + HOLD_US, Rotate),
             Rotate => {
                 let actions = worker_event(mut world, 0, Handoff(RUN, 0, compute.worker.DeskOwner(member: PRIMARY, session: 1), 1, compute.worker.DeskOwner(member: STANDBY, session: 1)))
-                enqueue(mut faults, now + LINK_US, OfferAtB(take actions))
-                std.sim.message.fire(mut wire, "rotate")
-                let old = option.unwrap(std.sim.message.receive(mut wire, 1))
-                replay(mut world, old.value, 1, mut r)
+                enqueue(mut queue, now + LINK_US, OfferAtDesk(take actions))
+                // The old dispatcher retries its lost create after rotation.
+                replay(mut world, a_grant, 1, mut r)
             },
-            OfferAtB(take actions) => {
-                deliver(mut world, actions)
-                let fresh = option.unwrap(pop(mut world, STANDBY, 1, 0, 1))
-                r.reoffered_us = now - HEAL_US
-                enqueue(mut faults, now + 2 * LINK_US, CreateAtWorker(fresh))
+            RetireChild(child) => {
+                let _ = worker_event(mut world, 0, Retire(child))
+                let actions = worker_event(mut world, 0, Mint(RUN, 0))
+                enqueue(mut queue, now + LINK_US, OfferAtDesk(take actions))
             },
+            OfferAtDesk(take actions) => {
+                for action in actions {
+                    if suppress_reoffer {
+                        if let Offer(_, _) = action {
+                            continue
+                        }
+                    }
+                    deliver_action(mut world, action)
+                }
+                let replies = desk_event(mut world, desk, Pop(0, PRINCIPAL))
+                for reply in replies {
+                    if let Grant(ask, fresh) = reply {
+                        let audit: RecoveryAudit = option.unwrap(clone(world.audit))
+                        if ask != demand || audit.live != Some(fresh) || fresh == a_grant {
+                            safety_failure(audit, "reoffer grant did not name the live replacement", DeskInput(desk, Pop(0, PRINCIPAL)))
+                        }
+                        r.reoffered_us = now - HEAL_US
+                        enqueue(mut queue, now + 2 * LINK_US, CreateAtWorker(fresh))
+                    }
+                }
+            },
+            ReplayAtWorker => replay(mut world, a_grant, 1, mut r),
             CreateAtWorker(g) => {
                 let Admitted(checkout, _) = redeem(mut world, g, attempt(2)) else {
-                    fail("B could not redeem the slot stranded at A")
+                    let audit: RecoveryAudit = option.unwrap(clone(world.audit))
+                    return Error(recovery_failure(audit, "replacement grant did not redeem", WorkerInput(0, Redeem(g, attempt(2), Pure, Authenticated(true)))))
+                }
+                if let Some(mut audit) = world.audit {
+                    audit.pending = None
                 }
                 replay(mut world, g, 2, mut r)
                 // An abandon delayed past the start must not refund a child.
                 let _ = worker_event(mut world, 0, Withdraw(g))
                 replay(mut world, a_grant, 3, mut r)
                 replay(mut world, g, 3, mut r)
-                enqueue(mut faults, now + DETECT_US, AccountBeforeMint(checkout))
+                enqueue(mut queue, now + DETECT_US, AccountBeforeMint(checkout))
             },
             AccountBeforeMint(old) => {
                 let withdrawn = worker_event(mut world, 0, Restart(RUN, RUN + 1))
@@ -433,7 +684,7 @@ fn recover_desk() -> Recovery {
                 open_worker(mut world, 0, RUN + 1)
                 let actions = worker_event(mut world, 0, Mint(RUN + 1, 0))
                 deliver(mut world, actions)
-                let next = option.unwrap(pop(mut world, PRIMARY, 1, 0, 2))
+                let next = option.unwrap(pop(mut world, PRIMARY, 1, 0, 3))
                 replay(mut world, a_grant, 1, mut r)
                 let Admitted(_, _) = redeem(mut world, next, attempt(1)) else {
                     fail("the successor could not redeem the accounted slot")
@@ -442,11 +693,33 @@ fn recover_desk() -> Recovery {
             },
         }
     }
-    r
+    if r.reoffered_us == 0 {
+        return Error(missed_reoffer(mut world, obligation))
+    }
+    Ok(r)
+}
+
+pub fn check_post_heal(seed: u64, suppress_reoffer: bool) -> Result[Recovery, RecoveryFailure] {
+    let mut random = std.rand.new(seed, 3429)
+    let duplicate_offers = std.rand.below(mut random, 4)
+    let held_replays = std.rand.below(mut random, 4)
+    let original_create: OriginalCreate = if seed % 2 == 0 {
+        LostCreate
+    } else {
+        DeliveredCreate(held_replays)
+    }
+    recover_desk(seed, FaultPrefix(duplicate_offers: duplicate_offers, original_create: original_create), suppress_reoffer)
+}
+
+pub fn require_reoffer(take outcome: Result[Recovery, RecoveryFailure]) -> Recovery {
+    match take outcome {
+        Ok(r) => r,
+        Error(take failure) => fail(recovery_diagnostic(failure)),
+    }
 }
 
 fn mixed_classes() -> Trial {
-    let mut world = World(workers: map.new(), desks: map.new(), occupied: 0)
+    let mut world = World(workers: map.new(), desks: map.new(), occupied: 0, audit: None)
     let desk_cfg = compute.desk.Config(session: 1, workers: 3, slots_per_worker: 3, classes: 2, connections: 1, pending_per_connection: 1, pending_per_principal: 1024, grants_per_connection: 6, grants_per_principal: 6, shares: one(compute.desk.Share(principal: PRINCIPAL, weight: 1)))
     map.insert(mut world.desks, PRIMARY, compute.desk.init(take desk_cfg))
     let _ = desk_event(mut world, PRIMARY, Connect(1))
@@ -525,5 +798,5 @@ pub fn run(hosts: u64, seed: u64) -> Gate {
     list.push(mut cases, scenario("sparse_200us", Config(workers: hosts, per_worker: 4, load: 0, samples: 33, desk_rtt: 200, dispatchers: 1, workload: Sparse), seed))
     list.push(mut cases, scenario("sparse_250us", Config(workers: hosts, per_worker: 4, load: 0, samples: 33, desk_rtt: 250, dispatchers: 1, workload: Sparse), seed))
     list.push(mut cases, Scenario(name: "mixed_classes_3_hosts", desk: mixed_classes()))
-    Gate(hosts: hosts, seed: seed, cases: take cases, desk_recovery: recover_desk())
+    Gate(hosts: hosts, seed: seed, cases: take cases, desk_recovery: require_reoffer(recover_desk(seed, FaultPrefix(duplicate_offers: 0, original_create: LostCreate), false)))
 }

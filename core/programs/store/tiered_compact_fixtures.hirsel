@@ -1,0 +1,128 @@
+// `row_count` rows of 48 bytes in a Tiered table whose multi-leaf tree the cut
+// emits Cold into one class-3 pack.
+fn compact_cold_table(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, row_count: u64) -> Result[Table[u64, Bytes], Error] waits {
+    compact_cold_table_of(d, c, r, tasks, floor, row_count, 48)
+}
+
+fn compact_cold_table_of(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, row_count: u64, width: u64) -> Result[Table[u64, Bytes], Error] waits {
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let fixture: Table[u64, Bytes] = clone(rows)
+    let Committed(_) = run(mut db, None, copy_env((fixture, row_count, width)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64, u64)) -> Result[(), Error] {
+        for key in 0u64 .. env.1 {
+            put(mut tx, env.0, key, compact_value_of(key, 0, env.2))?
+        }
+        Ok(())
+    })? else {
+        fail("L87 (b): fixture puts did not commit")
+    }
+    let id = failure_result_from_rep(catalog.prefix(rows.id))?
+    let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
+    let (take root, take descriptor) = {
+        let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
+            fail("L87 (b): the fixture has no table")
+        }
+        (arc.share(here), failure_result_from_rep(pages.rooted_collection_record(here, before[52u64], ResidentTiered))?)
+    }
+    if std.page.level(std.page.image_of(root)) == 0 {
+        fail("L87 (b): the fixture table must span more than one leaf")
+    }
+    let mut draw = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
+    let first = draw
+    failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, id, descriptor, Some(arc.share(root)), tree.inline, first, mut draw)))?
+    failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, id, HotPage(take root), mut draw)))?
+    pages.set_head_collection(mut db.holders, 0u64, take tree)
+    pages.set_next_node(mut db.holders, draw - 1)
+    let _ = checkpoint(mut db)?
+    close(take db)?
+    Ok(rows)
+}
+
+fn l88_probe_pack(d: Dir, owner: StoreId, seq: u64, first_stamp: u64, frame_count: u64) -> Result[(pages.PagePack, std.page.PagePtr), Error] waits {
+    let mut draft = failure_result_from_rep(pager.begin_tiered_pack(store_key_to_rep(owner), seq, 3, 4096))?
+    let mut first = std.page.unlocated(0)
+    for slot in 0u64 .. frame_count {
+        let mut rows: List[std.page.Entry] = list.with_capacity(1)
+        list.push(mut rows, std.page.Entry(key: types.key_word(slot), cell: InlineValue(types.key_word(slot))))
+        let image = failure_result_from_rep(pages.page_result(std.page.encode(rows, 0, first_stamp + slot, Collection)))?
+        let page = failure_result_from_rep(pages.page_result(std.page.attach(take image, list.new(), list.new())))?
+        let width = std.page.sealed_size(std.page.image_of(page))
+        let frame = manifest.PackFrame(stamp: first_stamp + slot, size: width, body: PageBody(take page))
+        let key = failure_result_from_rep(catalog.logical_key(9, types.key_word(slot)))?
+        let Some(ptr) = failure_result_from_rep(pager.add_tiered_pack_frame(mut draft, frame, 9, key, fn(stamp: u64) -> std.page.PagePtr {
+            std.page.unlocated(stamp)
+        }))? else {
+            fail("L88(f): the leaves must fit the fixture pack")
+        }
+        if slot == 0 {
+            first = ptr
+        }
+    }
+    let (take raw, pack) = failure_result_from_rep(pager.finish_tiered_pack(take draft))?
+    failure_result_from_rep(manifest.disk_write_synced(d, failure_result_from_rep(manifest.paged_pack_path(seq))?, raw))?
+    Ok((pack, first))
+}
+
+// Exercise the reading scheduler with sealed PACK_INDEX rows and no matching
+// roots. The trace controls when each listed pack crosses the live ratio.
+type CohortFixture {
+    installed: manifest.PageLocations,
+    running: Map[u64, pager.TieredProbeCursor]
+}
+
+fn with_cohort_packs(d: Dir, tasks: Tasks, counts: Inline[u64, 4], trace: scoped fn(pager.TieredPageSource, mut CohortFixture) -> Result[(), Error] waits) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let owner = StoreId(hi: 3, lo: 4)
+    let mut ids = 0u64
+    let mut packs: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
+    let mut state = CohortFixture(installed: manifest.new_page_locations(), running: map.new())
+    for at in 0u64 .. 4 {
+        let seq = at + 1
+        let (pack, _) = l88_probe_pack(fixtures, owner, seq, 10 * seq, counts[at])?
+        failure_result_from_rep(types.capacity(manifest.disk_index_put(mut state.installed.packs, seq, pack, manifest.pack_edge_charge)))?
+        let (take revised, _) = std.omap.insert(mut ids, packs, seq, pages.TieredPagerPack(inventory: pack, object: None))
+        packs = take revised
+    }
+    let funding = pager.TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 4096, pager_task_bytes: 1048576, cut_pins: true)
+    let (take requests, take worker) = failure_result_from_rep(object_writer.start_tiered_pager(tasks, store_key_to_rep(owner), 0, PagerDirectory(fixtures), funding, 4))?
+    let source = pager.TieredPageSource(pager: take requests, packs: take packs, next_stamp: 100, deadline: 0)
+    let checked = trace(source, mut state)
+    let _ = take source
+    let _ = result.unwrap(task.join(take worker))
+    checked
+}
+
+fn cohort_eligible(mut state: CohortFixture, seq: u64) -> Result[(), Error] {
+    let mut pack: pages.PagePack = clone(option.unwrap(manifest.disk_index_get(state.installed.packs, seq)))
+    pack.live = 0
+    failure_result_from_rep(types.capacity(manifest.disk_index_put(mut state.installed.packs, seq, pack, manifest.pack_edge_charge)))
+}
+
+fn cohort_cut(source: pager.TieredPageSource, mut state: CohortFixture, budget: u64) -> Result[List[u64], Error] waits {
+    let mut probes = failure_result_from_rep(pager.select_compaction(state.installed, state.running, 500))?
+    let mut retire: List[u64] = list.new()
+    let mut work = pager.TieredCompactWork(roots: list.new(), next_stamp: 100, moved: list.new(), moved_stamps: map.new(), queue: map.new())
+    let lists = manifest.empty_paged_lists()
+    failure_result_from_rep(pager.compact_probes(source, list.new(), lists.deferred, 0, mut work, mut probes, mut retire, budget))?
+    for seq in retire {
+        let _ = failure_result_from_rep(types.capacity(manifest.disk_index_remove(mut state.installed.packs, seq, manifest.pack_edge_charge)))?
+    }
+    state.running = take probes
+    Ok(take retire)
+}
+
+fn cohort_only_pack(retired: List[u64], seq: u64) -> bool {
+    list.len(retired) == 1 && retired[0u64] == seq
+}
+
+fn cohort_same_cursor(a: pager.TieredProbeCursor, b: pager.TieredProbeCursor) -> bool {
+    if a.rows != b.rows || a.next_data != b.next_data || a.index_at != b.index_at || a.previous_index != b.previous_index {
+        return false
+    }
+    match (view a.inside, view b.inside) {
+        (Some(x), Some(y)) => x.at == y.at && x.remaining == y.remaining && x.last_data == y.last_data && x.prior_key == y.prior_key,
+        (None, None) => true,
+        _ => false,
+    }
+}

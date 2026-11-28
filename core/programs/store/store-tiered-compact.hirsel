@@ -17,6 +17,7 @@
 // AP16's redo keeps this cut's staged moves, queue rewrites included
 // (§13.6a T8, v2.114); only a refused compaction step drops them.
 pub type TieredCompaction: send {
+    // Unfinished members of the admitted cohort, including those at row zero.
     probes: Map[u64, TieredProbeCursor],
     // One share of each generation's read inventory. A Snapshot reads its
     // Cold slots through the inventory of the generation it was taken at, so
@@ -308,14 +309,9 @@ pub fn compact_probes(source: TieredPageSource, queued: List[manifest.DeferredFr
     Ok(())
 }
 
-// §13.6 selection: a listed Tiered pack below the ratio starts a probe. A
-// pack keeps at most one probe. Shared by reading and Tiered-idle cuts.
-fn pack_selected_for_compaction(seq: u64, pack: pages.PagePack, running: Map[u64, TieredProbeCursor], permille: u64) -> bool {
+fn pack_selected_for_compaction(pack: pages.PagePack, permille: u64) -> bool {
     if pack.class != 3 && pack.class != 4 {
         return false
-    }
-    if map.contains(running, seq) {
-        return true
     }
     // `live` counts frame payloads, so the ratio is taken over
     // the payload a fresh pack was emitted with: the data region
@@ -333,18 +329,19 @@ fn pack_selected_for_compaction(seq: u64, pack: pages.PagePack, running: Map[u64
 }
 
 pub fn select_compaction(installed: manifest.PageLocations, running: Map[u64, TieredProbeCursor], permille: u64) -> Result[Map[u64, TieredProbeCursor], types.Failure] {
+    // Reading cuts admit once, at the start of a cut with no cohort.
+    // compact_probes serves these cursors in pack sequence order.
+    if map.len(running) != 0 {
+        return Ok(clone(running))
+    }
     let mut probes: Map[u64, TieredProbeCursor] = map.new()
     let mut inventory = std.omap.range(installed.packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut inventory) {
-        if !pack_selected_for_compaction(seq, pack, running, permille) {
+        if !pack_selected_for_compaction(pack, permille) {
             continue
         }
-        let cursor: TieredProbeCursor = match map.get(running, seq) {
-            Some(kept) => clone(kept),
-            None => start_tiered_probe(pack),
-        }
         types.capacity(map.try_reserve(mut probes, 1))?
-        map.insert(mut probes, seq, take cursor)
+        map.insert(mut probes, seq, start_tiered_probe(pack))
     }
     Ok(take probes)
 }

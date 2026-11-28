@@ -1,4 +1,4 @@
-# Store spec v2.182
+# Store spec v2.183
 
 `store@1` provides typed tables and indexes, cells, logs, transactions and snapshots.
 A writer publishes new roots at commit. Its journal acknowledges a durable prefix,
@@ -5333,7 +5333,7 @@ A frame killed on several chains leaves `live` on one chain at most: the chain i
 
 A cell holding less than n moves what it holds, and q is queued for the repair probe. A frame matched only through queue rows moves no cell. It has not been filed yet, and its drain files it at its new location (v2.93). Separately, `live[p]` −= n for a moved ancestor whose pack is not being retired at this cut. A fresh pack's `live` is its laid-out payload (AP14).
 
-**Probe completion and retirement.** The cut that finishes a pack's probe, or retires the pack, deletes every cell naming that pack. The probe's exact `live` replaces the estimate those cells carried. Keeping them could subtract later a frame the reset never counted. The resulting over-count is repaired by the next probe within `repair_cuts`.
+**Probe completion and retirement.** The cut that finishes a pack's probe, or retires the pack, deletes every cell naming that pack. The probe's exact `live` replaces the estimate those cells carried. Keeping them could subtract later a frame the reset never counted. The resulting over-count makes the pack eligible for a recount after `repair_cuts`. The cohort rule below determines when it receives service.
 
 **What drifts, and why it is safe.** Everything above is accounting. Retirement is decided by the probe alone (above), so an error moves `live`, never what a root reads. The known drifts are:
 - **Under-count:** a historical pin or cut-path fork (§13.5) that lands behind kills already filed dead. It references frames whose bytes already left `live`. The pack may be chosen early, and the probe then matches and keeps them.
@@ -5346,7 +5346,7 @@ A cell holding less than n moves what it holds, and q is queued for the repair p
   - a frame on a replaced list that a promoted Snapshot also reached, when the promotion took another location for its stamp, such as a copy from behind a probe's cursor (v2.96, L88 (e)). The kill is filed into a holder cell, and no holder reaches it;
   - pages that a promotion re-emits or copies (§13.5 step 2, v2.94; copies from behind a probe's cursor, v2.96). No head reaches them, so a pin's stay in `live` after its `unpin`, and a cut-path fork's kills of them go into its origin cell, because their stamps are below w₀.
 
-  Each delays a compaction by at most `repair_cuts` cuts plus one probe's ⌈N / `probe_budget`⌉ cuts that run AP16 item 3 (§13.6 "A probe across cuts", v2.96).
+  After `repair_cuts` the pack is eligible for a recount. Its wait for admission includes the remaining work of any active cohort. Once admitted, it has the cohort bound below.
 
   The under-count drift means a listed pack with `live` 0 can still be reached by a promoted pin or fork. So `live` 0 never means unreachable (v2.157, "Tiered-idle cuts", §13.10a).
 
@@ -5373,7 +5373,7 @@ In each holder root, the probe finds the collection's `CollectionRoot` in the co
 A **positive match** is a `CollectionRoot` root PagePtr, a `Slot` PagePtr or a `BlobSlot` BlobRef that names (p, offset) exactly, with the payload length and the checksum equal (§13.2's PAGE and BLOB rules). A BLOB matches through a BlobRef in a leaf or through a Blob queue row (v2.93). The probe reads PACK_INDEX and interior pages as cut pins on the cut pin quota (v2.74, §13.8), never on the writer's or a Reader's partition. It holds one PACK_INDEX frame and one root's descent, at most h pages, at a time. Its cursor and running sum are on the paused writer's limit. It runs on at most `probe_budget` frames per cut (Options, default 65,536). That bounds the frames per cut, not its pins.
 - **Cost.** One frame's probe descends every participating root: O((heads + pins + queue rows) × h) page visits. Each queue row is a root, as each queued subtree already was in v2.91, so a long queue lengthens each frame's probe until `free_budget` drains it.
 
-**A probe across cuts (v2.93).** A probe walks its pack's PACK_INDEX with a cursor. Each cut probes up to `probe_budget` frames from the cursor, against the participating roots of the generation that cut publishes, and acts on those verdicts at that cut:
+**A probe across cuts (v2.93).** A probe walks its pack's PACK_INDEX with a cursor. A reading cut shares one `probe_budget` across its cohort. It checks each row against the participating roots of the generation it publishes and acts on that verdict at the same cut:
 - **A compaction probe** (the pack was chosen by `compact_ratio`) copies each frame it matched. It rewrites every path to that frame that this cut's descents found, in every root that matched.
 - **A recount probe** (the pack was chosen by `repair_cuts`) copies nothing. It adds each matched frame's length to its running sum.
 
@@ -5383,11 +5383,14 @@ A path set and a positive verdict never outlive their cut. Only the cursor and t
 
 Both claims hold at the next cut. No commit can re-reference a frame that no participating root names: commits derive from heads, `adopt` takes a branch's roots, a live-head fork or pin shares a head's roots, and a trim's dropped rows come from heads, and all of these are participating roots. The only other way to re-reference a frame is to install a historical root (§13.5, "Promoting a historical Snapshot"). A promotion references a frame in place only at or after the cursor of every unfinished probe of its pack, and copies the rest (§13.5 step 2, v2.96). A residency change re-references nothing, because it writes fresh frames (§13.8). The mandatory-only retry (AP16) drops the cut's probe progress with its relocation, so the cursor and the sum stay as the installed generation left them.
 
-**Progress (v2.96, astra 2242 #2).** Only two events reset a cursor:
-- a crash, which loses the cursor (writer memory);
-- a `compact_ratio` selection of a pack whose recount is running (below), at most once per probe.
+**Progress (v2.183).** A reading cut with positive budget and no installed probes admits all eligible packs in the installed inventory as one cohort. It gives each member a cursor at row zero. The cut serves members in ascending pack sequence and finishes each before spending any rows on its successor. An admitted member keeps its place even if it has received no rows or its live ratio changes. While any member remains, the cut resumes only those members. The next reading cut after the cohort drains evaluates eligibility again. Even a newly eligible pack with a lower sequence waits for that admission. A finishing cut spends no spare rows on a later cohort.
 
-So a probe of a pack with N index rows, if neither event interrupts it, finishes within ⌈N / `probe_budget`⌉ cuts that run AP16 item 3, or at the first Tiered-idle cut that reaches it, whichever comes first (v2.164). An idle cut never moves a cursor, so it adds no reset. A cut published by the mandatory-only retry advances no probe and is not counted. v2.94 restarted every unfinished probe at each promotion cut. A pin at every cut then kept a pack from finishing and broke the `repair_cuts` bound (L88 (f)).
+Let B be the positive `probe_budget` and R be the sum, over the admitted members, of each pack's index row count less the rows its installed cursor has already decided. A qualifying cut is a non-idle cut that publishes AP16 item 3's reading work. Each such cut decides min(B, R) rows. With fixed B and no cursor reset, the cohort drains within **⌈R / B⌉ qualifying cuts**, counting the admission cut when R is measured at admission. Without intervening idle retirements it takes exactly that many. For a single pack of N rows this gives ⌈N / B⌉. With one row followed by two and B = 2, cut one retires the first pack and reads one row of the second. Cut two retires the second.
+
+- A refused probe step, a failed publication, or a mandatory-only cut leaves the installed cohort and all its cursors as they were. Budget zero disables admission and service. None of these cuts counts.
+- A crash loses the cohort and its cursors together. Reopen starts with no cohort. The next reading admission uses the recovered inventory and begins each eligible pack at row zero.
+- A historical promotion keeps cohort membership, order and cursors. It copies a frame behind the installed cursor as §13.5 step 2 requires. A ratio selection that converts a running recount into compaction resets that member's cursor and sum once, in its existing place. Count the bound anew using the cohort's remaining rows after the reset. The log@1 worker currently implements ratio compaction only.
+- A Tiered-idle cut uses the whole-pack rule below. It admits no reading probes and counts as no qualifying cut. Its retirements remove members it reaches. Every surviving member retains its exact cursor and position for the next reading cut.
 
 v2.91 let a positive verdict and its paths carry to the cut that finished the probe. A live-head fork made in between can hold the only remaining path to a matched frame, so the finishing cut rewrote stale paths and retired a pack that the child still read (astra 2207 #2). Moving each match at its own cut needs no restart rule for forks.
 
@@ -5395,10 +5398,10 @@ v2.91 let a positive verdict and its paths carry to the cut that finished the pr
 - a compaction probe's pack leaves the inventory, in AP16's removal plan;
 - a recount probe sets the pack's `live` to its sum, and the pack leaves only when the sum is 0.
 
-A pack leaves the inventory only at such a cut. A pack has at most one probe at a time. Choosing by `compact_ratio` a pack whose recount is running restarts its probe as a compaction probe.
+A reading cut removes a pack only when its probe finishes. A Tiered-idle cut can retire it whole under the rule below. A pack has at most one probe at a time.
 
 **Compaction at the cut (AP16 Choose and Plan for Tiered packs).**
-- The cut selects Tiered packs by `live` / `bytes` ascending below `compact_ratio` (Options, default 0.5), then any pack not probed in `repair_cuts` cuts (Options, default 64). The second rule repairs drift in `live` (astra #13).
+- At admission, Tiered packs with `live` / `bytes` below `compact_ratio` (Options, default 0.5) qualify for compaction. Other packs not probed in `repair_cuts` cuts (Options, default 64) qualify for recount. The second rule repairs drift in `live` (astra #13).
 - It probes them as above. A compaction probe copies its matched frames into fresh class 3 or 4 packs, and rewrites the paths found at this cut with the new location, as AP16 rewrites old copies and list edits. The probe's paths take the place of incoming lists.
 
 **Tiered-idle cuts (v2.157, store-zero-live-pin-3142).** A generation is **Tiered-idle** when no holder root (branch head, pin, the import pin) has a collection descriptor of residency Tiered and the candidate queue (installed rows and this cut's added rows) is empty. A Tiered-idle generation reaches no class-3/4 frame. A Memory tree lives in class 0/1, and a Tiered → Memory change re-stamps the tree into fresh Memory pages and hands the old Cold root to the queue (§13.8). The collection map, `streams`, `catalog` and `lineage` are Memory or class-2 trees, and the base root is tag 0 (§11.10). The queue is empty. So the probe's positive-match test fails for every frame of every class-3/4 pack.
@@ -5553,7 +5556,7 @@ T9. **The output buffer, at AP16 item 8,** takes the maximum across classes 4, 3
 | A16 | The same with no reopen, so the Hot pages are not emitted | T2 is mandatory, and a cut that cannot run it publishes nothing (L68 (e), `cut_skips_tiered`) |
 | A17 | The mandatory-only retry skips relocation after the cells were planned | relocation moves are step 6 of T8, which the retry skips with the relocation; B_new and steps 1, 2, 3 and 5 are the same |
 | A18 | A cell subtraction takes `live` below 0 | it saturates at 0. The pack is chosen by ratio and probed, and is never retired on `live` |
-| A19 | A pack's probe finishes while cells still name it | they are deleted, and the exact `live` stands; the over-count is repaired within `repair_cuts` |
+| A19 | A pack's probe finishes while cells still name it | they are deleted, and the exact `live` stands; the pack becomes eligible for recount after `repair_cuts` |
 | A20 | A cut-path fork's watermark is below kills filed after its Snapshot's capture | B is ordered by watermark, not insertion; the new parent side files later kills correctly, and earlier ones are A11's drift |
 | A21 | A trim removes a Cold blob and a Hot blob from one leaf; the dropped list holds one 42-byte BlobRef in a 40-byte row | the slot is 48 bytes and holds the full BlobRef (§13.8); the Cold blob is filed at the cut and the Hot one, never written, takes no row, so neither is lost or freed twice |
 | A22 | After reopen, a schema cut demotes a Tiered index whose overlay holds a delete with prior 1, or an insert (v2.156) | H supersedes the id, so the fold discards that overlay: it applies no entry and runs no `base` check. The Cold root goes to `deferred_frees`, and the builder refills the empty collection from the table (L68 (f), (g)) |

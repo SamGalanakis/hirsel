@@ -421,6 +421,7 @@ pkg_v1.Package(
             ("tiered_queue_laws.hirsel", "store"),
             ("tiered_count_laws.hirsel", "store"),
             ("tiered_compact_laws.hirsel", "store"),
+            ("tiered_compact_fixtures.hirsel", "store"),
             ("tiered_tx_read_laws.hirsel", "store"),
             ("tiered_residency_laws.hirsel", "store"),
             ("tiered_crash_arm_laws.hirsel", "store"),

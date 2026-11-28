@@ -299,10 +299,11 @@ fn test_l96_b_leased_tiered_pack_survives_retiring_cut(d: Dir, c: Clock, r: Rand
     }
     close(take db2)?
     let _ = result.unwrap(restore(tasks, b1, r1, c, r, clone(run_opts), Latest, restore_attempt(r)))
-    let restored_db = open(tasks, r1, c, r, clone(run_opts))?
+    let mut restored_db = open(tasks, r1, c, r, clone(run_opts))?
+    let restored_rows = table(mut restored_db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let rd = reader(restored_db, VALUE_LIMIT + 1048576)?
     let snap = snapshot(restored_db)
-    if get(rd, snap, rows, 0u64)? != Some(l96_blob_value(1, 32)) || get(rd, snap, rows, 1u64)? != Some(l96_blob_value(2, 2000)) {
+    if get(rd, snap, restored_rows, 0u64)? != Some(l96_blob_value(1, 32)) || get(rd, snap, restored_rows, 1u64)? != Some(l96_blob_value(2, 2000)) {
         fail("L96 (b): restored backup lost rows after leased pack retired on source")
     }
     drop(take rd)

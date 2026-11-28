@@ -214,47 +214,6 @@ fn compact_value_of(key: u64, edit: u8, width: u64) -> Bytes {
     take body
 }
 
-// `row_count` rows of 48 bytes in a Tiered table whose multi-leaf tree the cut
-// emits Cold into one class-3 pack.
-fn compact_cold_table(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, row_count: u64) -> Result[Table[u64, Bytes], Error] waits {
-    compact_cold_table_of(d, c, r, tasks, floor, row_count, 48)
-}
-
-fn compact_cold_table_of(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, row_count: u64, width: u64) -> Result[Table[u64, Bytes], Error] waits {
-    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
-    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
-    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
-    let fixture: Table[u64, Bytes] = clone(rows)
-    let Committed(_) = run(mut db, None, copy_env((fixture, row_count, width)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64, u64)) -> Result[(), Error] {
-        for key in 0u64 .. env.1 {
-            put(mut tx, env.0, key, compact_value_of(key, 0, env.2))?
-        }
-        Ok(())
-    })? else {
-        fail("L87 (b): fixture puts did not commit")
-    }
-    let id = failure_result_from_rep(catalog.prefix(rows.id))?
-    let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
-    let (take root, take descriptor) = {
-        let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
-            fail("L87 (b): the fixture has no table")
-        }
-        (arc.share(here), failure_result_from_rep(pages.rooted_collection_record(here, before[52u64], ResidentTiered))?)
-    }
-    if std.page.level(std.page.image_of(root)) == 0 {
-        fail("L87 (b): the fixture table must span more than one leaf")
-    }
-    let mut draw = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
-    let first = draw
-    failure_result_from_rep(pages.page_result(std.page.insert(mut tree.root, id, descriptor, Some(arc.share(root)), tree.inline, first, mut draw)))?
-    failure_result_from_rep(pages.page_result(std.page.install_tiered_root(mut tree.root, id, HotPage(take root), mut draw)))?
-    pages.set_head_collection(mut db.holders, 0u64, take tree)
-    pages.set_next_node(mut db.holders, draw - 1)
-    let _ = checkpoint(mut db)?
-    close(take db)?
-    Ok(rows)
-}
-
 fn compact_branch_rows(db: Db, b: Branch, rows: Table[u64, Bytes], row_count: u64, edited: u64, edit: u8) -> Result[(), Error] waits {
     let read_handle = reader(db, VALUE_LIMIT + 1048576)?
     let s = snapshot_of(db, b)?
@@ -934,4 +893,100 @@ fn test_l100_tiered_idle_retires_without_pager_crash_after_rename(d: Dir, c: Clo
     }
     l100_b_check_row(reopened, rows, v1)?
     close(take reopened)
+}
+
+@test
+fn test_l88_cohort_two_packs_share_two_rows(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
+    with_cohort_packs(d, tasks,[1, 2, 1, 1], scoped fn(source: pager.TieredPageSource, mut state: CohortFixture) -> Result[(), Error] waits {
+        cohort_eligible(mut state, 1)?
+        cohort_eligible(mut state, 2)?
+        if !cohort_only_pack(cohort_cut(source, mut state, 2)?, 1) || option.unwrap(map.get(state.running, 2u64)).rows != 1 {
+            fail("one plus two rows: cut one retires pack one and reads one row of pack two")
+        }
+        cohort_eligible(mut state, 3)?
+        if !cohort_only_pack(cohort_cut(source, mut state, 2)?, 2) || map.len(state.running) != 0 {
+            fail("one plus two rows: cut two finishes the cohort and leaves the new pack for cut three")
+        }
+        if !cohort_only_pack(cohort_cut(source, mut state, 2)?, 3) {
+            fail("one plus two rows: the next cut admits the waiting pack")
+        }
+        Ok(())
+    })
+}
+
+@test
+fn test_l88_cohort_continuous_arrivals(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
+    with_cohort_packs(d, tasks,[4u64, 1, 1, 1], scoped fn(source: pager.TieredPageSource, mut state: CohortFixture) -> Result[(), Error] waits {
+        for cut in 1u64 .. 5 {
+            cohort_eligible(mut state, cut)?
+            let retired = cohort_cut(source, mut state, 1)?
+            if cut < 4 {
+                if list.len(retired) != 0 || map.len(state.running) != 1 || option.unwrap(map.get(state.running, 1u64)).rows != cut {
+                    fail("later arrivals wait while the single-pack cohort advances one row per cut")
+                }
+            } else if !cohort_only_pack(retired, 1) || map.len(state.running) != 0 {
+                fail("the four-row cohort drains on cut four")
+            }
+        }
+        let later = cohort_cut(source, mut state, 3)?
+        if list.len(later) != 3 || later[0] != 2 || later[1] != 3 || later[2] != 4 {
+            fail("the next cohort admits all three waiting packs in sequence order")
+        }
+        Ok(())
+    })
+}
+
+@test
+fn test_l88_cohort_late_older_pack(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
+    with_cohort_packs(d, tasks,[1, 2, 1, 1], scoped fn(source: pager.TieredPageSource, mut state: CohortFixture) -> Result[(), Error] waits {
+        cohort_eligible(mut state, 2)?
+        cohort_eligible(mut state, 3)?
+        if list.len(cohort_cut(source, mut state, 1)?) != 0 || option.unwrap(map.get(state.running, 2u64)).rows != 1 {
+            fail("the first cut starts the two-row pack")
+        }
+        cohort_eligible(mut state, 1)?
+        if !cohort_only_pack(cohort_cut(source, mut state, 1)?, 2) {
+            fail("the late older pack preempted a started probe")
+        }
+        if !cohort_only_pack(cohort_cut(source, mut state, 1)?, 3) || !cohort_only_pack(cohort_cut(source, mut state, 1)?, 1) {
+            fail("even an untouched member drains before the late older pack")
+        }
+        Ok(())
+    })
+}
+
+// A recount upgraded to compaction supplies a row-zero cursor at its old
+// position in the cohort. Exercise that scheduler input and both idle edges.
+@test
+fn test_l88_cohort_cursor_reset_and_idle_resume(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
+    with_cohort_packs(d, tasks,[1u64, 3, 1, 1], scoped fn(source: pager.TieredPageSource, mut state: CohortFixture) -> Result[(), Error] waits {
+        cohort_eligible(mut state, 2)?
+        cohort_eligible(mut state, 3)?
+        if list.len(cohort_cut(source, mut state, 1)?) != 0 || option.unwrap(map.get(state.running, 2u64)).rows != 1 {
+            fail("the first reading cut spends one row on pack two")
+        }
+        cohort_eligible(mut state, 1)?
+        let before: pager.TieredProbeCursor = clone(option.unwrap(map.get(state.running, 2u64)))
+        let (take kept, take retired) = failure_result_from_rep(pager.compact_idle_probes(state.installed, state.running, 1))?
+        let after: pager.TieredProbeCursor = clone(option.unwrap(map.get(kept, 2u64)))
+        if !cohort_only_pack(retired, 1) || !cohort_same_cursor(before, after) {
+            fail("the idle cut retires the first listed pack whole and preserves the unreached cursor")
+        }
+        let _ = failure_result_from_rep(types.capacity(manifest.disk_index_remove(mut state.installed.packs, 1u64, manifest.pack_edge_charge)))?
+        state.running = take kept
+        if list.len(cohort_cut(source, mut state, 1)?) != 0 || option.unwrap(map.get(state.running, 2u64)).rows != 2 {
+            fail("reading resumes at the byte-exact cursor left by the idle cut")
+        }
+        let pack: pages.PagePack = clone(option.unwrap(manifest.disk_index_get(state.installed.packs, 2u64)))
+        map.insert(mut state.running, 2u64, pager.start_tiered_probe(pack))
+        cohort_eligible(mut state, 4)?
+        if list.len(cohort_cut(source, mut state, 2)?) != 0 || map.contains(state.running, 4u64) || option.unwrap(map.get(state.running, 2u64)).rows != 2 {
+            fail("the reset member gets the entire two-row budget")
+        }
+        let finished = cohort_cut(source, mut state, 2)?
+        if list.len(finished) != 2 || finished[0] != 2 || finished[1] != 3 {
+            fail("the reset member keeps its place and four remaining rows drain in two cuts")
+        }
+        Ok(())
+    })
 }

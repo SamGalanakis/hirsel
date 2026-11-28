@@ -111,6 +111,11 @@ fn crash_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, arm: CrashArm, renamed: 
     }
     let first_output = manifest.pack_next(disk_state(db).packs)
     let sealed = compact_refused_retiring_cut(mut db)?
+    if let MidProbe = arm {
+        if gate_probe_rows(db, probed) != 1 || map.len(pager.disk_compaction(disk_state(db).tiered).probes) != 1 {
+            fail("a refused publication preserves the installed cohort and its cursor")
+        }
+    }
     if !failure_result_from_rep(journal.disk_exists(d, failure_result_from_rep(manifest.paged_pack_path(first_output))?))? {
         fail("§13.6 crash: the cut wrote its packs before the rename")
     }
@@ -145,8 +150,10 @@ fn crash_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, arm: CrashArm, renamed: 
             }
         }
     }
-    // A crash mid-probe loses every running cursor, and with `compact_permille`
-    // above 1000 every pack had a probe running.
+    // Reopen loses the whole cohort, including members still at row zero.
+    if map.len(pager.disk_compaction(disk_state(reopened).tiered).probes) != 0 {
+        fail("reopen must start with empty writer probe state")
+    }
     let lost_cursors = match arm {
         MidProbe => true,
         _ => false,

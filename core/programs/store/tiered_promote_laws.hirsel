@@ -82,7 +82,7 @@ fn test_l88_promotion_converges_tiered_stamps(d: Dir, tasks: Tasks) -> Result[()
     let old = l88_leaf_pack(fixtures, owner, 8)?
     let moved = l88_leaf_pack(fixtures, owner, 11)?
     let (parent, sibling) = l79_fold_parent(fixtures, owner, old)?
-    let (probe_pack, probed_leaf) = l88_probe_pack(fixtures, owner)?
+    let (probe_pack, probed_leaf) = l88_probe_pack(fixtures, owner, 7, 30, 4)?
     let mut ids = 0u64
     let mut packs: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
     for ptr in[old, moved, parent, sibling] {
@@ -103,31 +103,6 @@ fn test_l88_promotion_converges_tiered_stamps(d: Dir, tasks: Tasks) -> Result[()
     let _ = take captured
     let _ = result.unwrap(task.join(take worker))
     checked
-}
-
-fn l88_probe_pack(d: Dir, owner: StoreId) -> Result[(pages.PagePack, std.page.PagePtr), Error] waits {
-    let mut draft = failure_result_from_rep(pager.begin_tiered_pack(store_key_to_rep(owner), 7, 3, 4096))?
-    let mut first = std.page.unlocated(0)
-    for slot in 0u64 .. 4 {
-        let mut rows: List[std.page.Entry] = list.with_capacity(1)
-        list.push(mut rows, std.page.Entry(key: types.key_word(slot), cell: InlineValue(types.key_word(slot))))
-        let image = failure_result_from_rep(pages.page_result(std.page.encode(rows, 0, 30 + slot, Collection)))?
-        let page = failure_result_from_rep(pages.page_result(std.page.attach(take image, list.new(), list.new())))?
-        let width = std.page.sealed_size(std.page.image_of(page))
-        let frame = manifest.PackFrame(stamp: 30 + slot, size: width, body: PageBody(take page))
-        let key = failure_result_from_rep(catalog.logical_key(9, types.key_word(slot)))?
-        let Some(ptr) = failure_result_from_rep(pager.add_tiered_pack_frame(mut draft, frame, 9, key, fn(stamp: u64) -> std.page.PagePtr {
-            std.page.unlocated(stamp)
-        }))? else {
-            fail("L88(f): the four leaves must fit the fixture pack")
-        }
-        if slot == 0 {
-            first = ptr
-        }
-    }
-    let (take raw, pack) = failure_result_from_rep(pager.finish_tiered_pack(take draft))?
-    failure_result_from_rep(manifest.disk_write_synced(d, failure_result_from_rep(manifest.paged_pack_path(7))?, raw))?
-    Ok((pack, first))
 }
 
 fn l88_probe_keeps_progress(captured: pager.TieredPageSource, pack: pages.PagePack, original: std.page.PagePtr) -> Result[(), Error] waits {

@@ -302,7 +302,7 @@ impl Cx<'_, '_, '_> {
             }
             "share" => {
                 self.builtin_use(f, n);
-                Some((result, self.lower_code_share(tys[0], vals[0], result, n)))
+                Some((result, self.lower_code_share(vals[0], result, n)))
             }
             "hold" | "take_as" | "hold_send" => {
                 if g.path.0.name == "take_as"

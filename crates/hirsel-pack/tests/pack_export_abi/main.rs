@@ -89,7 +89,8 @@ pub fn probe_overlap(c: Code[fn(Big, Big) -> Big]) -> Big {
 }
 
 fn invoke[A, R](c: Code[fn(take A) -> R], take arg: A) -> R {
-    c(take arg)
+    let shared = code.share(c)
+    shared(take arg)
 }
 
 fn word(take n: u64) -> u64 { n + 1u64 }

@@ -445,23 +445,10 @@ impl Cx<'_, '_, '_> {
     /// Emit `code.share(c)`: retain one more counted `Code[F]` handle.
     pub(super) fn lower_code_share(
         &mut self,
-        callable: TyId,
         code: Option<ValueId>,
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        if self
-            .e
-            .pack_export_hash(self.p, &mut self.t, callable)
-            .is_none()
-        {
-            self.refuse(
-                "PACK-14",
-                n,
-                "the operation requires a closed type with a compiled witness",
-            );
-            return None;
-        }
         if !self.live() {
             return None;
         }

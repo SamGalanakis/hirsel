@@ -95,6 +95,11 @@ fn move_kernel_closes_three_stale_races_and_lost_h() -> Result[(), ()] {
     if auth_b.expect != auth_c.expect {
         fail("Rule F1 violated: recovery contender has different expect")
     }
+    // FLT-2: only the immediate successor epoch can prove this permit won.
+    let later = move_kernel.HeadView(pair: move_kernel.HeadPair(epoch: 3, holder: move_kernel.id16_from_u64(9)), origin: Some(move_kernel.next_origin(None, 3, auth_b.attempt, Permit)))
+    if move_kernel.settle_permit(st.open_permits[0], later) != SettledDead(later.pair) {
+        fail("a later permit epoch cannot settle the immediate successor as won")
+    }
     // Race 1 (delayed A->B after C wins): C executes CAS first; B's delayed CAS MUST be Superseded.
     let head_c = result.unwrap(mock_cas(mut reg, auth_c))
     if let Error(actual) = mock_cas(mut reg, auth_b) {

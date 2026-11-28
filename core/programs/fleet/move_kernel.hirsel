@@ -44,7 +44,7 @@ pub fn settle_permit(permit: PermitRow, head: HeadView) -> Settlement {
     }
     match head.origin {
         Some(orig) => {
-            if orig.permit_attempt == permit.attempt && orig.permit_epoch >= permit.expect.epoch + 1 {
+            if orig.permit_attempt == permit.attempt && orig.permit_epoch == permit.expect.epoch + 1 {
                 SettledWon(orig.permit_epoch)
             } else {
                 SettledDead(head.pair)

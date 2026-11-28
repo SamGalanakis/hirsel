@@ -3,7 +3,7 @@
 import importlib.util
 import json
 
-from compiler_source import hcfg, toolchain_packages
+from compiler_source import TOOLCHAIN_MANIFEST, hcfg, toolchain_packages
 
 
 def release_product(reads):
@@ -105,7 +105,7 @@ def distribution_gates(out, call, Raw, reads, slots):
                                   "//tools/toolchain-dist:product.hcfg", "//tools/toolchain-dist:validate-install", "tools/native-toolchain/apple-targets.json"]))
     out.append("\n" + call("hirsel_script_test", name="gate-distribution-notices", script="tools/tests/distribution_notices.py",
                             args=["--present", *adapted_citations_present(reads)],
-                            data=["tools/tests/distribution_notices.py", "//tools/toolchain-dist:build",
+                            data=["tools/tests/distribution_notices.py", TOOLCHAIN_MANIFEST, "//tools/toolchain-dist:build",
                                   "//tools/toolchain-dist:darwin_host.py", "//tools/buck2/native-toolchain:link-kit-source",
                                   "//tools/buck2:apple_records.py", "//tools/buck2:generated.py",
                                   "tools/native-toolchain/apple-targets.json",

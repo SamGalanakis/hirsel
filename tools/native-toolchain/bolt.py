@@ -146,8 +146,8 @@ def optimize(kind, compiler, library, runtime, output, *, data=None, profile_onl
     _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
     bolt = os.environ.get('LLVM_BOLT', 'llvm-bolt')
-    jobs = os.environ.get('HIRSEL_JOBS', '4')
-    tool = [bolt, f'-thread-count={jobs}', '-relocs']
+    # Limit BOLT's per-thread memory during instrumentation and rewriting.
+    tool = [bolt, '-thread-count=1', '-relocs']
     with tempfile.TemporaryDirectory(prefix='hirsel-bolt-') as scratch:
         work = Path(scratch)
         source = library

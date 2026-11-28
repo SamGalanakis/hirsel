@@ -28,3 +28,6 @@ StoreRetention v2164 archive_publish_early   archive ArchiveComplete       head 
 StoreRetention v2164 archive_unbounded       archive ArchiveBounded        source keeps every pending generation regardless of extra bytes
 StoreRetention v2164 archive_unfenced_expire archive ArchiveStagedSafe     expired floor erases an already uploaded future object
 StoreRetention v2164 archive_ignore_hold     archive ArchiveSourceReadable cleanup deletes a file still named by an unarchived source receipt
+StorePreviewHold v2164 preview_naive_renewal preview NoResurrection        lane 3435's single-CAS renewal: the authority checks the clock before it sends an extension and a child also reports expiry at the deadline, so an extension applied late revives it (§15.7 "Preview holds")
+StorePreviewHold v2164 preview_no_clamp      preview HeldReadable          a floor write passes the founding base of a hold it keeps (§15.7 "Preview holds")
+StorePreviewHold v2164 preview_unstamped     preview NoResurrection        a child accepts any hold under its identity, so a re-admission revives a child that reported expiry (§15.7 "Preview holds")

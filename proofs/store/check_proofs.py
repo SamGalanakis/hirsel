@@ -12,8 +12,12 @@ Checks, in order:
      The retention mutants include review 3177 F1's broken idle reading.
   4. Reachability witnesses: each behaviour the v2.164 fold adds (the idle
      step, lineage cells under a fork row, the optional drain) must occur.
-  5. The Python crash and stream models STORE-SPEC §3.9 cites (python/).
-  6. Retention traces (TraceStoreRetention.tla, seconds): an archive/gap/expire
+  5. Preview holds (StorePreviewHold.tla, STORE-SPEC §15.7): removal of a hold
+     at any time keeps every listed hold restorable, an operator clock further
+     ahead than the grace breaks only PromiseKept, and each race the protocol
+     must survive occurs.
+  6. The Python crash and stream models STORE-SPEC §3.9 cites (python/).
+  7. Retention traces (TraceStoreRetention.tla, seconds): an archive/gap/expire
      fixture conforms and publishing before a pack upload is refused. The crash sim's
      trace (traces/retention-trace-green.ndjson, or --trace FILE) conforms to
      StoreRetention; the hand-edited F1 trace (a cut that retires P while its
@@ -22,7 +26,8 @@ Checks, in order:
      these (the nightly board's laws stage, with the trace the run printed).
 
 A check passes only on the expected outcome: "pass" needs TLC's "No error has
-been found", a hole or mutant needs "Invariant <name> is violated". State counts
+been found", a hole or mutant needs "Invariant <name> is violated" (or "Action
+property <name> is violated"). State counts
 are printed, never asserted. `--save-traces` writes each known-hole
 counterexample to traces/. TLC lives under ~/.local/opt/fleet-formal (never in
 the repo), as for proofs/fleet.
@@ -78,6 +83,14 @@ BOUNDS = {
 }
 
 BOUNDS["archive"] = {**BOUNDS["retention"], "NKeys": "1", "MaxPack": "3"}
+# Preview holds over ETag-only head writes (STORE-SPEC §15.7 "Preview holds"):
+# two children, boundaries 2 and 3, five head writes, an operator clock at most
+# Skew ahead and a retirement grace equal to it (the tight case).
+BOUNDS["preview"] = {
+    "NKeys": "1", "MaxStamp": "3", "MaxPack": "2", "MaxCrash": "0",
+    "WithExport": "FALSE", "WithFork": "FALSE", "WithBuild": "FALSE", "WithTail": "FALSE",
+    "LastTime": "2", "MaxRev": "6", "Skew": "1", "Grace": "1", "Watch": '"none"',
+}
 ARCHIVE_INVARIANTS = ["ArchiveComplete", "ArchiveIntervals", "ArchiveBounded", "ArchiveSourceReadable", "ArchiveStagedSafe"]
 
 INVARIANTS = {
@@ -86,7 +99,17 @@ INVARIANTS = {
     "StoreCatchUp": ["NoFalseCorrupt", "InstallExact", "BackfillNoneEmpty", "HolderNoCorrupt",
                      "RecoveredPrefix", "SupersedePremise"],
     "StoreJanitor": ["HeadBatchesKept"],
+    "StorePreviewHold": ["ArchiveComplete", "HeldReadable", "NoResurrection"],
 }
+# Action properties a baseline also checks.
+PROPERTIES = {"StorePreviewHold": ["PromiseKept", "HoldStable"]}
+# Each must occur (`Watch` set, `NoWitness` violated): a retirement applied over
+# an extension in flight and the reverse, an extension of a lapsed hold, an
+# archiver write over other PUTs in flight, a child reporting expiry, an erase
+# beside another child's live hold, a re-admission of a mounted child, and a
+# genesis published after its hold left.
+PREVIEW_WATCH = ["retireOverExtend", "extendOverRetire", "lapsedExtend", "bumpOverFlight",
+                 "expiredSeen", "eraseBesideHold", "readmit", "staleMount"]
 
 # (name, module, rules, bounds, deep). Every invariant must hold. Deep baselines
 # (about 5 minutes each on 8 workers) run only with --deep.
@@ -99,6 +122,7 @@ BASELINES = [
     ("retention-v2164-tail", "StoreRetention", "v2164", "retention_tail", False),
     ("catchup-v2161", "StoreCatchUp", "v2161", "catchup", False),
     ("janitor", "StoreJanitor", None, "janitor", False),
+    ("preview-hold", "StorePreviewHold", "v2164", "preview", False),
     ("retention-v2164-export", "StoreRetention", "v2164", "retention_export", True),
 ]
 
@@ -139,24 +163,30 @@ def classpath():
     return f"{jar}:{comm}"
 
 
-def write_cfg(path, module, rules, mutant, bounds, invariants, track):
-    spec = "ArchiveSpec" if bounds == "archive" else "Spec"
+def write_cfg(path, module, rules, mutant, bounds, invariants, track, properties=(), extra=None):
+    spec = "ArchiveSpec" if bounds == "archive" else "PreviewSpec" if bounds == "preview" else "Spec"
     lines = [f"SPECIFICATION {spec}", "CONSTANTS"]
-    lines += [f"    {k} = {v}" for k, v in BOUNDS[bounds].items()]
-    if module == "StoreRetention":
+    lines += [f"    {k} = {v}" for k, v in {**BOUNDS[bounds], **(extra or {})}.items()]
+    if module in ("StoreRetention", "StorePreviewHold"):
         lines.append(f"    Track = {'TRUE' if track else 'FALSE'}")
     if rules is not None:
         lines.append(f'    Rules = "{rules}"')
     lines.append(f'    Mutant = "{mutant}"')
-    lines.append("INVARIANTS")
-    lines += [f"    {i}" for i in invariants]
+    if invariants:
+        lines.append("INVARIANTS")
+        lines += [f"    {i}" for i in invariants]
+    if properties:
+        lines.append("PROPERTIES")
+        lines += [f"    {i}" for i in properties]
     path.write_text("\n".join(lines) + "\n")
 
 
-def tlc(module, rules, mutant, bounds, invariants, tmp, track=False):
+def tlc(module, rules, mutant, bounds, invariants, tmp, track=False, properties=(), extra=None):
     tag = f"{module}-{rules}-{mutant}-{bounds}-{'-'.join(invariants) if len(invariants) == 1 else 'all'}"
+    tag += "".join(f"-{re.sub(r'[^A-Za-z0-9]', '', k + v)}" for k, v in (extra or {}).items())
+    tag += "".join(f"-{p}" for p in properties)
     cfg = Path(tmp) / f"{tag}.cfg"
-    write_cfg(cfg, module, rules, mutant, bounds, invariants, track)
+    write_cfg(cfg, module, rules, mutant, bounds, invariants, track, properties, extra)
     cmd = ["java", "-Xmx2g", "-XX:+UseParallelGC", "-cp", classpath(), "tlc2.TLC", "-noGenerateSpecTE",
            "-deadlock", "-workers", WORKERS, "-metadir", str(Path(tmp) / f"meta-{tag}"),
            "-config", str(cfg), f"{module}.tla"]
@@ -168,7 +198,7 @@ def tlc(module, rules, mutant, bounds, invariants, tmp, track=False):
     d = re.search(r"depth of the complete state graph search is (\d+)", out)
     stats = (f"{m.group(1)} generated, {m.group(2)} distinct" if m else "no state count") + \
             (f", depth {d.group(1)}" if d else "") + f", {secs:.1f}s"
-    violated = re.findall(r"Invariant (\w+) is violated", out)
+    violated = re.findall(r"(?:Invariant|Action property) (\w+) is violated", out)
     ok = "No error has been found" in out
     return ok, violated, stats, out
 
@@ -399,6 +429,32 @@ def check_traces(green, tmp, failures, from_test=False):
         failures.append("trace/early-removal")
 
 
+def check_preview(tmp, failures):
+    """Removing a hold at any time is safe for every listed hold; only the promise needs the clock."""
+    print("== Preview holds (integrity without a clock, the clock assumption, witnesses)", flush=True)
+    module, rules = "StorePreviewHold", "v2164"
+    ahead = {"Skew": BOUNDS["preview"]["LastTime"], "Grace": "0"}
+    ok, _, stats, out = tlc(module, rules, "none", "preview", INVARIANTS[module], tmp,
+                            properties=["HoldStable"], extra=ahead)
+    print(f"  {'PASS' if ok else 'FAIL'}  integrity with an unbounded operator clock: {stats}", flush=True)
+    if not ok:
+        failures.append("preview/clock-free")
+        print(trace_text(out), file=sys.stderr)
+    _, violated, stats, _ = tlc(module, rules, "none", "preview", [], tmp, properties=["PromiseKept"], extra=ahead)
+    hit = "PromiseKept" in violated
+    print(f"  {'PASS' if hit else 'FAIL'}  PromiseKept {'needs' if hit else 'does NOT need'} "
+          f"Grace >= Skew; {stats}", flush=True)
+    if not hit:
+        failures.append("preview/promise-needs-clock")
+    for watch in PREVIEW_WATCH:
+        _, violated, stats, _ = tlc(module, rules, "none", "preview", ["NoWitness"], tmp,
+                                    extra={"Watch": f'"{watch}"'})
+        hit = "NoWitness" in violated
+        print(f"  {'REACHED' if hit else 'UNREACHED'}  {watch}; {stats}", flush=True)
+        if not hit:
+            failures.append(f"preview/{watch}")
+
+
 def trace_text(out):
     lines = out.splitlines()
     start = next((i for i, l in enumerate(lines) if "is violated" in l), None)
@@ -437,7 +493,8 @@ def main():
                 print(f"  skip  {name} (--deep)", flush=True)
                 continue
             invariants = ARCHIVE_INVARIANTS if bounds == "archive" else INVARIANTS[module]
-            ok, violated, stats, out = tlc(module, rules, "none", bounds, invariants, tmp)
+            ok, violated, stats, out = tlc(module, rules, "none", bounds, invariants, tmp,
+                                           properties=PROPERTIES.get(module, ()))
             print(f"  {'PASS' if ok else 'FAIL'}  {name}: {stats}", flush=True)
             if not ok:
                 failures.append(name)
@@ -477,6 +534,8 @@ def main():
             print(f"  {'REACHED' if hit else 'UNREACHED'}  {inv}; {stats}", flush=True)
             if not hit:
                 failures.append(f"cover/{inv}")
+
+        check_preview(tmp, failures)
 
     if not args.skip_python:
         print("== STORE-SPEC §3.9 Python models", flush=True)

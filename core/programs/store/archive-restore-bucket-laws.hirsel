@@ -99,3 +99,45 @@ fn restore_bucket_law(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result
     deploy_result(close(take attached))?
     deploy_result(close_journal_service(take svc))
 }
+
+@test
+fn test_bucket_cut_preserves_listed_cold_pack(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 3450, None, list.new())
+    let checked = bucket_cut_locator_law(sim, tasks)
+    let _ = bucket_law_finish(take sim)
+    checked
+}
+
+fn bucket_cut_locator_law(sim: BucketSim, tasks: Tasks) -> Result[(), Error] waits {
+    let mut client = bucket_law_client(sim, tasks, "s3.test", 3450)?
+    let owner = StoreId(hi: 73, lo: 9)
+    let (kept, take listed, _) = l84_write_blob_pack(mut client, owner, 1, 40, 1, 1025)?
+    let (retired, old, _) = l84_write_blob_pack(mut client, owner, 2, 41, 1, 1025)?
+    let mut zero = take listed
+    zero.live = 0
+    let mut source = history.history_reader(take client, 0)
+    history.fixture_set_pack(mut source.locator, kept)
+    history.fixture_set_pack(mut source.locator, retired)
+    let db = memory_at(sim.time, owner, result.unwrap(sized(Memory, 1074790400u64)))
+    let holders = cut_participants(db, NoHolderChange)?
+    let mut base = failure_result_from_rep(manifest.page_retry_base(manifest.new_page_locations(), map.new(), holders.holders, holders.roots))?
+    failure_result_from_rep(types.capacity(manifest.disk_index_put(mut base.locations.packs, 1, take zero, manifest.pack_edge_charge)))?
+    failure_result_from_rep(types.capacity(manifest.disk_index_put(mut base.locations.packs, 2, old, manifest.pack_edge_charge)))?
+    let mut queue = manifest.no_cut_queue()
+    list.push(mut queue.retiring, 2u64)
+    let mut stamp = 42u64
+    let plan = plan_page_cut(base, holders.holders, manifest.empty_paged_lists(), queue, manifest.empty_lineage(), None, 3, 65536, map.new(), None, mut stamp)?
+    let mut buffers = failure_result_from_rep(manifest.cut_output_buffers(plan, cut_manifest_size(db, NoHolderChange), 65536))?
+    let mut workspace = failure_result_from_rep(history.history_buffers(65536))?
+    let deadline = std.object.deadline_after_ms(source.client, BUCKET_LAW_OP_MS)
+    let (_, take refs) = failure_result_from_rep(object_writer.history_write_page_cut(mut source.client, store_key_to_rep(owner), 1, 1, take plan, source.locator, None, mut buffers, mut workspace, deadline))?
+    if list.len(refs) == 0 || refs[0u64].seq != kept.seq || refs[0u64].digest != kept.digest {
+        fail("Bucket cut locator disagrees with Tiered pack retirement")
+    }
+    for item in refs {
+        if item.seq == retired.seq {
+            fail("Bucket cut locator kept a retired pack")
+        }
+    }
+    close(take db)
+}

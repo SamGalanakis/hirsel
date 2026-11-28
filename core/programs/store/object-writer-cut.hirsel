@@ -33,7 +33,17 @@ pub fn history_write_page_cut(mut client: std.object.Client, id: types.StoreKey,
     history_write_pack_run(mut client, id, epoch, kind, cache, lists.run_packs, mut known, mut packs, mut buffers, mut workspace, deadline)?
     let mut cursor = std.omap.range(known.packs.values, Unbounded, Unbounded)
     while let Some((seq, record)) = std.omap.next(mut cursor) {
-        if record.live == 0 {
+        // For Cold packs the probe decides retirement. A zero live estimate
+        // can still be listed, and a retired pack can still have a positive estimate.
+        let retained = if record.class >= 3 {
+            match std.page.lookup(lists.roots.packs, types.key_word(seq)) {
+                Some(_) => true,
+                None => false,
+            }
+        } else {
+            record.live != 0
+        }
+        if !retained {
             continue
         }
         let item = match map.get(packs, seq) {

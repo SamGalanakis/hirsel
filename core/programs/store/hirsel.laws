@@ -260,6 +260,7 @@ store@1/store/test_archive_retention_trace src=5c6789488ef56a8c sig=91cdae87b33a
 store@1/store/test_as_if_alone_page_edits src=23ba97f928075324 sig=665b03d7d292d97a run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_assembly_indexed_recreate src=e5600b79dd8968d9 sig=940e4dcbf0f3ec54 run=dbf6722727633166 bug=- oracle=- rows=pending
 store@1/store/test_branches src=29e32ef0243992ad sig=120be84180f1345b run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_bucket_cut_preserves_listed_cold_pack src=144f3a3298769bea sig=80aef014219b13d8 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_call_info src=8da649e8b3acdc12 sig=1180f1e0045170e6 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_callback_shares_staged src=abe199cbd89bfbd1 sig=7e9837204b311077 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_catalog_invalid src=eba24df121a249e7 sig=007dd18f68972941 run=aff7b6b8625190d8 bug=- oracle=- rows=pending

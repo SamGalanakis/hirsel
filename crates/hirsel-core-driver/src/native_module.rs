@@ -185,8 +185,14 @@ impl CheckProduct {
                 "build_pack_module requires at least one export".into(),
             ));
         }
-        let mut decls = Vec::with_capacity(exports.len());
-        for path in exports {
+        // A module's candidates form a set. Registration order belongs to the
+        // bound Place, so it must not change this realization's key or bytes.
+        let candidates: BTreeSet<_> = exports.iter().collect();
+        if candidates.len() != exports.len() {
+            return Err(NativeStop::Entry("duplicate module export".into()));
+        }
+        let mut decls = Vec::with_capacity(candidates.len());
+        for path in candidates {
             let decl = self.pack_exports.get(path).ok_or_else(|| {
                 NativeStop::Entry(format!("no closed PACK-14 export available for {path}"))
             })?;

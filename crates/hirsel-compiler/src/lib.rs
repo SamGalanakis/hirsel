@@ -8,7 +8,7 @@
 use hirsel_core_ids::ContentHash;
 use hirsel_core_layout::Target;
 use hirsel_mod::{Backend, Module};
-use std::io::Read;
+use std::io::{Read, Seek, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Component, Path, PathBuf};
@@ -200,13 +200,33 @@ impl Service {
     }
 
     pub fn compile(&self, request: &Request<'_>) -> Result<Built, Refusal> {
-        let input: u64 = request
+        self.compile_exports(request, &[])
+    }
+
+    /// Compile the selected closed functions into a single module in the capped
+    /// worker. Paths are fully qualified. An empty selection emits the program root.
+    pub fn compile_exports(
+        &self,
+        request: &Request<'_>,
+        exports: &[&str],
+    ) -> Result<Built, Refusal> {
+        let input = request
             .files
             .iter()
-            .map(|(name, bytes)| (name.len() + bytes.len()) as u64)
-            .sum();
+            .map(|(name, bytes)| (name.len() as u64).saturating_add(bytes.len() as u64))
+            .chain(
+                exports
+                    .iter()
+                    .map(|path| (path.len() as u64).saturating_add(1)),
+            )
+            .fold(0u64, u64::saturating_add);
         if input > self.caps.input_bytes {
             return Err(Refusal::Limit(Limit::Input));
+        }
+        for path in exports {
+            if path.is_empty() || path.contains(['\r', '\n']) {
+                return Err(Refusal::Rejected("invalid module export path".into()));
+            }
         }
         for (name, _) in request.files {
             let inside = Path::new(name)
@@ -244,6 +264,16 @@ impl Service {
         write().map_err(unavailable)?;
 
         let result = job.0.join("module-result");
+        let exports = if exports.is_empty() {
+            Stdio::null()
+        } else {
+            let mut file = tempfile::tempfile_in(&job.0).map_err(unavailable)?;
+            for export in exports {
+                writeln!(file, "{export}").map_err(unavailable)?;
+            }
+            file.rewind().map_err(unavailable)?;
+            file.into()
+        };
         let mut command = Command::new(&self.worker);
         command
             .arg(hirsel_core_ids::module_build::WORKER)
@@ -263,7 +293,7 @@ impl Service {
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("HOME", &job.0)
             .current_dir(&job.0)
-            .stdin(Stdio::null())
+            .stdin(exports)
             .stdout(std::fs::File::create(&result).map_err(unavailable)?)
             .stderr(Stdio::piped())
             .process_group(0);

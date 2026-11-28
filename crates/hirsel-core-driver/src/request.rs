@@ -20,6 +20,7 @@ mod dispatch;
 mod flags;
 pub use dispatch::main;
 mod lean;
+mod module;
 mod output;
 use output::{Output, ReachableOutput, admit_target, output_kind};
 mod packages;
@@ -791,15 +792,10 @@ fn run_compiler_request(
                 || output::default_path(output_kind),
                 |scratch| scratch.path().join("program"),
             );
-            let link = if emit_recipe {
-                Link::Driver(PathBuf::new())
+            let (link, archive) = if emit_recipe || output_kind == OutputKind::Module {
+                (Link::Driver(PathBuf::new()), PathBuf::new())
             } else {
-                select_link(cc)?
-            };
-            let archive = if emit_recipe {
-                PathBuf::new()
-            } else {
-                select_runtime()?
+                (select_link(cc)?, select_runtime()?)
             };
             let mut options = NativeOptions::development(
                 target.clone(),
@@ -865,28 +861,32 @@ fn run_compiler_request(
         let (product, image) = driver.produce_image(request, &mut meter)?;
         (crate::Checked::Product(product, None), image)
     } else {
-        let checked = if !source_core
+        let libraries = ProductLibraries::for_request(source_tree, source_std);
+        let use_product = !source_core
             && !(source_tree && source_std)
-            && (native_command || core_product.is_some())
-        {
+            && (native_command || core_product.is_some());
+        let exports = if output_kind == OutputKind::Module {
+            module::exports()?
+        } else {
+            vec![]
+        };
+        let request = if use_product {
             let root = core_product.unwrap_or_else(crate::PackageProduct::default_cache);
-            let libraries = if source_tree {
-                ProductLibraries::SourceTree
-            } else if source_std {
-                ProductLibraries::Core
-            } else {
-                ProductLibraries::BundledStd
-            };
-            driver.check_package_product(
+            Driver::prepare_package_product(
                 request,
                 &root,
                 &mut meter,
-                (native_command, libraries),
-                record.as_ref(),
+                (native_command && exports.is_empty(), libraries),
             )
         } else {
-            driver.check_recorded(request, &mut meter, record.as_ref())
+            Ok(request)
         };
+        if !exports.is_empty() {
+            let options = prepared.expect("module worker has native options")?;
+            return module::build(request?, &exports, &mut meter, &options, &sources);
+        }
+        let checked =
+            request.and_then(|request| driver.check_recorded(request, &mut meter, record.as_ref()));
         let checked = output::check_result(checked, &sources, command, json)?;
         (checked, None)
     };

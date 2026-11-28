@@ -109,6 +109,11 @@ pub(super) fn store_tool(
     ))
 }
 
+pub(super) fn module_worker() -> bool {
+    std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(hirsel_core_ids::module_build::WORKER))
+}
+
 pub(super) fn conclude(outcome: Outcome) -> Result<Outcome, Box<dyn std::error::Error>> {
     conclude_with_remote(outcome, None)
 }
@@ -266,10 +271,7 @@ pub(super) fn finish(
         }
         return conclude_with_remote(Outcome::Exit(env.render(true)), remote);
     }
-    if command == "build"
-        && std::env::args_os().nth(1).as_deref()
-            == Some(std::ffi::OsStr::new(hirsel_core_ids::module_build::WORKER))
-    {
+    if command == "build" && module_worker() {
         use hirsel_core_ids::module_build::ModuleBuild;
         let reply = if let Some(reason) = &output.module_unsupported {
             ModuleBuild::Unsupported(reason.clone())

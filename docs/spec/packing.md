@@ -196,9 +196,11 @@ fleet worker may be configured with a shared builder on the same machine instead
 program sees one `Compiler` capability either way.
 
 A request carries one package's source files (path and bytes), a target, a backend and
-policy bits. The worker is the `hirsel` tool: `hirsel build --emit module` checks the
-source, compiles the units its entry reaches, and links them into one module, keeping the
-sections the entry reaches. A reply is a module (its bytes, digest and key) or one refusal:
+policy bits. The host may select closed named exports by fully qualified path. Their
+names count toward the input cap. The worker checks the source and links the union
+of the selected functions' reachable units with their PACK-15 adapters. Reordering
+the selection preserves the module bytes and key. An empty selection builds the
+program entry. A reply is a module (its bytes, digest and key) or one refusal:
 
 | refusal | when | cached |
 |---|---|---|

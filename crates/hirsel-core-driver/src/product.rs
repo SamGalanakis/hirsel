@@ -260,21 +260,18 @@ impl Driver {
         self.check_package_product(request, root, meter, (true, ProductLibraries::Core), None)?
             .product()
     }
-    /// Check over the selected library product. Core and a std checked from
-    /// source share one image so core templates see std's codec declarations.
-    pub(crate) fn check_package_product(
-        &mut self,
+    /// Prepare the compiler's library input for an ordinary or multi-export check.
+    pub(crate) fn prepare_package_product(
         mut request: CheckRequest,
         root: &Path,
         meter: &mut Meter,
         (reachable, libraries): (bool, ProductLibraries),
-        record: Option<&crate::request_record::Request>,
-    ) -> io::Result<crate::Checked> {
+    ) -> io::Result<CheckRequest> {
         if reachable && let LibraryInput::Image(image) = &request.library {
             request.library = LibraryInput::ReachableImage(Arc::clone(image));
         }
         if !matches!(request.library, LibraryInput::Sources) {
-            return self.check_recorded(request, meter, record);
+            return Ok(request);
         }
         let Some(core) = request
             .inputs
@@ -282,7 +279,7 @@ impl Driver {
             .iter()
             .find(|p| p.package == request.inputs.core)
         else {
-            return self.check_recorded(request, meter, record);
+            return Ok(request);
         };
         let source_tree = matches!(libraries, ProductLibraries::SourceTree);
         let is_bundled = !source_tree && matches_bundle(core, "core", bundled::SOURCES, &[]);
@@ -323,7 +320,7 @@ impl Driver {
         } else {
             LibraryInput::Image(product.image)
         };
-        self.check_recorded(request, meter, record)
+        Ok(request)
     }
 }
 

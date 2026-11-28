@@ -10,8 +10,21 @@ hirsel_guard::install!();
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let [_, worker, scratch, package, target, cpu, memory, wall] = &args[..] else {
-        eprintln!("usage: compile <hirsel> <scratch> <package> <target> <cpu> <memory> <wall>");
+    let [
+        _,
+        worker,
+        scratch,
+        package,
+        target,
+        cpu,
+        memory,
+        wall,
+        exports @ ..,
+    ] = &args[..]
+    else {
+        eprintln!(
+            "usage: compile <hirsel> <scratch> <package> <target> <cpu> <memory> <wall> [fully qualified export ...]"
+        );
         std::process::exit(2);
     };
     let caps = Caps {
@@ -34,6 +47,7 @@ fn main() {
         .collect();
     let target = Target::from_triple(target).unwrap();
     let service = Service::new(worker.into(), scratch.into(), caps, 1, 0);
+    let exports = exports.iter().map(String::as_str).collect::<Vec<_>>();
     let request = Request {
         files: &files,
         target,
@@ -41,10 +55,17 @@ fn main() {
         policy: 0,
     };
     let started = Instant::now();
-    let answer = service.compile(&request);
+    let answer = service.compile_exports(&request, &exports);
     let took = started.elapsed();
     match answer {
-        Ok(built) => println!("ok {} bytes in {took:?}", built.bytes.len()),
+        Ok(built) => println!(
+            "ok {} bytes, {} entries in {took:?}",
+            built.bytes.len(),
+            hirsel_mod::Module::parse(&built.bytes)
+                .unwrap()
+                .entries()
+                .count()
+        ),
         Err(refusal) => println!("{refusal:?} in {took:?}"),
     }
 }

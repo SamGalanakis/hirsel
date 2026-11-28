@@ -1,3 +1,4 @@
+use crate::product::ProductLibraries;
 use crate::{
     CheckProduct, CheckRequest, ContentHash, CorpusManifest, Meter, ModuleInput, Site,
     reachability, request_record,
@@ -65,7 +66,33 @@ impl std::error::Error for RejectedCheck {
     }
 }
 
+impl ProductLibraries {
+    pub(crate) fn for_request(source_tree: bool, source_std: bool) -> Self {
+        if source_tree {
+            Self::SourceTree
+        } else if source_std {
+            Self::Core
+        } else {
+            Self::BundledStd
+        }
+    }
+}
+
 impl Driver {
+    /// Check over the selected library product. Core and a std checked from
+    /// source share one image so core templates see std's codec declarations.
+    pub(crate) fn check_package_product(
+        &mut self,
+        request: CheckRequest,
+        root: &std::path::Path,
+        meter: &mut Meter,
+        mode: (bool, ProductLibraries),
+        record: Option<&crate::request_record::Request>,
+    ) -> io::Result<crate::Checked> {
+        let request = Self::prepare_package_product(request, root, meter, mode)?;
+        self.check_recorded(request, meter, record)
+    }
+
     pub fn check(
         &mut self,
         request: CheckRequest,

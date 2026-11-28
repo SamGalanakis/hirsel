@@ -5,6 +5,19 @@ use crate::units::ledger::conn::ConnCore;
 use hirsel_core_layout::cross::{self, ELEMENT, PADDING};
 use std::{borrow::Cow, ops::Range};
 
+pub(super) fn round8(n: u64) -> u64 {
+    n.div_ceil(8) * 8
+}
+
+pub(super) unsafe fn word(at: *const u8) -> u64 {
+    // SAFETY: the caller's value holds a word here.
+    unsafe { at.cast::<u64>().read_unaligned() }
+}
+pub(super) unsafe fn set_word(at: *mut u8, v: u64) {
+    // SAFETY: as `word`.
+    unsafe { at.cast::<u64>().write_unaligned(v) }
+}
+
 /// The rows of `rows` that hold for the value at `value`: a variant's owner
 /// words and padding for its active case only (`cross::live`). Read before
 /// anything rewrites an owner word, since a variant's tag can sit in one (a

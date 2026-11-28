@@ -122,6 +122,7 @@ pub struct Execution {
     /// the host drops the generation after joining its workers and closing admission.
     pins: std::sync::Mutex<PinTable>,
     pool: std::sync::OnceLock<u64>,
+    pub(crate) guest_owners: crate::code::custody::GuestOwners,
 }
 
 impl Execution {
@@ -137,6 +138,7 @@ impl Execution {
             code_fault: crate::code::Record::new(),
             pins: std::sync::Mutex::new(PinTable::new()),
             pool: std::sync::OnceLock::new(),
+            guest_owners: crate::code::custody::GuestOwners::new(),
         }
     }
 
@@ -271,6 +273,14 @@ impl Execution {
         match self.end_reason() {
             Some(EndReason::RunStop(stop)) => Some(stop),
             _ => None,
+        }
+    }
+}
+
+impl Drop for Execution {
+    fn drop(&mut self) {
+        if self.is_ended() {
+            self.guest_owners.release_stopped();
         }
     }
 }

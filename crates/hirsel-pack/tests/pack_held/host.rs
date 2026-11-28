@@ -116,3 +116,48 @@ fn prelinked_pools_keep_distinct_held_domains() {
     assert!(unsafe { hirsel_core_held_take(held, &hash, (&raw mut output as *mut u64).cast()) });
     assert_eq!(output, value);
 }
+
+#[test]
+fn stop_returns_loaded_code_slot_and_literal_owners() {
+    use hirsel_core_rt::{
+        causes::CauseDataRef,
+        code,
+        run_stop::{self, Stop},
+    };
+
+    let _alone = alone();
+    let (loader, pool) = primary_loader();
+    let module = compile_pack_module(
+        "pub fn text() -> String { \"stopped literal\" }",
+        &["text"],
+        Backend::Cranelift,
+    );
+    loader.admit_module(&module.bytes).unwrap();
+    let raw = module.load_raw(loader, "text");
+    let pc = raw.entry();
+    let owner =
+        unsafe { CauseDataRef::retain_raw(raw.cause_owner().unwrap() as *const _).unwrap() };
+    let status = run_in_worker(1 << 20, |ctx| unsafe {
+        let text: unsafe extern "C" fn(*mut Context, *mut [usize; 3]) -> u8 =
+            std::mem::transmute(pc);
+        let status = text(ctx, &mut [0; 3]);
+        if status != 0 {
+            return status;
+        }
+        let handle = code::hirsel_core_code_bind(raw.descriptor() as *const u8);
+        let shared = code::hirsel_core_code_share(handle);
+        let slot = code::hirsel_core_code_slot_new(pool);
+        assert_eq!(code::hirsel_core_code_activate(slot, 0, shared, &mut 0), 0);
+        drop(raw);
+        run_stop::raise(Stop::from_static(b"CustodyStop"));
+    });
+    assert_eq!(
+        status,
+        Err(EndReason::RunStop(Stop::from_static(b"CustodyStop")))
+    );
+    loader.reclaim().unwrap();
+    assert_eq!(
+        (loader.resolve(pc).is_some(), owner.ref_count()),
+        (false, 1)
+    );
+}

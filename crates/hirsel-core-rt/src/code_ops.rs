@@ -5,6 +5,7 @@
 //! every pool's text band gives a bit-0 tagged descriptor pointer (`ptr | 1`) with
 //! process-lifetime backing, so it works in standalone binaries without a pack host.
 
+use super::custody::Owner;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -90,7 +91,7 @@ pub fn register_ops(ops: &'static CodeOps) {
 }
 
 #[inline(always)]
-fn ops() -> Option<&'static CodeOps> {
+pub(super) fn ops() -> Option<&'static CodeOps> {
     let p = CODE_OPS.load(Ordering::Acquire);
     if p.is_null() {
         None
@@ -224,6 +225,7 @@ pub unsafe extern "C" fn hirsel_core_code_bind(descriptor: *const u8) -> *mut u8
         eprintln!("hirsel: code.bind named the entry {entry:#x} of an unloaded image");
         std::process::abort();
     }
+    Owner::Code.acquire(handle);
     handle
 }
 
@@ -247,7 +249,7 @@ pub unsafe extern "C" fn hirsel_core_code_load(
     };
     // SAFETY: caller provides 32-byte key/entry_id/sig buffers and output pointers.
     unsafe {
-        (ops.load_by_key)(
+        let status = (ops.load_by_key)(
             loader,
             key.cast::<[u8; 32]>(),
             entry_id.cast::<[u8; 32]>(),
@@ -256,7 +258,11 @@ pub unsafe extern "C" fn hirsel_core_code_load(
             out_code,
             out_word,
             out_bytes,
-        )
+        );
+        if status == 0 {
+            Owner::Code.acquire(*out_code);
+        }
+        status
     }
 }
 
@@ -271,7 +277,11 @@ pub unsafe extern "C" fn hirsel_core_code_share(code: *mut u8) -> *mut u8 {
     }
     match ops() {
         // SAFETY: `code` is a live dynamic handle.
-        Some(ops) => unsafe { (ops.code_share)(code) },
+        Some(ops) => {
+            let shared = unsafe { (ops.code_share)(code) };
+            Owner::Code.acquire(shared);
+            shared
+        }
         None => code,
     }
 }
@@ -287,6 +297,7 @@ pub unsafe extern "C" fn hirsel_core_code_drop(code: *mut u8) {
     }
     if let Some(ops) = ops() {
         // SAFETY: `code` is an owned dynamic handle.
+        Owner::Code.transfer(code);
         unsafe { (ops.code_drop)(code) };
     }
 }
@@ -299,7 +310,11 @@ pub unsafe extern "C" fn hirsel_core_code_drop(code: *mut u8) {
 pub unsafe extern "C" fn hirsel_core_code_slot_new(loader: u64) -> *mut u8 {
     match ops() {
         // SAFETY: registered pack host callback.
-        Some(ops) => unsafe { (ops.slot_new)(loader) },
+        Some(ops) => {
+            let slot = unsafe { (ops.slot_new)(loader) };
+            Owner::Slot.acquire(slot);
+            slot
+        }
         None => ptr::null_mut(),
     }
 }
@@ -315,6 +330,7 @@ pub unsafe extern "C" fn hirsel_core_code_slot_drop(slot: *mut u8) {
     }
     if let Some(ops) = ops() {
         // SAFETY: `slot` is an owned slot handle.
+        Owner::Slot.transfer(slot);
         unsafe { (ops.slot_drop)(slot) };
     }
 }

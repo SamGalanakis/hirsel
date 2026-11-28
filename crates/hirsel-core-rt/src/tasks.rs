@@ -28,7 +28,7 @@ mod storage;
 mod timers;
 pub use stop::run_root;
 pub(crate) use stop::{
-    host_operation, on_host_stack, run_root_contained, run_root_with_unit, wake_all_waiters,
+    host_operation, on_host_stack, run_root_contained, spawn_unit_thread, wake_all_waiters,
 };
 use timers::{Timer, TimerHeap};
 mod transfer;
@@ -466,15 +466,7 @@ unsafe fn trim_run_heap(root: *mut Task) {
     }
 }
 
-use stop::{recycle_ended, switch_to_idle, switch_to_idle_exit, switch_to_task};
-
-/// Return what ended tasks left resident: retained task-heap pages and this
-/// run's surplus stacks.
-fn release_idle(run: *mut Scheduler) {
-    crate::task_heap::purge();
-    // SAFETY: the run pins its stock and only this OS thread uses it.
-    unsafe { (*run).stacks.release() };
-}
+use stop::{recycle_ended, release_idle, switch_to_idle, switch_to_idle_exit, switch_to_task};
 
 struct Scheduler {
     #[cfg(feature = "prof")]
@@ -3556,6 +3548,9 @@ pub(crate) unsafe fn run_root_with_unit_contained(
     unit: Option<&mut crate::units_lang::LangUnit>,
     group: UnitGroup,
 ) -> Result<u8, crate::run_stop::EndReason> {
+    let _children = crate::units::running()
+        .is_none()
+        .then(stop::UnitThreads::enter);
     // SAFETY: forwarded caller contract.
     let ended = unsafe {
         run_root_scheduler(

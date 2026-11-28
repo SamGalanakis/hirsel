@@ -60,26 +60,13 @@ pub(crate) mod takes;
 pub(crate) use packing::CrossSend;
 use packing::{
     drop_packed_owners, free_owners, inbox_owners, item_charge, live_charge, live_rows, pack,
-    unpack, unpack_owners,
+    round8, set_word, unpack, unpack_owners, word,
 };
 
 /// Keyed by addresses and slot ids; a fixed seed keeps lookups cheap.
 type Map<K, V> = HashMap<K, V, foldhash::fast::FixedState>;
 fn map<K, V>() -> Map<K, V> {
     HashMap::with_hasher(foldhash::fast::FixedState::with_seed(0))
-}
-
-fn round8(n: u64) -> u64 {
-    n.div_ceil(8) * 8
-}
-
-unsafe fn word(at: *const u8) -> u64 {
-    // SAFETY: the caller's value holds a word here.
-    unsafe { at.cast::<u64>().read_unaligned() }
-}
-unsafe fn set_word(at: *mut u8, v: u64) {
-    // SAFETY: as `word`.
-    unsafe { at.cast::<u64>().write_unaligned(v) }
 }
 
 // The unit beside a scheduler
@@ -1022,7 +1009,7 @@ fn helper_main(
         } else {
             (*run).scheduler
         };
-        let failed = tasks::run_root_with_unit(
+        let outcome = tasks::run_root_with_unit_contained(
             &mut context,
             body,
             input.as_mut_ptr(),
@@ -1033,6 +1020,16 @@ fn helper_main(
             Some(&mut lu),
             tape_group(&tape),
         );
+        let failed = match outcome {
+            Ok(failed) => failed,
+            Err(end) => {
+                if let crate::run_stop::EndReason::RunStop(stop) = end {
+                    crate::run_stop::record(stop);
+                }
+                files.close_all(&mut context);
+                return;
+            }
+        };
         // Each connection still retained has its last client in another unit;
         // the owner holds its charge from the end take on. Its own copy here
         // goes back to this helper's limit, which ends with it.

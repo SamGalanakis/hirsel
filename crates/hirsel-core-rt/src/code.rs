@@ -6,6 +6,8 @@
 
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
+#[path = "code_custody.rs"]
+pub(crate) mod custody;
 #[path = "held.rs"]
 mod held;
 #[path = "code_ops.rs"]

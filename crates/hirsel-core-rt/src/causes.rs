@@ -560,6 +560,7 @@ pub unsafe fn record(context: &mut Context, mut cause: Cause) {
         if cause.message.len == 0 {
             if let Some(owner) = CauseData::find_literal_owner(cause.message.data) {
                 // SAFETY: a truncated-to-empty loaded static string transfers its CauseData count.
+                crate::code::custody::Owner::Literal.transfer(owner);
                 unsafe { CauseData::release(owner) };
             }
             cause.message.data = ptr::null_mut();
@@ -571,6 +572,7 @@ pub unsafe fn record(context: &mut Context, mut cause: Cause) {
             (hit.owner, true)
         } else if let Some(owner) = CauseData::find_literal_owner(cause.message.data) {
             // Owned loaded static String already holds +1 count on `owner`; move it into the cell.
+            crate::code::custody::Owner::Literal.transfer(owner);
             (owner, true)
         } else {
             (ptr::null(), false)

@@ -369,6 +369,7 @@ pub unsafe extern "C" fn hirsel_core_static_string(ptr: *const u8, len: usize) -
         return ptr.cast_mut();
     }
     if let Some(hit) = crate::code::locate_literal(ptr.addr(), len) {
+        crate::code::custody::Owner::Literal.acquire(hit.owner);
         return hit.relocated.cast_mut();
     }
     ptr.cast_mut()
@@ -389,6 +390,7 @@ pub unsafe extern "C" fn hirsel_core_static_frozen(ptr: *const u8, len: usize) -
         };
     }
     if let Some(hit) = crate::code::locate_literal(ptr.addr(), len) {
+        crate::code::custody::Owner::Literal.acquire(hit.owner);
         debug_assert_eq!(hit.owner.addr() & 1, 0);
         return StaticFrozen {
             data: hit.relocated.cast_mut(),
@@ -410,6 +412,7 @@ pub unsafe extern "C" fn hirsel_core_static_frozen(ptr: *const u8, len: usize) -
 pub unsafe extern "C" fn hirsel_core_release_static_bytes(ptr: *const u8) {
     if let Some(owner) = CauseData::find_literal_owner(ptr) {
         // SAFETY: caller transfers one owned count on `owner`.
+        crate::code::custody::Owner::Literal.transfer(owner);
         unsafe { CauseData::release(owner) };
     }
 }
@@ -431,6 +434,7 @@ pub unsafe fn drop_frozen_bytes(context: *const crate::Context, carrier: *const 
         if owner_addr != 0 {
             let owner: *const CauseData = ptr::with_exposed_provenance(owner_addr);
             // SAFETY: non-zero tagged static metadata owns one CauseData count.
+            crate::code::custody::Owner::Literal.transfer(owner);
             unsafe { CauseData::release(owner) };
         }
         return;

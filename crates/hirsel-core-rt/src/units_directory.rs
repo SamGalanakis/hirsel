@@ -185,12 +185,7 @@ pub(crate) fn spawn_language_job(job: Job) {
     match spawn_job(job) {
         Ok(()) => {}
         Err(SpawnErr::NotPooled(job)) => {
-            std::thread::Builder::new()
-                .name("hirsel-unit".into())
-                .spawn(job)
-                .unwrap_or_else(|_| {
-                    crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostThreads"))
-                });
+            crate::tasks::spawn_unit_thread(job);
         }
         Err(SpawnErr::Exhausted {
             live,

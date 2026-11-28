@@ -62,38 +62,51 @@ pub(crate) unsafe fn run_root_contained(
     }
 }
 
-/// # Safety
-/// As for [`run_root`].
-#[allow(clippy::too_many_arguments)]
-pub(crate) unsafe fn run_root_with_unit(
-    context: *mut Context,
-    body: Body,
-    argument: *mut u8,
-    destination: *mut u8,
-    input_bytes: usize,
-    result_bytes: usize,
-    provider: SchedulerProvider,
-    unit: Option<&mut crate::units_lang::LangUnit>,
-    group: UnitGroup,
-) -> u8 {
-    // SAFETY: forwarded caller contract.
-    match unsafe {
-        super::run_root_with_unit_contained(
-            context,
-            body,
-            argument,
-            destination,
-            input_bytes,
-            result_bytes,
-            provider,
-            unit,
-            group,
-        )
-    } {
-        Ok(failed) => failed,
-        Err(EndReason::RunStop(stop)) => crate::run_stop::raise(stop),
-        Err(EndReason::HostStop) => 0,
+thread_local! {
+    static UNIT_THREADS: std::cell::RefCell<Vec<std::thread::JoinHandle<()>>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+/// Dedicated Unit workers inherit their parent's execution. A scheduler joins
+/// its own children before returning the configuration and foreign-call state.
+pub(super) struct UnitThreads(Vec<std::thread::JoinHandle<()>>);
+
+impl UnitThreads {
+    pub(super) fn enter() -> Self {
+        Self(UNIT_THREADS.take())
     }
+}
+
+impl Drop for UnitThreads {
+    fn drop(&mut self) {
+        let children = UNIT_THREADS.replace(std::mem::take(&mut self.0));
+        for child in children {
+            if child.join().is_err() {
+                crate::run_stop::record(Stop::from_static(b"WorkerPanic"));
+            }
+        }
+    }
+}
+
+pub(crate) fn spawn_unit_thread(job: crate::units::Job) {
+    let generation = crate::run_stop::current_execution();
+    let handle = std::thread::Builder::new()
+        .name("hirsel-unit".into())
+        .spawn(move || {
+            // SAFETY: the parent scheduler joins this worker before its execution leaves.
+            let _scope = generation.map(|g| unsafe { crate::run_stop::ExecutionScope::enter(g) });
+            job();
+        })
+        .unwrap_or_else(|_| crate::run_stop::raise(Stop::from_static(b"HostThreads")));
+    UNIT_THREADS.with_borrow_mut(|threads| {
+        for done in threads.extract_if(.., |child| child.is_finished()) {
+            if done.join().is_err() {
+                crate::run_stop::record(Stop::from_static(b"WorkerPanic"));
+            }
+        }
+        threads.push(handle);
+    });
 }
 
 /// Run non-suspending OS code off the language fiber.
@@ -257,4 +270,12 @@ pub(super) unsafe fn recycle_ended(run: *mut Scheduler, root: *mut Task, task: *
             .stacks
             .recycle_ended(task == root, (*task).stack.take().unwrap());
     }
+}
+
+/// Return what ended tasks left resident: retained task-heap pages and this
+/// run's surplus stacks.
+pub(super) fn release_idle(run: *mut Scheduler) {
+    crate::task_heap::purge();
+    // SAFETY: the run pins its stock and only this OS thread uses it.
+    unsafe { (*run).stacks.release() };
 }

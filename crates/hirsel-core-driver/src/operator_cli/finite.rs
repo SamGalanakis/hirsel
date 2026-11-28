@@ -278,6 +278,8 @@ fn observe(request: Request<OpGetOption>, envelope: &mut Envelope<'_>) -> Result
         envelope.target["group"] = json!(group.name);
         envelope.target["incarnation"] = json!(group.incarnation.to_string());
         let effect = match &phase {
+            Phase::Retired => "retired",
+            Phase::Retiring => "retiring",
             Phase::Installed(..) => "committed",
             Phase::Undecided(..) | Phase::Pending(..) => "possible",
             _ => "none",
@@ -298,7 +300,10 @@ fn observe(request: Request<OpGetOption>, envelope: &mut Envelope<'_>) -> Result
         envelope.outcome =
             json!({"kind":"Observed","phase":envelope.result["phase"],"effect":effect});
         envelope.next.clear();
-        if !matches!(phase, Phase::Installed(..) | Phase::Failed(..)) {
+        if !matches!(
+            phase,
+            Phase::Retired | Phase::Installed(..) | Phase::Failed(..)
+        ) {
             let method = if matches!(phase, Phase::AwaitDecision(..)) {
                 "op decide"
             } else {
@@ -315,7 +320,7 @@ fn observe(request: Request<OpGetOption>, envelope: &mut Envelope<'_>) -> Result
             {
                 ("Failed", 1)
             }
-            Phase::Installed(..) => ("Completed", 0),
+            Phase::Retired | Phase::Installed(..) => ("Completed", 0),
             Phase::Failed(..) => ("Failed", 1),
             Phase::Undecided(..) => ("Undecided", 75),
             Phase::AwaitDecision(..) => ("AwaitDecision", 75),

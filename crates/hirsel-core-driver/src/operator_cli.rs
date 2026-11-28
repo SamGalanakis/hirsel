@@ -19,12 +19,14 @@ use std::time::Duration;
 
 pub(crate) mod archive;
 mod archive_decision;
+mod bucket;
 mod config;
 mod context;
 mod decision;
 pub(crate) mod pitr;
 pub(crate) mod pitr_decision;
 mod receipt;
+pub(crate) mod retire;
 pub(crate) mod store_process;
 mod submit;
 pub(crate) use decision::decide;
@@ -276,6 +278,8 @@ fn state_json(d: &[u8], group: &Group, phase: &Phase) -> serde_json::Value {
         Phase::Installed(v, assembly, report) => serde_json::json!({
             "phase": "installed", "activation": v, "assembly": hex::encode(assembly), "report": report_json(report),
         }),
+        Phase::Retiring => serde_json::json!({"phase":"retiring"}),
+        Phase::Retired => serde_json::json!({"phase":"retired"}),
         Phase::Failed(class, detail, report) => serde_json::json!({
             "phase": "failed", "class": class_name(*class), "detail": detail, "report": report_json(report),
         }),

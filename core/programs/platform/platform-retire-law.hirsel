@@ -1,0 +1,29 @@
+@test
+fn test_la9_retire_exact_incarnation(c: Clock, rnd: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let mut r = rig(c, rnd, 3)
+    add(mut r, "g", "tenant")
+    let first = must(subject_of(r.h, "g"), "old subject")
+    let d = request_id(40)
+    let stale = request_id(41)
+    send(mut r, 40, RetireAsk(clone(d), clone(first)))
+    send(mut r, 41, RetireAsk(clone(stale), clone(first)))
+    let Some(AwaitDecision(_)) = status_of(mut r, d) else {
+        fail("missing retirement approval")
+    }
+    expect(matches_subject(r.h, first), "plan removed its group")
+    let mut r2 = restart(take r, 3)
+    let _ = decide_on(mut r2, d, launcher.no_grants(), Approve(runner.fate.none()))
+    let Some(RetiredPhase) = status_of(mut r2, d) else {
+        fail("retirement did not commit")
+    }
+    add(mut r2, "g", "tenant")
+    let second = must(subject_of(r2.h, "g"), "replacement subject")
+    expect(first.generation != second.generation, "replacement reused incarnation")
+    let _ = decide_on(mut r2, stale, launcher.no_grants(), Approve(runner.fate.none()))
+    expect(is_failed(status_of(mut r2, stale), ConflictClass), "stale decision retired the replacement")
+    expect(matches_subject(r2.h, second), "replacement changed")
+    let Some(RetiredPhase) = status_of(mut r2, d) else {
+        fail("retirement receipt lost after reuse")
+    }
+    Ok(())
+}

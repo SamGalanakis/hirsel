@@ -81,5 +81,22 @@ product_v1.Product(
                 Dir("{fd}/4"),
             ],
         )),
+        ("bucket_tool", Helper(
+            package: Some("store-archive-tool"),
+            entry: "main/bucket_main",
+            grants: [
+                Clock, Random, Tasks, Stdout, Stderr,
+                Secret(parameter: "reader", source: Environment("HIRSEL_ARCHIVE_SECRET"), policy: "kdf"),
+                Secret(parameter: "writer", source: Environment("HIRSEL_CHILD_SECRET"), policy: "kdf"),
+                Env(["HIRSEL_ARCHIVE_ENDPOINT", "HIRSEL_ARCHIVE_REGION", "HIRSEL_ARCHIVE_BUCKET", "HIRSEL_ARCHIVE_PREFIX", "HIRSEL_ARCHIVE_PARENT", "HIRSEL_ARCHIVE_ACCESS", "HIRSEL_ARCHIVE_TOKEN", "HIRSEL_CHILD_ACCESS", "HIRSEL_CHILD_TOKEN", "HIRSEL_CHILD_LEVEL", "HIRSEL_CHILD_ENDPOINT", "HIRSEL_CHILD_REGION", "HIRSEL_CHILD_BUCKET", "HIRSEL_CHILD_PREFIX", "HIRSEL_HOST_STREAM_ENDPOINT", "HIRSEL_HOST_STREAM_REGION", "HIRSEL_HOST_STREAM_BUCKET", "HIRSEL_HOST_STREAM_PREFIX", "HIRSEL_SOURCE_PLACE_ENDPOINT", "HIRSEL_SOURCE_PLACE_REGION", "HIRSEL_SOURCE_PLACE_BUCKET", "HIRSEL_SOURCE_PLACE_PREFIX"]),
+                Net(Resolve("*")),
+                Net(Connect(cidr: "0.0.0.0/0", first_port: 443, last_port: 443)),
+                Net(Connect(cidr: "::/0", first_port: 443, last_port: 443)),
+                Net(Connect(cidr: "127.0.0.1/32", first_port: 1, last_port: 65535)),
+                Net(Tls("* 443-443 System")),
+                Dir("{fd}/3"),
+                Dir("{fd}/4"),
+            ],
+        )),
     ],
 )

@@ -17,11 +17,18 @@ use std::{
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Archive {
+pub(super) struct Coordinates {
     pub endpoint: String,
     pub region: String,
     pub bucket: String,
     pub prefix: String,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Archive {
+    #[serde(flatten)]
+    pub location: Coordinates,
     pub parent: String,
 }
 
@@ -39,24 +46,9 @@ impl Archive {
             ));
         }
         let a: Self = serde_json::from_reader(file).map_err(|e| Failure::input("archive", e))?;
-        if a.region.is_empty()
-            || a.bucket.is_empty()
-            || !hex::decode(&a.parent).is_some_and(|b| b.len() == 16)
-        {
-            return Err(Failure::input(
-                "archive",
-                "expected region, bucket and 16-byte parent ID",
-            ));
-        }
-        let local = a
-            .endpoint
-            .strip_prefix("http://127.0.0.1:")
-            .is_some_and(|p| p.parse::<u16>().is_ok());
-        if !local && !a.endpoint.starts_with("https://") {
-            return Err(Failure::input(
-                "archive",
-                "expected HTTPS endpoint or loopback HTTP",
-            ));
+        a.location.validate()?;
+        if !hex::decode(&a.parent).is_some_and(|b| b.len() == 16) {
+            return Err(Failure::input("archive", "expected a 16-byte parent ID"));
         }
         Ok(a)
     }
@@ -75,39 +67,19 @@ impl Archive {
         } else {
             "HIRSEL_ARCHIVE_READ"
         };
-        let credential = |suffix: &str| {
-            env::var_os(format!("{role}_{suffix}"))
-                .filter(|v| !v.is_empty())
-                .ok_or_else(|| {
-                    Failure::blocked("CredentialsRequired", &format!("missing {role}_{suffix}"))
-                })
-        };
-        for prefix in ["HIRSEL_ARCHIVE_READ", "HIRSEL_ARCHIVE_EXPIRY"] {
-            for field in ["ACCESS_KEY_ID", "SECRET_ACCESS_KEY", "SESSION_TOKEN"] {
-                cmd.env_remove(format!("{prefix}_{field}"));
-            }
-        }
-        cmd.env("HIRSEL_ARCHIVE_SECRET", credential("SECRET_ACCESS_KEY")?)
-            .env("HIRSEL_ARCHIVE_ACCESS", credential("ACCESS_KEY_ID")?)
-            .env(
-                "HIRSEL_ARCHIVE_TOKEN",
-                env::var_os(format!("{role}_SESSION_TOKEN")).unwrap_or_default(),
-            )
-            .env("HIRSEL_ARCHIVE_ENDPOINT", &self.endpoint)
-            .env("HIRSEL_ARCHIVE_REGION", &self.region)
-            .env("HIRSEL_ARCHIVE_BUCKET", &self.bucket)
-            .env("HIRSEL_ARCHIVE_PREFIX", &self.prefix)
-            .env("HIRSEL_ARCHIVE_PARENT", &self.parent);
-        let reply = cmd.arg(verb).args(args).output().map_err(Failure::io)?;
-        if !reply.status.success() {
-            let detail = String::from_utf8_lossy(&reply.stderr);
-            return Err(match reply.status.code() {
-                Some(75 | 103) => Failure::blocked("ArchiveUnavailable", &detail),
-                Some(2) => Failure::input("archive", detail),
-                _ => Failure::authority(crate::operator::Class::Store, detail.into_owned()),
-            });
-        }
-        serde_json::from_slice(&reply.stdout).map_err(Failure::damaged)
+        self.configure(&mut cmd, role)?;
+        let bytes = answer(cmd.arg(verb).args(args))?;
+        serde_json::from_slice(&bytes).map_err(Failure::damaged)
+    }
+
+    pub(super) fn configure(
+        &self,
+        cmd: &mut std::process::Command,
+        role: &str,
+    ) -> Result<(), Failure> {
+        self.location.configure(cmd, "HIRSEL_ARCHIVE");
+        cmd.env("HIRSEL_ARCHIVE_PARENT", &self.parent);
+        credentials(cmd, "HIRSEL_ARCHIVE", role)
     }
     pub(super) fn query(
         &self,
@@ -172,4 +144,94 @@ fn review(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
         env.result["verification"] = json!(if deep { "store_graph" } else { "references" });
     }
     Ok(())
+}
+
+impl Coordinates {
+    pub(super) fn validate(&self) -> Result<(), Failure> {
+        if self.region.is_empty()
+            || self.bucket.is_empty()
+            || canonical_endpoint(&self.endpoint).is_none()
+        {
+            return Err(Failure::input(
+                "bucket",
+                "expected region, bucket and an HTTPS or loopback HTTP endpoint",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn configure(&self, cmd: &mut std::process::Command, prefix: &str) {
+        // Namespace comparisons use these coordinates too. Equivalent endpoint
+        // spellings must identify the same bucket before any child reservation.
+        if let Some(endpoint) = canonical_endpoint(&self.endpoint) {
+            cmd.env(format!("{prefix}_ENDPOINT"), endpoint);
+        }
+        for (key, value) in [
+            ("REGION", &self.region),
+            ("BUCKET", &self.bucket),
+            ("PREFIX", &self.prefix),
+        ] {
+            cmd.env(format!("{prefix}_{key}"), value);
+        }
+    }
+}
+fn canonical_endpoint(text: &str) -> Option<String> {
+    let (scheme, authority) = text.strip_suffix('/').unwrap_or(text).split_once("://")?;
+    let default = match scheme {
+        "https" => 443,
+        "http" => 80,
+        _ => return None,
+    };
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (host, port.parse::<u16>().ok()?),
+        None => (authority, default),
+    };
+    let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
+    if port == 0
+        || host.is_empty()
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+        || (scheme == "http" && host != "127.0.0.1")
+    {
+        return None;
+    }
+    Some(if port == default {
+        format!("{scheme}://{host}")
+    } else {
+        format!("{scheme}://{host}:{port}")
+    })
+}
+pub(super) fn credentials(
+    cmd: &mut std::process::Command,
+    target: &str,
+    role: &str,
+) -> Result<(), Failure> {
+    for (field, name) in [
+        ("SECRET_ACCESS_KEY", "SECRET"),
+        ("ACCESS_KEY_ID", "ACCESS"),
+        ("SESSION_TOKEN", "TOKEN"),
+    ] {
+        let value = env::var_os(format!("{role}_{field}")).unwrap_or_default();
+        if value.is_empty() && field != "SESSION_TOKEN" {
+            return Err(Failure::blocked(
+                "CredentialsRequired",
+                &format!("missing {role}_{field}"),
+            ));
+        }
+        cmd.env(format!("{target}_{name}"), value);
+    }
+    Ok(())
+}
+pub(super) fn answer(cmd: &mut std::process::Command) -> Result<Vec<u8>, Failure> {
+    let reply = cmd.output().map_err(Failure::io)?;
+    if !reply.status.success() {
+        let detail = String::from_utf8_lossy(&reply.stderr);
+        return Err(match reply.status.code() {
+            Some(75 | 103) => Failure::blocked("ObjectStoreUnavailable", &detail),
+            Some(2) => Failure::input("object store", detail),
+            _ => Failure::authority(crate::operator::Class::Store, detail.into_owned()),
+        });
+    }
+    Ok(reply.stdout)
 }

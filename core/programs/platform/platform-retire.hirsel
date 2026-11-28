@@ -1,0 +1,69 @@
+// Keep the old workdir and bind approval to the catalog's exact incarnation.
+fn propose_retirement(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, subject: operator.Precondition) waits {
+    if list.len(d) != 16 || is_none(subject.predecessor) {
+        refuse(mut h, conn, InvalidClass, "retirement requires a request ID and an existing incarnation")
+        return
+    }
+    let canonical = operator.ask_bytes(ask)
+    match request_row(h, d) {
+        Ok(Some(r)) => {
+            if r.begin != canonical {
+                refuse(mut h, conn, ConflictClass, "request ID names another intent")
+            } else {
+                let p = phase_of(h, d, r)
+                say(mut h, conn, state_answer(d, r, p), true)
+            }
+            return
+        },
+        Error(e) => {
+            refuse(mut h, conn, class_of(e), refused_text(e))
+            return
+        },
+        Ok(None) => (),
+    }
+    if !matches_subject(h, subject) {
+        refuse(mut h, conn, ConflictClass, "retirement subject changed")
+        return
+    }
+    let input: operator.Input = PublicationInput(clone(subject.assembly))
+    let facts = decision_of(input, None, RetirementStage, launcher.no_grants(), operator.no_triggers())
+    let row = RequestRow(begin: take canonical, group: group_of(subject.name, subject.generation), input: take input, attempt: launcher.Attempt(hi: 0, lo: 0), deadline_ms: 0, status: Held(take facts), approved: launcher.no_grants(), admission_plan: None, prepared_plan: None, entries: None, approved_entries: None, fates: None, shown: list.new(), gate: None)
+    let written = {
+        let t = view h.t
+        store.run(mut h.db, None, (store.copy_env(t), store.copy_env(d), store.copy_env(row)), fn(mut tx, env) -> Result[(), Refused] {
+            st(store.put(mut tx, env.0 .requests, env.1, env.2))
+        })
+    }
+    if let Error(e) = decided(mut h, take written) {
+        refuse(mut h, conn, class_of(e), refused_text(e))
+        return
+    }
+    let p = phase_of(h, d, row)
+    say(mut h, conn, state_answer(d, row, p), true)
+}
+
+fn approve_retirement(mut h: Host, conn: u64, d: Bytes, proposal: RequestRow, mut out: List[launcher.Request]) waits {
+    let Some(RetireAsk(_, subject)) = operator.decode_ask(proposal.begin) else {
+        refuse(mut h, conn, ProtocolClass, "expected a retirement proposal")
+        return
+    }
+    let _ = map.remove(mut h.shown, d)
+    map.insert(mut h.owners, clone(d), conn)
+    if !matches_subject(h, subject) {
+        fail_request(mut h, d, ConflictClass, "the approved incarnation or its selection changed")
+        return
+    }
+    let mut row: RequestRow = clone(proposal)
+    row.status = Done(RetiringPhase)
+    let held = (store.copy_env(h.t), store.copy_env(d), take row)
+    match remove_turn(mut h, subject.name, Keep, held, fn(mut tx, env) -> Result[(), store.Error] {
+        store.put(mut tx, env.0 .requests, env.1, env.2)
+    }) {
+        Ok(take requests) => {
+            for req in requests {
+                list.push(mut out, clone(req))
+            }
+        },
+        Error(e) => fail_request(mut h, d, class_of(e), refused_text(e)),
+    }
+}

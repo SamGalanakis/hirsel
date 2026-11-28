@@ -63,12 +63,17 @@ fn stops_at_plan(row: RequestRow) -> bool {
 
 fn deploy_plan(h: Host, d: Bytes, row: RequestRow, facts: operator.Decision) -> operator.DeployPlan {
     let (subject, create): (operator.Precondition, Option[operator.Registration]) = match option.unwrap(operator.decode_ask(row.begin)) {
+        RetireAsk(_, target) => (clone(target), None),
         BeginAsk(_, target, _, _, _, _) => (clone(target), None),
         RegisterAsk(_, spec, _, _, _, target, _) => (clone(target), Some(clone(spec))),
         _ => fail("invalid stored deploy intent"),
     }
     let catalog = store.identity(h.db)
-    operator.DeployPlan(domain: "hirsel.host.deploy.plan.v1", authority: operator.CatalogStore(hi: catalog.hi, lo: catalog.lo), request: clone(d), intent_digest: digest_of(row.begin), subject: take subject, incarnation: if row.group.incarnation == 0u64 {
+    let domain = match facts.stage {
+        RetirementStage => "hirsel.host.retire.plan.v1",
+        _ => "hirsel.host.deploy.plan.v1"
+    }
+    operator.DeployPlan(domain: domain, authority: operator.CatalogStore(hi: catalog.hi, lo: catalog.lo), request: clone(d), intent_digest: digest_of(row.begin), subject: take subject, incarnation: if row.group.incarnation == 0u64 {
         None
     } else {
         Some(row.group.incarnation)

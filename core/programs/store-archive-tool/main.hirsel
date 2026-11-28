@@ -7,7 +7,39 @@ fn archive_setting(vars: Env, key: String) -> Result[String, Exit] {
 
 pub fn main(work: Dir, net: Net, tasks: Tasks, c: Clock, r: Random, out: Stdout, err: Stderr, key: Secret, vars: Env, argv: Args) -> Result[(), Exit] waits {
     let parent = archive_setting(vars, "HIRSEL_ARCHIVE_PARENT")?
-    let bucket = std.object.Bucket(endpoint: archive_setting(vars, "HIRSEL_ARCHIVE_ENDPOINT")?, aws_region: archive_setting(vars, "HIRSEL_ARCHIVE_REGION")?, bucket: archive_setting(vars, "HIRSEL_ARCHIVE_BUCKET")?, prefix: archive_setting(vars, "HIRSEL_ARCHIVE_PREFIX")?, style: Path)
-    let creds = std.cred.from_secret(archive_setting(vars, "HIRSEL_ARCHIVE_ACCESS")?, secret.share(key), archive_setting(vars, "HIRSEL_ARCHIVE_TOKEN")?)
+    let bucket = coordinates(vars, "HIRSEL_ARCHIVE")?
+    let creds = credentials(vars, "HIRSEL_ARCHIVE", key)?
     platform.store_tool.archive_command(work, net, tasks, c, r, out, err, take bucket, take creds, parent, argv)
+}
+
+fn field(vars: Env, prefix: String, suffix: String) -> Result[String, Exit] {
+    let mut name = string.from(prefix)
+    string.push(mut name, suffix)
+    archive_setting(vars, name)
+}
+
+fn coordinates(vars: Env, prefix: String) -> Result[std.object.Bucket, Exit] {
+    Ok(std.object.Bucket(endpoint: field(vars, prefix, "_ENDPOINT")?, aws_region: field(vars, prefix, "_REGION")?, bucket: field(vars, prefix, "_BUCKET")?, prefix: field(vars, prefix, "_PREFIX")?, style: Path))
+}
+
+fn credentials(vars: Env, prefix: String, key: Secret) -> Result[std.cred.Credentials, Exit] {
+    Ok(std.cred.from_secret(field(vars, prefix, "_ACCESS")?, secret.share(key), field(vars, prefix, "_TOKEN")?))
+}
+
+fn optional_coordinate(vars: Env, prefix: String) -> Result[Option[std.object.Bucket], Exit] {
+    if field(vars, prefix, "_ENDPOINT")? == "" {
+        return Ok(None)
+    }
+    Ok(Some(coordinates(vars, prefix)?))
+}
+
+pub fn bucket_main(from: Dir, work: Dir, net: Net, tasks: Tasks, c: Clock, r: Random, out: Stdout, err: Stderr, reader: Secret, writer: Secret, vars: Env, argv: Args) -> Result[(), Exit] waits {
+    let dest = platform.store_tool.BucketAccess(location: coordinates(vars, "HIRSEL_CHILD")?, credentials: credentials(vars, "HIRSEL_CHILD", writer)?)
+    let parent = archive_setting(vars, "HIRSEL_ARCHIVE_PARENT")?
+    let archive: Option[(platform.store_tool.BucketAccess, String)] = if parent == "" {
+        None
+    } else {
+        Some((platform.store_tool.BucketAccess(location: coordinates(vars, "HIRSEL_ARCHIVE")?, credentials: credentials(vars, "HIRSEL_ARCHIVE", reader)?), parent))
+    }
+    platform.store_tool.bucket_command(from, work, net, tasks, c, r, out, err, take dest, take archive, optional_coordinate(vars, "HIRSEL_SOURCE_PLACE")?, optional_coordinate(vars, "HIRSEL_HOST_STREAM")?, archive_setting(vars, "HIRSEL_CHILD_LEVEL")?, argv)
 }

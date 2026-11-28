@@ -53,3 +53,23 @@ A service recovery drill must additionally record host acceptance under the fres
 ## Advance the retention floor
 
 Run `hirsel store archive expire "$SOURCE" --keep-from "$BASE" --json` with the reader role. Check the old and proposed floors and the retained interval against the required recovery window. Approve the reviewed digest using the same decision form as restore. The apply process uses `HIRSEL_ARCHIVE_EXPIRY_ACCESS_KEY_ID`, `HIRSEL_ARCHIVE_EXPIRY_SECRET_ACCESS_KEY` and, for temporary credentials, `HIRSEL_ARCHIVE_EXPIRY_SESSION_TOKEN`. Save its reply externally. If the reviewed head changed, inspect the archive and prepare another plan. After a lost reply, a newer floor alone cannot identify which operation advanced it.
+
+## Restore to a standalone Bucket
+
+Put the destination profile in an operator-owned file under a trusted directory. Give the destination its own empty prefix and write credential. Supply the source Place and host stream coordinates from deployment configuration. Use JSON null for a namespace that is absent.
+
+```json
+{"location":{"endpoint":"https://objects.example.org","region":"auto","bucket":"recovery","prefix":"children/drill/"},"level":"bucket","source_place":null,"host_stream":null}
+```
+
+Set `HIRSEL_RESTORE_BUCKET_ACCESS_KEY_ID` and `HIRSEL_RESTORE_BUCKET_SECRET_ACCESS_KEY` for that prefix. Temporary credentials also need `HIRSEL_RESTORE_BUCKET_SESSION_TOKEN`. Use `--to @/absolute/path/to/bucket.json` with the same plan and decision commands. If the commit reply is lost, `op get` can identify the published child from the destination with its own credential.
+
+## Retire the old incarnation
+
+Read the old incarnation from the pinned host. After moving clients and taking a final backup, review the retirement plan's predecessor and assembly. Record this plan's digest in a new typed decision. The host keeps the workdir. Wait for the phase `retired` before reusing the name or listener.
+
+```sh
+hirsel host retire --group "$OLD_NAME@$OLD_INCARNATION" --context "$CONTEXT" --plan --json > "$EVIDENCE/retirement.json"
+OP=$(jq -er '.operation.id' "$EVIDENCE/retirement.json")
+hirsel op decide "$OP" --context "$CONTEXT" --decision "$EVIDENCE/retire.hcfg" --wait --json
+```

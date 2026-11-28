@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ReadContract {
+    Retirement,
     Archive,
     Expiry,
     Restore,
@@ -58,6 +59,7 @@ pub enum Invocation {
     ProfileExport(Request<ProfileExportOption>),
     Coverage(Request<CoverageOption>),
     Lean(Request<LeanOption>),
+    Retire(Request<RetireOption>),
     Host(Request<HostOption>),
     Launcher(Request<LauncherOption>),
     Deploy(Request<DeployOption>),

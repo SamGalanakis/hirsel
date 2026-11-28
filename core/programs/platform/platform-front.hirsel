@@ -9,9 +9,15 @@ pub type FrontError: send = NoNames | InvalidName(String) | NameTaken(String) | 
 // One catalog snapshot, with the configured listener of each group still accepting routes.
 pub fn routing_table(h: Host) -> Result[List[Route], Refused] waits {
     let reader = st(store.reader(h.db, 0u64))?
-    let mut rows = st(store.scan(reader, store.snapshot(h.db), h.t.groups, Unbounded, Unbounded))?
+    let snap = store.snapshot(h.db)
+    let mut rows = st(store.scan(reader, snap, h.t.groups, Unbounded, Unbounded))?
     let mut routes: List[Route] = list.new()
     while let Some((take name, take row)) = st(store.next(reader, mut rows))? {
+        if let Some(adoption) = st(store.get(reader, snap, h.t.restored_groups, row.incarnation))? {
+            if !adoption.accepted {
+                continue
+            }
+        }
         let GroupRow(listen: take listen, front: take front, retiring: retiring, ..) = take row
         if let None = retiring {
             list.push(mut routes, Route(group: take name, listen: take listen, front: take front))

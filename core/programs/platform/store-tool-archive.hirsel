@@ -85,11 +85,7 @@ fn archive_review(mut src: std.object.Client, parent: store.StoreId, work: Dir, 
 
 pub fn archive_command(work: Dir, net: Net, tasks: Tasks, c: Clock, r: Random, out: Stdout, err: Stderr, take bucket: std.object.Bucket, take creds: std.cred.Credentials, parent_text: String, argv: Args) -> Result[(), Exit] waits {
     let parent = archive_parent(parent_text)?
-    let due = std.clock.deadline_after_ms(host.mono_ns(c), ARCHIVE_OP_MS)
-    let Ok(take started) = std.object.start(net, tasks, take bucket, take creds, None, System, c, r, std.object.LaneConfig(requested_lanes: 2, lane_bytes: 83886080), due) else {
-        return refused(err, "ArchiveConnection")
-    }
-    let mut src = take started
+    let mut src = open_tool_bucket(net, tasks, c, r, take bucket, take creds, err)?
     let verb = operand(argv, 0)?
     if verb == "plan-archive" || verb == "publish-archive" {
         let target = selector(argv)?
@@ -189,4 +185,13 @@ fn expiry_command(mut src: std.object.Client, parent: store.StoreId, work: Dir, 
         })
     })
     say(out, text)
+}
+
+fn open_tool_bucket(net: Net, tasks: Tasks, c: Clock, r: Random, take bucket: std.object.Bucket, take creds: std.cred.Credentials, err: Stderr) -> Result[std.object.Client, Exit] waits {
+    let due = std.clock.deadline_after_ms(host.mono_ns(c), ARCHIVE_OP_MS)
+    let Ok(take started) = std.object.start(net, tasks, take bucket, take creds, None, System, c, r, std.object.LaneConfig(requested_lanes: 2, lane_bytes: 83886080), due) else {
+        let _ = archive_busy(err)
+        return Error(Exit(status: 75u8))
+    }
+    Ok(take started)
 }

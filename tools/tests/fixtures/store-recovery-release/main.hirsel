@@ -1,0 +1,79 @@
+type Handles: shareable + send {
+    rows: store.Table[u64, Bytes]
+}
+
+fn schema(mut d: store.Declare) -> Result[Handles, store.Error] {
+    let mut table = store.declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    Ok(Handles(rows: store.finish(mut d, take table)?))
+}
+
+fn by_key(k: u64, v: Bytes) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.with_capacity(1)
+    list.push(mut keys, k)
+    Ok(take keys)
+}
+
+fn width(k: u64, v: Bytes) -> Result[u64, Capacity] {
+    Ok(list.len(v))
+}
+
+fn indexed_schema(mut d: store.Declare) -> Result[Handles, store.Error] {
+    let mut table = store.declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let _ = store.covering(mut d, mut table, "cover", Many, code.describe(by_key), std.codec.key_u64(), code.describe(width), std.codec.of_u64())?
+    Ok(Handles(rows: store.finish(mut d, take table)?))
+}
+
+fn write_row(mut tx: store.Tx, h: Handles, _caller: runner.Caller, take row: (u64, Bytes)) -> Result[(), Never] {
+    result.unwrap(store.put(mut tx, h.rows, row.0, row.1))
+    Ok(())
+}
+
+fn place(mut registry: runner.Registry[(), Handles]) -> Result[(), runner.RegisterError] {
+    runner.transact(mut registry, code.describe(write_row), 65536u64, runner.DEFAULT_STEPS)
+}
+
+// The archive was captured after one committed row per version. Check all
+// primary rows at the approved version, including the absence of the later write.
+fn check_cut(binding: StaticFn[fn(mut store.Declare) -> Result[Handles, store.Error]], d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
+    options.create = false
+    let mut db = store.open(tasks, d, c, r, options)?
+    let h = store.bind_declaration(mut db, Open, code.callable(binding))?
+    let read = store.reader(db, 0u64)?
+    let mut rows = store.scan(read, store.snapshot(db), h.rows, Unbounded, Unbounded)?
+    for expected in 1u64 .. 3u64 {
+        let Some((key, take value)) = store.next(read, mut rows)? else {
+            return Error(Changed("missing primary row"))
+        }
+        let mut payload: Bytes = list.with_capacity(100)
+        list.fill(mut payload, 100, int.truncate(expected))
+        if key != expected || value != payload {
+            return Error(Changed("wrong primary row"))
+        }
+    }
+    if let Some(_) = store.next(read, mut rows)? {
+        return Error(Changed("unexpected primary row"))
+    }
+    store.close(take db)
+}
+
+pub fn main(n: Net, directory: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, process: Process, errors: Stderr) -> Result[(), Exit] waits {
+    run_with(code.describe(schema), n, directory, c, random, tasks, a, process, errors)
+}
+
+pub fn indexed(n: Net, directory: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, process: Process, errors: Stderr) -> Result[(), Exit] waits {
+    run_with(code.describe(indexed_schema), n, directory, c, random, tasks, a, process, errors)
+}
+
+fn run_with(binding: StaticFn[fn(mut store.Declare) -> Result[Handles, store.Error]], n: Net, directory: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, process: Process, errors: Stderr) -> Result[(), Exit] waits {
+    if args.get(a, 0) == Some("check-cut") {
+        check_cut(binding, directory, c, random, tasks) ?=> |_| Exit(status: 1u8)
+        return Ok(())
+    }
+    runner.main(a, process, errors, tasks, c, code.describe(place), binding, scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+        let selected = runner.launch_selection(a) ?=> Usage
+        let config: runner.PlaceConfig[(), Handles, ()] = runner.PlaceConfig(backing: Disk(directory), sizes: store.derived_sizes(), selection: take selected, place: code.describe(place), n_place: 1048576, on_migrate: None, schema: binding, session: runner.wire_defaults(65536), max_sessions: runner.WIRE_OWNER_LIMIT, proxies: list.new(), n_publisher: 67108864, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net: n, tasks, clock: c, random, stop: runner.Stop(lag_ms: 0, grace_ms: 5000), wire: Some(runner.ingress.binding()), grants: Some(runner.ingress.bind_grants()), triggers: None, idle: None)
+        let ended = runner.operate_report(take config, take stop, result.unwrap(runner.status_root()), None, errors) ?=> Start
+        Ok(ended)
+    })
+}

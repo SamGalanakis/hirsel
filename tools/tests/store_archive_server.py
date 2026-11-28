@@ -9,7 +9,7 @@ from urllib.parse import parse_qsl, quote, unquote, urlsplit
 from xml.etree.ElementTree import Element, SubElement, tostring
 
 
-KEYS = {"reader": b"reader-fixture-secret", "expiry": b"expiry-fixture-secret"}
+KEYS = {"reader": b"reader-fixture-secret", "expiry": b"expiry-fixture-secret", "child": b"child-fixture-secret"}
 
 
 def etag(body):
@@ -22,6 +22,7 @@ class ArchiveServer(ThreadingHTTPServer):
         self.objects = {key: b64decode(value, validate=True)
                         for key, value in json.loads(fixture.read_bytes()).items()}
         self.requests = []
+        self.lose_head_reply = None
         self.thread = Thread(target=self.serve_forever, daemon=True)
 
     def __enter__(self):
@@ -90,6 +91,14 @@ class ArchiveHandler(BaseHTTPRequestHandler):
             return self.answer(403)
         objects = self.server.objects
         query = dict(parse_qsl(target.query, keep_blank_values=True))
+        if self.command == "GET" and "location" in query:
+            return self.answer(200, b"<LocationConstraint>us-east-1</LocationConstraint>")
+        if role == "child":
+            namespace = query.get("prefix", key)
+            if not namespace.startswith("children/"):
+                return self.answer(403)
+        elif key.startswith("children/"):
+            return self.answer(403)
         if self.command == "GET" and "list-type" in query:
             xml = Element("ListBucketResult")
             prefix = query.get("prefix", "")
@@ -121,6 +130,10 @@ class ArchiveHandler(BaseHTTPRequestHandler):
             if self.headers.get("If-None-Match") == "*" and prev is not None:
                 return self.answer(412)
             objects[key] = body
+            if key == self.server.lose_head_reply:
+                self.server.lose_head_reply = None
+                self.close_connection = True
+                return
             return self.answer(200, etag=etag(body))
         self.answer(405)
 

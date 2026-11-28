@@ -153,11 +153,11 @@ BeginAsk(Bytes, Precondition, BeginInput, List[String], List[String], bool)
 // Read the catalog StoreId. The connection remains open for the pinned exchange.
     | IdentifyAsk
 // Compare the StoreId on the host that executes the enclosed request.
-    | PinnedAsk(u64, u64, Bytes) | ObserveGroupAsk(String) | PlanAsk(Bytes) | WorkloadsAsk(Option[String]) | WorkloadAsk(String, Option[u64]) | EventsAsk(launcher.Group, Option[EventPosition]) | HistoricalAsk(String, Option[u64], u64)
+    | PinnedAsk(u64, u64, Bytes) | ObserveGroupAsk(String) | PlanAsk(Bytes) | WorkloadsAsk(Option[String]) | WorkloadAsk(String, Option[u64]) | EventsAsk(launcher.Group, Option[EventPosition]) | HistoricalAsk(String, Option[u64], u64) | RetireAsk(Bytes, Precondition)
 
 pub type Health: codec + send = ServingHealth | StartingHealth | ColdHealth | FailedHealth | UnknownHealth
 
-pub type OperationPhase: codec + send = InputOperationPhase | AdmissionOperationPhase | ConfirmOperationPhase | AssemblyOperationPhase | PrepareOperationPhase | PendingOperationPhase | UndecidedOperationPhase | DecisionOperationPhase | InstalledOperationPhase | FailedOperationPhase
+pub type OperationPhase: codec + send = InputOperationPhase | AdmissionOperationPhase | ConfirmOperationPhase | AssemblyOperationPhase | PrepareOperationPhase | PendingOperationPhase | UndecidedOperationPhase | DecisionOperationPhase | InstalledOperationPhase | FailedOperationPhase | RetiringOperationPhase | RetiredOperationPhase
 
 pub type OperationObservation: codec + send {
     request: Bytes,
@@ -262,7 +262,7 @@ pub type Class: codec + send = ProtocolClass | DeniedClass | UnknownRequestClass
 
 // Which facts a decision has computed: the admission facts only (grants, approvals), or
 // every fact after prepare.
-pub type DecisionStage: codec + send = AdmissionStage | PreparedStage | CreationStage
+pub type DecisionStage: codec + send = AdmissionStage | PreparedStage | CreationStage | RetirementStage
 
 // R's Foreign and Exec lines and the exact display text, held only for an editor's request.
 pub type Approvals: codec + send {
@@ -318,7 +318,7 @@ pub fn shows_held(d: Decision) -> bool {
 // 7 Installed(v, assembly, report), 8 Failed(class, detail, report), 9 AwaitDecision(decision).
 // Installed and Failed are terminal. AwaitDecision holds no attempt: the request waits for
 // the operator's Decide on exactly that decision.
-pub type Phase: codec + send = AwaitInput(launcher.Attempt) | AdmittingPhase(launcher.Attempt) | AwaitConfirm(launcher.Attempt) | AssemblingPhase(launcher.Attempt) | PreparingPhase(launcher.Attempt) | PendingPhase(launcher.Attempt, u64) | UndecidedPhase(launcher.Attempt, u64, String) | InstalledPhase(u64, Bytes, Report) | FailedPhase(Class, String, Report) | AwaitDecision(Decision)
+pub type Phase: codec + send = AwaitInput(launcher.Attempt) | AdmittingPhase(launcher.Attempt) | AwaitConfirm(launcher.Attempt) | AssemblingPhase(launcher.Attempt) | PreparingPhase(launcher.Attempt) | PendingPhase(launcher.Attempt, u64) | UndecidedPhase(launcher.Attempt, u64, String) | InstalledPhase(u64, Bytes, Report) | FailedPhase(Class, String, Report) | AwaitDecision(Decision) | RetiringPhase | RetiredPhase
 
 // One host reply. Tags: 0 State, 1 Need, 2 Display, 3 Pin, 4 Error, 5 GroupInfo, 6 Part,
 // 7 Backup, 8 BackupOffline.
@@ -340,6 +340,7 @@ StateAnswer(Bytes, launcher.Group, Input, Phase)
 
 pub fn terminal(p: Phase) -> bool {
     match p {
+        RetiredPhase => true,
         InstalledPhase(_, _, _) => true,
         FailedPhase(_, _, _) => true,
         _ => false,

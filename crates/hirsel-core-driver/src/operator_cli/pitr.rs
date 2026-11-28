@@ -29,12 +29,12 @@ pub(super) struct RestorePlan {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
-struct DirectoryId {
+pub(super) struct DirectoryId {
     device: String,
     inode: String,
 }
 impl DirectoryId {
-    fn read(dir: &File) -> Result<Self, Failure> {
+    pub(super) fn read(dir: &File) -> Result<Self, Failure> {
         let m = dir.metadata().map_err(Failure::io)?;
         Ok(Self {
             device: m.dev().to_string(),
@@ -67,7 +67,7 @@ fn directory(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-fn source_handle(path: &Path, archive: bool) -> Result<File, Failure> {
+pub(super) fn source_handle(path: &Path, archive: bool) -> Result<File, Failure> {
     if archive {
         OpenOptions::new()
             .read(true)
@@ -147,7 +147,7 @@ fn resolved(path: &Path) -> io::Result<PathBuf> {
         Err(e) => Err(e),
     }
 }
-fn check_evidence_paths(source: &Path, destination: &Path) -> Result<(), Failure> {
+pub(super) fn check_evidence_paths(source: &Path, destination: &Path) -> Result<(), Failure> {
     let storage = resolved(&super::pitr_decision::operations_dir()?).map_err(Failure::io)?;
     let temp = std::env::temp_dir().canonicalize().map_err(Failure::io)?;
     for store in [source, destination] {
@@ -185,7 +185,13 @@ fn plan(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
     let archive = archive_path
         .map(|_| super::archive::Archive::read(&source))
         .transpose()?;
-    let destination = PathBuf::from(dst.ok_or_else(|| Failure::input("to", "required"))?);
+    let dest = dst.ok_or_else(|| Failure::input("to", "required"))?;
+    let args = selected.ok_or_else(|| Failure::input("target", "required"))?;
+    if let Some(profile) = dest.strip_prefix('@') {
+        let plan = super::bucket::plan(&source, archive, Path::new(profile), &args)?;
+        return save_plan(super::pitr_decision::StorePlan::Bucket(plan), explicit, env);
+    }
+    let destination = PathBuf::from(dest);
     let name = destination
         .file_name()
         .ok_or_else(|| Failure::input("to", "expected a child directory"))?;
@@ -216,11 +222,7 @@ fn plan(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(Failure::io(e)),
     };
-    let point = plan_at(
-        &from,
-        archive.as_ref(),
-        &selected.ok_or_else(|| Failure::input("target", "required"))?,
-    )?;
+    let point = plan_at(&from, archive.as_ref(), &args)?;
     let plan = RestorePlan {
         source,
         destination,
@@ -231,8 +233,19 @@ fn plan(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
         attempt: attempt()?,
         point,
     };
+    save_plan(
+        super::pitr_decision::StorePlan::Restore(plan),
+        explicit,
+        env,
+    )
+}
+
+fn save_plan(
+    plan: super::pitr_decision::StorePlan,
+    explicit: bool,
+    env: &mut Envelope<'_>,
+) -> Result<(), Failure> {
     env.contract = if explicit { "plan" } else { "submit" };
-    let plan = super::pitr_decision::StorePlan::Restore(plan);
     super::pitr_decision::save_plan(&plan)?;
     plan.held(env);
     if !explicit {
@@ -317,13 +330,6 @@ impl RestorePlan {
         Ok(Some(to))
     }
 
-    fn pinned(&self) -> Vec<String> {
-        vec![
-            "selected".into(),
-            self.point.branch.clone(),
-            self.point.boundary.clone(),
-        ]
-    }
     pub(super) fn observe(&self, path: &Path) -> Result<Option<Value>, Failure> {
         let Some(expected) = super::pitr_decision::read::<DirectoryId>(path)? else {
             return Ok(None);
@@ -334,7 +340,7 @@ impl RestorePlan {
         if DirectoryId::read(&to)? != expected {
             return Err(Failure::damaged("reserved destination was replaced"));
         }
-        let mut args = self.pinned();
+        let mut args = self.point.pinned();
         args.extend([
             self.attempt.clone(),
             self.point.version.clone(),
@@ -347,7 +353,11 @@ impl RestorePlan {
         if child == "pending" {
             return Ok(None);
         }
-        Ok(Some(self.receipt(child)?))
+        Ok(Some(self.point.receipt(
+            child,
+            &self.attempt,
+            &self.destination,
+        )?))
     }
 
     pub(super) fn publish(&self, path: &Path) -> Result<Value, Failure> {
@@ -361,7 +371,7 @@ impl RestorePlan {
             return Err(Failure::input("from", "source directory changed"));
         }
         check_evidence_paths(&self.source, &self.destination)?;
-        let mut args = self.pinned();
+        let mut args = self.point.pinned();
         if plan_at(&from, self.archive.as_ref(), &args)? != self.point {
             return Err(Failure::input(
                 "plan_digest",
@@ -387,19 +397,33 @@ impl RestorePlan {
         if applied != self.point {
             return Err(Failure::damaged("published boundary differs from the plan"));
         }
-        self.receipt(&child)
+        self.point.receipt(&child, &self.attempt, &self.destination)
     }
+}
 
-    fn receipt(&self, child: &str) -> Result<Value, Failure> {
-        if child == self.point.parent || !hex::decode(child).is_some_and(|v| v.len() == 16) {
+impl Point {
+    pub(super) fn pinned(&self) -> Vec<String> {
+        vec![
+            "selected".into(),
+            self.branch.clone(),
+            self.boundary.clone(),
+        ]
+    }
+    pub(super) fn receipt(
+        &self,
+        child: &str,
+        attempt: &str,
+        destination: impl Serialize,
+    ) -> Result<Value, Failure> {
+        if child == self.parent || !hex::decode(child).is_some_and(|v| v.len() == 16) {
             return Err(Failure::damaged("invalid child identity"));
         }
-        let mut receipt = serde_json::to_value(&self.point).map_err(Failure::damaged)?;
+        let mut receipt = serde_json::to_value(self).map_err(Failure::damaged)?;
         receipt["child"] = json!(child);
-        receipt["attempt"] = json!(self.attempt);
+        receipt["attempt"] = json!(attempt);
         receipt["verification"] = json!("store_graph");
         receipt["publication"] = json!("Published");
-        receipt["destination"] = json!(self.destination);
+        receipt["destination"] = json!(destination);
         Ok(receipt)
     }
 }

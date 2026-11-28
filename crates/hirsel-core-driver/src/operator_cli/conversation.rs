@@ -67,7 +67,11 @@ pub(super) fn validate(
     d: &[u8],
 ) -> Result<(), Failure> {
     if plan.request != d
-        || plan.domain != "hirsel.host.deploy.plan.v1"
+        || plan.domain
+            != match plan.facts.stage {
+                crate::operator::DecisionStage::Retirement => "hirsel.host.retire.plan.v1",
+                _ => "hirsel.host.deploy.plan.v1",
+            }
         || (u128::from(plan.authority.hi) << 64 | u128::from(plan.authority.lo)) != authority
         || Sha256::digest(plan.encode()).as_slice() != hash
     {
@@ -230,6 +234,12 @@ impl Exchange<'_> {
                         }
                         Phase::Installed(_, _, r) if matches!(r.pause, Pause::StartFailed(_)) => {
                             ("Failed", 1, "committed")
+                        }
+                        Phase::Retired => ("Completed", 0, "retired"),
+                        Phase::Retiring if self.wait.is_none() => {
+                            env.next
+                                .push(json!({"method":"op get","operation":env.operation["id"]}));
+                            ("Accepted", 0, "retiring")
                         }
                         Phase::Installed(..) => ("Completed", 0, "committed"),
                         Phase::Failed(..) => ("Failed", 1, "none"),

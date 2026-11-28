@@ -58,7 +58,7 @@ fn catalog_id(text: &str) -> Option<u128> {
 
 // A pin may live in a directory owned by root or the operator. A sticky system
 // temporary directory protects its operator-owned children against replacement.
-fn trusted_path(path: &Path, uid: u32) -> Result<(), Failure> {
+pub(super) fn trusted_path(path: &Path, uid: u32) -> Result<(), Failure> {
     if !path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
         return Err(Failure::context("expected an absolute path without '..'"));
     }

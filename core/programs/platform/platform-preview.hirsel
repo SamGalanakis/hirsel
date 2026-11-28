@@ -199,6 +199,10 @@ fn decide(mut h: Host, conn: u64, d: Bytes, submitted_digest: Bytes, verdict: op
         refuse(mut h, conn, InvalidClass, "the fates must cover exactly the held entries")
         return
     }
+    if let RetirementStage = decision.stage {
+        approve_retirement(mut h, conn, d, r, mut out)
+        return
+    }
     if let CreationStage = decision.stage {
         create_approved(mut h, conn, d, r, now, mut out)
         return
@@ -299,6 +303,11 @@ fn deploy_of(h: Host, name: String, d: Bytes) -> Option[DeployRow] waits {
 // Request d's phase as State reports it. An open request's phase comes from its live work.
 fn phase_of(h: Host, d: Bytes, r: RequestRow) -> operator.Phase waits {
     match r.status {
+        Done(RetiringPhase) => match group_row(h, r.group.name) {
+            Ok(Some(g)) if g.incarnation == r.group.incarnation => RetiringPhase,
+            Error(_) => RetiringPhase,
+            _ => RetiredPhase,
+        },
         Done(p) => clone(p),
         Held(decision) => AwaitDecision(clone(decision)),
         Open => open_phase(h, r.group.name, d, r.attempt),

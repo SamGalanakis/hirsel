@@ -203,6 +203,10 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
         name.push(' ');
         name.push_str(&verb);
     }
+    if name == "host" && arguments.peek().is_some_and(|s| s == "retire") {
+        name.push_str(" retire");
+        arguments.next();
+    }
     if name == "store archive" {
         match arguments.next() {
             Some(sub) if !is_help(&sub) => name.push_str(&format!(" {sub}")),

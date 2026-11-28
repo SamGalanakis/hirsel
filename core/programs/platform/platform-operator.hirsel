@@ -113,6 +113,8 @@ pub fn asked(mut h: Host, conn: u64, body: Bytes, now: Now) -> List[launcher.Req
             let observed = historical(h, name, incarnation, activation)
             answer_observation(mut h, conn, take observed)
         },
+        RetireAsk(_, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
+        RetireAsk(d, subject) => propose_retirement(mut h, conn, ask, d, subject),
         BackupAsk(_) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
         BackupAsk(name) => backup_ask(mut h, conn, name, mut out),
     }
@@ -144,6 +146,8 @@ fn observed_phase(p: operator.Phase) -> operator.OperationPhase {
         PendingPhase(_, _) => PendingOperationPhase,
         UndecidedPhase(_, _, _) => UndecidedOperationPhase,
         AwaitDecision(_) => DecisionOperationPhase,
+        RetiringPhase => RetiringOperationPhase,
+        RetiredPhase => RetiredOperationPhase,
         InstalledPhase(_, _, _) => InstalledOperationPhase,
         FailedPhase(_, _, _) => FailedOperationPhase,
     }

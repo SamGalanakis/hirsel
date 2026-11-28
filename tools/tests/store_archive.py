@@ -7,9 +7,11 @@ the object bytes are supplied to the drill. There is no source Store.
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
+from store_index_recovery import check_index_repair
 from store_archive_server import ArchiveServer, KEYS
 
 
@@ -17,7 +19,7 @@ FIXTURE = Path("tools/tests/fixtures/store-archive-format14.json")
 PARENT = "5ecfd92b020e2a1e0a6d81c54c6fdbda"
 
 
-def drill(hirsel, server, work):
+def drill(hirsel, server, work, release):
     env = dict(os.environ, TMPDIR=str(work), XDG_STATE_HOME=str(work / "state"))
     for role, user in [("READ", "reader"), ("EXPIRY", "expiry")]:
         env[f"HIRSEL_ARCHIVE_{role}_ACCESS_KEY_ID"] = user
@@ -81,6 +83,10 @@ def drill(hirsel, server, work):
     assert receipt["boundary"] == plan["result"]["point"]["boundary"]
     assert f"store {receipt['child']} head 3" in run("store", "inspect", child)
     run("store", "verify", child)
+    released = run("store", "verify", child, "--release", release)
+    assert "0 problems" in released and "not walked" not in released, released
+    subprocess.run([release, "check-cut"], cwd=child, check=True)
+    print(f"release-backed cold drill: child={receipt['child']} attempt={receipt['attempt']} version={receipt['version']} boundary={receipt['boundary']} {released.strip()}", flush=True)
     assert run("store", "backup", child, "second").split() == ["backup", receipt["child"], "head", "3"]
     assert server.objects == original
     stale = expire("--at", interval["first_ms"])
@@ -100,11 +106,68 @@ def drill(hirsel, server, work):
     refused = run("store", "restore", "--from", source, "--target", "boundary:" + receipt["boundary"],
                   "--to", "expired-child", "--plan", "--json", code=1)
     assert "BelowFloor" in refused["error"]["detail"]
+    env["HIRSEL_RESTORE_BUCKET_ACCESS_KEY_ID"] = "child"
+    env["HIRSEL_RESTORE_BUCKET_SECRET_ACCESS_KEY"] = KEYS["child"].decode()
+    location = {k: v for k, v in descriptor.items() if k != "parent"}
+    profile_path = work / "bucket.json"
+    profile = {"location": dict(location, prefix="children/archive/"), "level": "bucket",
+               "source_place": None, "host_stream": None}
+
+    def bucket_plan(origin, target="latest", code=0):
+        profile_path.write_text(json.dumps(profile))
+        profile_path.chmod(0o600)
+        return run("store", "restore", "--from", origin, "--target", target,
+                   "--to", "@" + str(profile_path), "--plan", "--json", code=code)
+
+    # Trusted coordinates fence every reserved Place and stream prefix before writes.
+    profile["host_stream"] = dict(location, prefix="children/")
+    bucket_plan(source, code=1)
+    profile["host_stream"] = None
+    untouched = server.objects.copy()
+    review = bucket_plan(source)
+    other = bucket_plan(source)
+    assert review["outcome"]["effect"] == "none" and server.objects == untouched
+    server.lose_head_reply = "children/archive/head"
+    answer = decide(review)
+    assert server.lose_head_reply is None and answer["result"]["parent"] == PARENT
+    assert answer["result"]["child"] != PARENT and answer["result"]["version"] == "4"
+    assert answer["result"]["destination"] == profile["location"]
+    durable = server.objects.copy()
+    decide(other, code=1)
+    assert server.objects == durable
+    # Recover the exact genesis after losing the external acknowledgement, with
+    # the source profile and reader credential removed.
+    attempt = review["result"]["attempt"]
+    published, = (work / "state").rglob(f"store-{attempt}.published.json")
+    published.unlink()
+    path.unlink()
+    del env["HIRSEL_ARCHIVE_READ_SECRET_ACCESS_KEY"]
+    observed = run("op", "get", review["operation"]["id"], "--json")
+    assert observed["result"] == answer["result"]
+    profile["location"]["prefix"] = "children/backup/"
+    backup = bucket_plan(work / "second")
+    assert decide(backup)["result"]["parent"] == receipt["child"]
+    assert {k:v for k,v in server.objects.items() if not k.startswith("children/")} == surviving
     print("L-A9 archive: signed read-only selection, missing/corrupt references, offline fresh child, expiry CAS and BelowFloor")
 
 
 if __name__ == "__main__":
     compiler = (Path(sys.argv[1]) if len(sys.argv) > 1 else
                 Path(os.environ["HIRSEL_TOOLCHAIN_BUNDLE"]) / "hirsel").resolve()
-    with ArchiveServer(FIXTURE) as archive, tempfile.TemporaryDirectory(prefix="archive-drill-") as temp:
-        drill(compiler, archive, Path(temp))
+    with tempfile.TemporaryDirectory(prefix="archive-drill-") as temp:
+        root = Path(temp)
+        if len(sys.argv) == 4:
+            release, indexed = [Path(p).resolve() for p in sys.argv[2:]]
+        else:
+            package = root / "verifier"
+            shutil.copytree(FIXTURE.parent / "store-recovery-release", package)
+            release, indexed = root / "recovery-release", root / "indexed-release"
+            for artifact, entry in [(release, "main"), (indexed, "indexed")]:
+                subprocess.run([compiler, "build", package, "--entry", f"drill@1/main/{entry}",
+                                "--grant", "Net=Listen 127.0.0.1/32 0-65535", "--dir", "/proc/self/cwd",
+                                "--grant", "Clock", "--grant", "Random", "--grant", "Tasks",
+                                "--grant", "Process", "--grant", "Stderr", "--limit", "2147483648",
+                                "-o", artifact], cwd=root, check=True)
+        check_index_repair(compiler, indexed, root, FIXTURE.parent / "store-index-damage-format14.json")
+        with ArchiveServer(FIXTURE) as archive:
+            drill(compiler, archive, root, release)

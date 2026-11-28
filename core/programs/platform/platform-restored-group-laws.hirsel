@@ -58,6 +58,16 @@ fn restored_report(registered: store.Restored, desc: runner.Describe) -> runner.
     runner.PlaceReady(version: registered.point.activation, store_hi: registered.child.hi, store_lo: registered.child.lo, release: result.unwrap(runner.described_release(desc)), retain_from: 0, ready_ns: 0, read: take payload)
 }
 
+fn restored_routed(h: Host) -> bool waits {
+    let routes = must(routing_table(h), "restore routing table")
+    for route in routes {
+        if route.group == "restored" {
+            return true
+        }
+    }
+    false
+}
+
 fn start_restored(mut fixture: Rig, restored: store.Restored, desc: runner.Describe) waits {
     let spec = NewGroup(name: "restored", tenant: "t", workdir: "group", author: Trusted, listen: "127.0.0.1:8020", front: None, store: "restored/", memory: None, assembly: image(), activation: restored.point.activation, args: list.new(), record: None)
     let added = must(add_restored_group(mut fixture.h, spec, restored, desc), "restore registration")
@@ -97,6 +107,7 @@ fn test_la11_host_adopts_restored_child(d: Dir, c: Clock, rnd: Random, tasks: Ta
     for case in 0u64 .. 3 {
         let mut before = rig(c, rnd, 2)
         start_restored(mut before, restored, desc)
+        expect(!restored_routed(before.h), "restored group was routed before PlaceOpened")
         let ch = last(before, "restored")
         let mut fixture = restart(take before, 2)
         let mut report = restored_report(restored, desc)
@@ -108,6 +119,7 @@ fn test_la11_host_adopts_restored_child(d: Dir, c: Clock, rnd: Random, tasks: Ta
         }
         let replies = apply(mut fixture, Got(Placed(clone(ch), PlaceOpened(clone(report)))))
         expect(saw_accept(replies) == (case == 2), "identity or release acceptance after host restart")
+        expect(restored_routed(fixture.h) == (case == 2), "route did not follow durable acceptance")
         if case == 2 {
             let mut recovered_host = restart(take fixture, 2)
             let replay = apply(mut recovered_host, Got(Placed(clone(ch), PlaceOpened(clone(report)))))

@@ -12,6 +12,15 @@ pub(crate) fn command(
     destination: &File,
 ) -> Result<Command, Box<dyn std::error::Error>> {
     let mut command = Command::new(super::installed(helper)?);
+    for role in [
+        "HIRSEL_ARCHIVE_READ",
+        "HIRSEL_ARCHIVE_EXPIRY",
+        "HIRSEL_RESTORE_BUCKET",
+    ] {
+        for field in ["ACCESS_KEY_ID", "SECRET_ACCESS_KEY", "SESSION_TOKEN"] {
+            command.env_remove(format!("{role}_{field}"));
+        }
+    }
     command.stdin(Stdio::null());
     let fds = [source.as_raw_fd(), destination.as_raw_fd()];
     // SAFETY: Only async-signal-safe descriptor operations run between fork and exec.

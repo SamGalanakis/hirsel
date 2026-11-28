@@ -6,6 +6,7 @@ use hirsel_core_ids::hex;
 /// The decision a held request awaits, as `hirsel op decide` and State print it.
 pub(super) fn decision_json(decision: &Decision) -> serde_json::Value {
     let stage = match decision.stage {
+        DecisionStage::Retirement => "retirement",
         DecisionStage::Creation => "creation",
         DecisionStage::Admission => "admission",
         DecisionStage::Prepared => "prepared",

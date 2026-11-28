@@ -1,0 +1,49 @@
+pub type BucketAccess: send {
+    location: std.object.Bucket,
+    credentials: std.cred.Credentials
+}
+
+pub fn bucket_command(from: Dir, work: Dir, net: Net, tasks: Tasks, c: Clock, r: Random, out: Stdout, err: Stderr, take dest: BucketAccess, take archive: Option[(BucketAccess, String)], take source_place: Option[std.object.Bucket], take host_stream: Option[std.object.Bucket], level_name: String, argv: Args) -> Result[(), Exit] waits {
+    let names = store.RestoreNamespaces(source_place: take source_place, host_stream: take host_stream)
+    let BucketAccess(location: take location, credentials: take creds) = take dest
+    let mut dst = open_tool_bucket(net, tasks, c, r, take location, take creds, err)?
+    let verb = operand(argv, 0)?
+    let target = selector(argv)?
+    if verb == "observe-bucket" {
+        let BranchBoundary(branch_id, token) = target else {
+            return Error(usage())
+        }
+        return match store.published_bucket_restore(mut dst, token, branch_id, count_arg(argv, 5)?, count_arg(argv, 6)?, attempt_arg(argv, 4)?, ARCHIVE_OP_MS) {
+            Ok(Some(id)) => say(out, id_hex(id.hi, id.lo)),
+            Ok(None) => say(out, "pending"),
+            Error(e) => archive_failure(err, e),
+        }
+    }
+    let mut source: store.RestoreSource = match take archive {
+        Some((take access, take parent)) => {
+            let BucketAccess(location: take src_bucket, credentials: take src_creds) = take access
+            let cli = open_tool_bucket(net, tasks, c, r, take src_bucket, take src_creds, err)?
+            ArchivedStore(take cli, archive_parent(parent)?, ARCHIVE_OP_MS)
+        },
+        None => StampedBackup(from),
+    }
+    let options = store.sized(Directory, 2147483648u64) ?=> |_| Exit(status: 1u8)
+    if verb == "plan-bucket" {
+        return match store.plan_bucket_restore(mut source, mut dst, names, work, c, options, target, ARCHIVE_OP_MS, runner.restored_release) {
+            Ok(take resolution) => selected_point(take resolution, err, out),
+            Error(Store(e)) => archive_failure(err, e),
+            Error(e) => refused(err, deploy_refusal(e)),
+        }
+    }
+    if verb != "publish-bucket" {
+        return Error(usage())
+    }
+    let BranchBoundary(_, _) = target else {
+        return Error(usage())
+    }
+    match store.restore_to_bucket(tasks, take source, mut dst, level_name, names, work, c, r, options, target, attempt_arg(argv, 4)?, ARCHIVE_OP_MS, runner.restored_release) {
+        Ok(take receipt) => say(out, point_text(receipt.point, Some(receipt.child))?),
+        Error(Store(e)) => archive_failure(err, e),
+        Error(e) => refused(err, deploy_refusal(e)),
+    }
+}

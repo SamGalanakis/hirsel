@@ -42,6 +42,9 @@
     "libexec/hirsel/pin_reader": {
       "contents": "the Hirsel offline pin reader, linked with the shipped runtime archive"
     },
+    "libexec/hirsel/bucket_tool": {
+      "contents": "the Hirsel Bucket restore tool, linked with the shipped runtime archive"
+    },
     "libexec/hirsel/archive_tool": {
       "contents": "the Hirsel archive inspection and recovery tool, linked with the shipped runtime archive"
     },

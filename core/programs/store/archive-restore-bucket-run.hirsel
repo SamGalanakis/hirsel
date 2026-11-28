@@ -1,21 +1,27 @@
+fn bucket_restore_release(db: Db, selected: RestorePoint, verify: fn(Db) -> Result[RestoreRelease, Error] waits) -> Result[RestorePoint, DeployError] waits {
+    let mut point = selected
+    for branch_head in pages.holder_heads(db.holders) {
+        if pages.tiered_collections(branch_head.roots.collections.root) {
+            return Error(UnsupportedResidency)
+        }
+    }
+    for pin_row in pages.holder_pins(db.holders) {
+        if pages.tiered_collections(pin_row.roots.collections.root) {
+            return Error(UnsupportedResidency)
+        }
+    }
+    let release = verified_point_release(db, point, verify)?
+    point.activation = release.activation
+    point.binding = release.binding
+    Ok(point)
+}
+
 fn restore_bucket_staged(tasks: Tasks, mut source: RestoreSource, mut dst: std.object.Client, work: Dir, c: Clock, r: Random, options: Options, selected: RestorePoint, attempt: Inline[u8, 16], exact_retry: bool, level_name: String, deadline: u64, verify: fn(Db) -> Result[RestoreRelease, Error] waits) -> Result[Restored, DeployError] waits {
     let mut point = selected
     let requested = restore_origin_for(point, attempt)
     let stamp = restore_stage(mut source, work, point)?
     let recovered = open_copied(work, c, stamp.attempt, options, false)?
-    for branch_head in pages.holder_heads(recovered.db.holders) {
-        if pages.tiered_collections(branch_head.roots.collections.root) {
-            return Error(UnsupportedResidency)
-        }
-    }
-    for pin_row in pages.holder_pins(recovered.db.holders) {
-        if pages.tiered_collections(pin_row.roots.collections.root) {
-            return Error(UnsupportedResidency)
-        }
-    }
-    let release = verified_point_release(recovered.db, point, verify)?
-    point.activation = release.activation
-    point.binding = release.binding
+    point = bucket_restore_release(recovered.db, point, verify)?
     let _ = take recovered
     if let Some((published, saved)) = deploy_result(restore_bucket_published(mut dst, requested, exact_retry, deadline))? {
         return Ok(Restored(child: published, point: restore_saved_point(point, saved), attempt))
@@ -30,7 +36,7 @@ fn restore_bucket_staged(tasks: Tasks, mut source: RestoreSource, mut dst: std.o
     scratch_result(failure_result_from_rep(manifest.disk_io(host.mkdir(work, "foundation"))))?
     let foundation = scratch_result(failure_result_from_rep(manifest.disk_io(host.open_dir(work, "foundation"))))?
     deploy_result(restore_write_foundation(work, foundation, child, point, origin))?
-    deploy_result(restore_emit_bucket(mut dst, foundation, child, origin, release, level_name, r, deadline))?
+    deploy_result(restore_emit_bucket(mut dst, foundation, child, origin, RestoreRelease(activation: point.activation, binding: point.binding), level_name, r, deadline))?
     // The head now carries the reservation's identity and provenance.
     let _ = std.object.erase(mut dst, RESTORE_RESERVATION, deadline)
     Ok(Restored(child, point, attempt))
@@ -39,10 +45,7 @@ fn restore_bucket_staged(tasks: Tasks, mut source: RestoreSource, mut dst: std.o
 pub fn restore_to_bucket(tasks: Tasks, take input: RestoreSource, mut destination: std.object.Client, level_name: String, namespaces: RestoreNamespaces, scratch: Dir, c: Clock, r: Random, options: Options, target: RestoreTarget, attempt: Inline[u8, 16], op_ms: u64, verify: fn(Db) -> Result[RestoreRelease, Error] waits) -> Result[Restored, DeployError] waits {
     let mut source = take input
     deploy_result(restore_disjoint(std.object.bucket_config(destination), source, namespaces))?
-    let resolution = match source {
-        StampedBackup(d) => plan_backup_restore(d, target)?,
-        ArchivedStore(mut src, parent, ms) => deploy_result(plan_archive_restore(mut src, parent, target, ms))?,
-    }
+    let resolution = bucket_restore_selection(mut source, target)?
     let RestorePresent(point) = take resolution else {
         return Error(ExportMismatch)
     }
@@ -54,4 +57,36 @@ pub fn restore_to_bucket(tasks: Tasks, take input: RestoreSource, mut destinatio
     let answer_out = restore_bucket_staged(tasks, mut source, mut destination, work, c, r, options, point, attempt, restore_is_pinned(target), level_name, deadline, verify)
     scratch_result(failure_result_from_rep(manifest.disk_io(host.remove_tree(scratch, tmp))))?
     take answer_out
+}
+
+fn bucket_restore_selection(mut source: RestoreSource, target: RestoreTarget) -> Result[RestoreResolution, DeployError] waits {
+    match source {
+        StampedBackup(d) => plan_backup_restore(d, target),
+        ArchivedStore(mut src, parent, ms) => deploy_result(plan_archive_restore(mut src, parent, target, ms)),
+    }
+}
+
+pub fn plan_bucket_restore(mut source: RestoreSource, mut destination: std.object.Client, namespaces: RestoreNamespaces, work: Dir, c: Clock, options: Options, target: RestoreTarget, op_ms: u64, verify: fn(Db) -> Result[RestoreRelease, Error] waits) -> Result[RestoreResolution, DeployError] waits {
+    deploy_result(restore_disjoint(std.object.bucket_config(destination), source, namespaces))?
+    let due = std.object.deadline_after_ms(destination, op_ms)
+    deploy_result(failure_result_from_rep(history.history_check_endpoint(mut destination, due)))?
+    deploy_result(restore_check_keys(mut destination, map.new(), due))?
+    let resolution = bucket_restore_selection(mut source, target)?
+    let RestorePresent(point) = resolution else {
+        return Ok(take resolution)
+    }
+    let stamp = restore_stage(mut source, work, point)?
+    let recovered = open_copied(work, c, stamp.attempt, options, false)?
+    Ok(RestorePresent(bucket_restore_release(recovered.db, point, verify)?))
+}
+
+pub fn published_bucket_restore(mut dst: std.object.Client, token: RestoreToken, branch_id: u32, selected_version: u64, at: u64, attempt: Inline[u8, 16], op_ms: u64) -> Result[Option[StoreId], Error] waits {
+    let expected = manifest.RestoreOrigin(parent: store_key_to_rep(token.parent), binding_id: token.binding_id, branch: branch_id, version: selected_version, at, boundary: token.boundary, attempt, capture_attempt: token.capture_attempt)
+    let due = std.object.deadline_after_ms(dst, op_ms)
+    let found = restore_bucket_published(mut dst, expected, false, due)?
+    match found {
+        Some((child, _)) if child == token.parent => Error(Foreign),
+        Some((child, _)) => Ok(Some(child)),
+        None => Ok(None),
+    }
 }

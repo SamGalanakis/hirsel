@@ -25,12 +25,14 @@ pub(super) use super::receipt::operations_dir;
 #[serde(untagged)]
 pub(super) enum StorePlan {
     Restore(RestorePlan),
+    Bucket(super::bucket::BucketPlan),
     Expiry(super::archive_decision::Expiry),
 }
 impl StorePlan {
     fn attempt(&self) -> &str {
         match self {
             Self::Restore(p) => &p.attempt,
+            Self::Bucket(p) => &p.attempt,
             Self::Expiry(p) => &p.attempt,
         }
     }
@@ -43,12 +45,14 @@ impl StorePlan {
     pub(super) fn held(&self, env: &mut Envelope<'_>) {
         match self {
             Self::Restore(p) => p.held(&self.digest(), env),
+            Self::Bucket(p) => p.held(&self.digest(), env),
             Self::Expiry(p) => p.held(&self.digest(), env),
         }
     }
     fn publish(&self, path: &Path) -> Result<serde_json::Value, Failure> {
         match self {
             Self::Restore(p) => p.publish(path),
+            Self::Bucket(p) => p.publish(),
             Self::Expiry(p) => p.apply(),
         }
     }
@@ -123,6 +127,7 @@ fn observe(path: &Path, plan: &StorePlan, env: &mut Envelope<'_>) -> Result<bool
                     p.observe(&path.with_extension("directory.json"))?,
                     "published",
                 ),
+                StorePlan::Bucket(p) => (p.observe()?, "published"),
                 StorePlan::Expiry(_) => (previous.clone(), "expired"),
             };
             if previous.is_some() && previous != live {

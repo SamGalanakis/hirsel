@@ -3,6 +3,7 @@
 //! jump_{x86_64_sysv,arm64_aapcs}_elf_gas.S. Scheduling is caller-owned.
 #[cfg(test)]
 hirsel_guard::install!();
+pub mod sanitizer;
 pub type Entry = unsafe extern "C" fn(*mut u8, *mut u8) -> !;
 #[cfg(target_arch = "x86_64")]
 pub fn initial_frame(entry: Entry, first: *mut u8, second: *mut u8) -> [u64; 8] {
@@ -61,6 +62,33 @@ macro_rules! x86_switch {
 }
 #[cfg(target_arch = "x86_64")]
 x86_switch!(switch, "");
+/// Switch to a suspended frame saved by [`switch`], abandoning the current
+/// stack without writing a save slot (safe after ASan destroys a dying fiber's
+/// fake stack).
+///
+/// # Safety
+/// `to` must point directly at a live frame saved by [`switch`].
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+pub unsafe extern "C" fn switch_abandon(_to: *mut u8) -> ! {
+    core::arch::naked_asm!(
+        ".cfi_startproc",
+        ".cfi_def_cfa rsp, 0",
+        ".cfi_undefined rip",
+        "mov rsp, rdi",
+        "ldmxcsr [rsp]",
+        "fldcw [rsp + 4]",
+        "add rsp, 8",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop rbx",
+        "pop rbp",
+        "ret",
+        ".cfi_endproc",
+    )
+}
 /// Resume a suspended host stack saved by [`switch`], abandoning the current
 /// stack. Used by the signal handler's `ucontext` rewrite (EMB-3) to jump back
 /// to the worker's host stack at the saved `switch` frame.
@@ -138,6 +166,35 @@ pub unsafe extern "C" fn switch(_save: *mut *mut u8, _to: *mut u8) {
         "mov x2, sp",
         "str x2, [x0]",
         "mov sp, x1",
+        "ldp x19, x20, [sp, #0]",
+        "ldp x21, x22, [sp, #16]",
+        "ldp x23, x24, [sp, #32]",
+        "ldp x25, x26, [sp, #48]",
+        "ldp x27, x28, [sp, #64]",
+        "ldp x29, x30, [sp, #80]",
+        "ldp d8, d9, [sp, #96]",
+        "ldp d10, d11, [sp, #112]",
+        "ldp d12, d13, [sp, #128]",
+        "ldp d14, d15, [sp, #144]",
+        "add sp, sp, #160",
+        "ret",
+        ".cfi_endproc",
+    )
+}
+
+/// Switch to a suspended frame saved by [`switch`], abandoning the current
+/// stack without writing a save slot.
+///
+/// # Safety
+/// `to` must point directly at a live frame saved by [`switch`].
+#[cfg(target_arch = "aarch64")]
+#[unsafe(naked)]
+pub unsafe extern "C" fn switch_abandon(_to: *mut u8) -> ! {
+    core::arch::naked_asm!(
+        ".cfi_startproc",
+        ".cfi_def_cfa sp, 0",
+        ".cfi_undefined x30",
+        "mov sp, x0",
         "ldp x19, x20, [sp, #0]",
         "ldp x21, x22, [sp, #16]",
         "ldp x23, x24, [sp, #32]",

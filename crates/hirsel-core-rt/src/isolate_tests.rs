@@ -236,3 +236,72 @@ fn secondary_cancellation_or_out_of_time_does_not_bypass_isolate() {
         }
     }
 }
+
+#[test]
+fn caught_reserved_cell_outliving_context_retires_domain_cleanly() {
+    let mut context = started(1024);
+    assert!(unsafe { hirsel_core_isolate_enter(&mut context) }.entered);
+    unsafe { causes::record(&mut context, Cause::new(causes::UNWRAP, 61)) };
+    let caught = unsafe { hirsel_core_isolate_catch(&mut context) };
+    assert_eq!(caught.status, 0);
+    drop_caught(caught.causes);
+    let reserved = context
+        .primary
+        .take()
+        .expect("caught isolate reserves primary");
+    assert!(reserved.reserved);
+    // Drop the owning context first so its Funding domain retires while the
+    // reserved cell still holds its 32-byte charge.
+    drop(context);
+    drop(reserved);
+}
+
+#[test]
+fn caught_reserved_cell_dropped_on_foreign_thread_returns_bytes_to_parent() {
+    struct SendCell(*mut causes::Cell);
+    // SAFETY: exclusive ownership of the cell moves to the worker thread once.
+    unsafe impl Send for SendCell {}
+
+    let mut context = started(1024);
+    let before = context.available();
+    assert!(unsafe { hirsel_core_isolate_enter(&mut context) }.entered);
+    unsafe { causes::record(&mut context, Cause::new(causes::UNWRAP, 62)) };
+    let caught = unsafe { hirsel_core_isolate_catch(&mut context) };
+    assert_eq!(caught.status, 0);
+    assert_eq!(context.available(), before - 32);
+    drop_caught(caught.causes);
+    assert_eq!(context.available(), before);
+
+    let raw = context
+        .primary
+        .take()
+        .expect("caught isolate reserves primary")
+        .into_raw();
+    let cell = SendCell(raw);
+    std::thread::spawn(move || {
+        let cell = cell;
+        // SAFETY: `cell.0` is an exclusively owned `OwnedCell` pointer.
+        unsafe { drop(causes::OwnedCell::from_raw(cell.0)) };
+    })
+    .join()
+    .unwrap();
+    context.current.drain();
+    assert_eq!(context.available(), before + 32);
+}
+
+#[test]
+fn context_drop_after_task_start_releases_heap_without_orphaning() {
+    let mut context = Context::new(4096);
+    causes::task_start(&mut context).unwrap();
+    let heap = std::sync::Arc::downgrade(
+        context
+            .heap
+            .get()
+            .expect("task_start allocates the task record on the context heap"),
+    );
+    drop(context);
+    assert!(
+        heap.upgrade().is_none(),
+        "dropping a Context after task_start must free task_record before closing its heap"
+    );
+}

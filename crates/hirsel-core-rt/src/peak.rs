@@ -422,7 +422,7 @@ mod tests {
                     );
                     *cursor += 1;
                     if counted::decrement(child, true) {
-                        (*work).stage_fixed(child, &LEAF.descriptor, *cursor);
+                        (*work).stage_fixed(child, LEAF.as_ptr(), *cursor);
                         return false;
                     }
                 }
@@ -478,7 +478,7 @@ mod tests {
         // SAFETY: the root's last holder transfers its exact descriptor.
         unsafe {
             assert!(counted::decrement(parent, false));
-            crate::abi::hirsel_core_release(&mut context, parent, &PARENT.descriptor, 0);
+            crate::abi::hirsel_core_release(&mut context, parent, PARENT.as_ptr(), 0);
         }
         assert_eq!(context.available(), 112);
         assert_eq!(
@@ -492,7 +492,7 @@ mod tests {
         // SAFETY: the external shared holder is now the only one left.
         unsafe {
             assert!(counted::decrement(shared, true));
-            crate::abi::hirsel_core_release(&mut context, shared, &LEAF.descriptor, 0);
+            crate::abi::hirsel_core_release(&mut context, shared, LEAF.as_ptr(), 0);
         }
         assert_eq!(context.available(), 128);
         assert_eq!(figures(), Figures::default());
@@ -584,19 +584,29 @@ mod tests {
     }
     #[test]
     fn consuming_growth_observes_full_new_charge_and_only_live_backing() {
+        #[repr(C)]
+        struct Carrier {
+            data: *mut u8,
+            len: u64,
+            cap: u64,
+        }
         for kind in [crate::block::PLAIN, crate::block::GRAPH] {
             let context = Context::new(4096);
             let run = Run::start(&context);
             let old = crate::block::allocate(&context, context.payer(), Some(1024), 1024, 8, kind)
                 .unwrap();
-            let mut carrier = [old.as_ptr().addr() as u64, 1, 1024];
+            let mut carrier = Carrier {
+                data: old.as_ptr(),
+                len: 1,
+                cap: 1024,
+            };
             // SAFETY: exclusive live sequence backing and carrier, exact charges
             // and initialized prefix; the byte to transfer is initialized here.
             let replacement = unsafe {
                 old.as_ptr().write(42);
                 crate::growth::replace(
                     &context,
-                    carrier.as_mut_ptr().cast(),
+                    (&raw mut carrier).cast(),
                     2048,
                     8,
                     2048,
@@ -609,7 +619,10 @@ mod tests {
                 )
                 .unwrap()
             };
-            assert_eq!(carrier, [replacement.as_ptr().addr() as u64, 1, 2048]);
+            assert_eq!(
+                (carrier.data, carrier.len, carrier.cap),
+                (replacement.as_ptr(), 1, 2048)
+            );
             // In both layouts the payer word crosses a size-class boundary.
             let (old_slot, new_slot) = (1280, 2560);
             assert_eq!(

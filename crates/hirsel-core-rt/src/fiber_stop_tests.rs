@@ -234,6 +234,7 @@ fn discarding_below_a_parked_stack_keeps_its_live_frames() {
         saved: *mut u8,
         caller: *mut u8,
         bottom: *mut u8,
+        sanitizer: hirsel_stack::sanitizer::FiberState,
         result: u64,
     }
     unsafe extern "C" fn body(first: *mut u8, _: *mut u8) -> ! {
@@ -242,10 +243,15 @@ fn discarding_below_a_parked_stack_keeps_its_live_frames() {
         // SAFETY: the pinned state and both stacks outlive these switches.
         // The bottom byte is scratch. The local remains live across the park.
         unsafe {
+            let _ = (*state).sanitizer.entered();
             (*state).bottom.write_volatile(9);
-            hirsel_stack::switch(&raw mut (*state).saved, (*state).caller);
+            let _ = (*state)
+                .sanitizer
+                .switch_out(&raw mut (*state).saved, (*state).caller);
             (*state).result = (&raw const live).read_volatile();
-            hirsel_stack::switch(&raw mut (*state).saved, (*state).caller);
+            (*state)
+                .sanitizer
+                .switch_exit(&raw mut (*state).saved, (*state).caller);
         }
         unreachable!()
     }
@@ -253,21 +259,30 @@ fn discarding_below_a_parked_stack_keeps_its_live_frames() {
     let stack = super::Stack::new();
     // SAFETY: this address lies in the initial writable stack extent.
     let bottom = unsafe { stack.base.as_ptr().add(stack.len - super::COMMIT) };
+    let sanitizer = hirsel_stack::sanitizer::FiberState::new();
+    // SAFETY: fresh fiber state has no active TSan fiber.
+    unsafe { sanitizer.reset() };
     let mut state = Parked {
         saved: std::ptr::null_mut(),
         caller: std::ptr::null_mut(),
         bottom,
+        sanitizer,
         result: 0,
     };
     // SAFETY: state lives until both switches return. Only one stack runs at
     // a time. The first return owns a suspended frame above its saved SP.
     unsafe {
         let first = stack.prepare(body, (&raw mut state).cast(), std::ptr::null_mut());
-        hirsel_stack::switch(&raw mut state.caller, first);
+        state
+            .sanitizer
+            .switch_in(&raw mut state.caller, first, stack.sanitizer_bounds());
         assert_eq!(bottom.read_volatile(), 9);
         stack.discard_below(state.saved.addr());
         assert_eq!(bottom.read_volatile(), 0);
-        hirsel_stack::switch(&raw mut state.caller, state.saved);
+        state
+            .sanitizer
+            .switch_in(&raw mut state.caller, state.saved, stack.sanitizer_bounds());
+        state.sanitizer.clear();
     }
     assert_eq!(state.result, 23);
 }
@@ -302,6 +317,7 @@ fn commit_edge_call_child() {
     struct Edge {
         callee: *const super::Stack,
         caller: *mut u8,
+        sanitizer: hirsel_stack::sanitizer::FiberState,
         result: u64,
     }
     unsafe extern "C" fn body(first: *mut u8, _: *mut u8) -> ! {
@@ -309,19 +325,22 @@ fn commit_edge_call_child() {
         // SAFETY: the parent pins the state and both stacks until it resumes;
         // the callee stack is idle and the call does not switch.
         unsafe {
+            let _ = (*edge).sanitizer.entered();
             (*edge).result = (*(*edge).callee).call(|| std::hint::black_box(7_u64));
-            let mut discard = std::ptr::null_mut();
-            hirsel_stack::switch(&mut discard, (*edge).caller);
+            (*edge).sanitizer.switch_abandon((*edge).caller)
         }
-        unreachable!()
     }
     super::arm();
     for offset in (0..16 << 10).step_by(16) {
         let caller = super::Stack::new();
         let callee = super::Stack::new();
+        let sanitizer = hirsel_stack::sanitizer::FiberState::new();
+        // SAFETY: fresh fiber state has no active TSan fiber.
+        unsafe { sanitizer.reset() };
         let mut edge = Edge {
             callee: &callee,
             caller: std::ptr::null_mut(),
+            sanitizer,
             result: 0,
         };
         let words = hirsel_stack::initial_frame(body, (&raw mut edge).cast(), std::ptr::null_mut());
@@ -332,7 +351,9 @@ fn commit_edge_call_child() {
             let start = std::ptr::with_exposed_provenance_mut::<u8>(edge_address + offset);
             std::ptr::copy_nonoverlapping(words.as_ptr().cast::<u8>(), start, size_of_val(&words));
             super::guard(caller.bounds());
-            hirsel_stack::switch(&raw mut edge.caller, start);
+            edge.sanitizer
+                .switch_in(&raw mut edge.caller, start, caller.sanitizer_bounds());
+            edge.sanitizer.clear();
         }
         super::guard((0, 0, 0));
         assert_eq!(edge.result, 7, "offset {offset}");

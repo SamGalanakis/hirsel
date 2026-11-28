@@ -303,6 +303,7 @@ pub(crate) struct Unit {
     execution: &'static crate::run_stop::Execution,
     /// A helper unit's body (CONC-15), run in place of main.
     job: Cell<Option<Job>>,
+    pub(super) sanitizer: hirsel_stack::sanitizer::FiberState,
 }
 /// A helper unit's body.
 pub(crate) type Job = Box<dyn FnOnce() + Send>;
@@ -445,6 +446,7 @@ unsafe fn start_stack(p: &'static Pool, ix: usize, u: &Unit) -> bool {
         unsafe {
             *u.sp.get() =
                 unit_stack.prepare_frame(unit_entry, (u as *const Unit).cast_mut().cast());
+            u.sanitizer.reset();
         }
         return true;
     }
@@ -463,16 +465,13 @@ pub(super) unsafe extern "C" fn unit_entry(a: *mut u8, _b: *mut u8) -> ! {
     // SAFETY: the record outlives its stack; see create_unit.
     unsafe {
         let u = &*(a as *const Unit);
+        let _ = u.sanitizer.entered();
         let status = match u.job.take() {
             Some(job) => {
                 job();
                 0
             }
-            None => {
-                let run = u.execution.launch.get().unwrap().run;
-                let status = run(&u.config);
-                status
-            }
+            None => (u.execution.launch.get().unwrap().run)(&u.config),
         };
         // The program and all its local tasks have returned. A page with
         // outstanding slots still owns its Arc, even across record reuse.
@@ -481,19 +480,18 @@ pub(super) unsafe extern "C" fn unit_entry(a: *mut u8, _b: *mut u8) -> ! {
         }
         u.status.store(status, Ordering::Relaxed);
         u.after.set(After::Done);
-        hirsel_stack::switch(u.sp.get(), **u.host.get());
+        u.sanitizer.switch_exit(u.sp.get(), **u.host.get());
         std::process::abort()
     }
 }
 
-/// Switch from the running unit back to its worker. Returns when a worker
-/// (any) resumes the unit.
+/// Switch from the running unit back to its worker until a worker resumes it.
 fn leave(u: &Unit, after: After) {
     // SAFETY: called on the unit's own stack while it runs.
     unsafe {
         crate::tasks::check_idle_tls();
         u.after.set(after);
-        hirsel_stack::switch(u.sp.get(), **u.host.get());
+        let _ = u.sanitizer.switch_out(u.sp.get(), **u.host.get());
     }
 }
 
@@ -858,13 +856,14 @@ unsafe fn run_unit(p: &'static Pool, ix: usize, up: UP, host: &mut *mut u8) {
         *u.host.get() = host as *mut *mut u8;
         let timed = has_poll_sources(p, ix) || work_waiting(p, ix);
         u.slice_start.set(timed.then(now));
-        hirsel_stack::switch(host as *mut *mut u8, *u.sp.get());
+        (*u.stack.get()).switch_in(&u.sanitizer, host as *mut *mut u8, *u.sp.get());
         u.stop_fd.set(crate::fiber::set_stop_fd_here(prev_fd));
         CUR.set(std::ptr::null_mut());
         let after = u.after.replace(After::Run);
         u.inside.store(false, Ordering::Release);
         match after {
             After::Done => {
+                u.sanitizer.clear();
                 u.execution
                     .worst
                     .fetch_max(u.status.load(Ordering::Relaxed), Ordering::Relaxed);

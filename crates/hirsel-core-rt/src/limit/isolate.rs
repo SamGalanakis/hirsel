@@ -62,6 +62,19 @@ impl Payer {
     /// bytes (MEM-20), whichever task drops the cell: never to the inbox of the
     /// task that reserved it, which may have ended.
     pub(crate) fn finish_reserved(self, charge: u64) {
+        let d = self.domain();
+        let local = super::BOUND
+            .get()
+            .is_some_and(|binding| binding.domain == self.slot().domain)
+            || d.owner == Some(super::thread());
+        if local && d.handles.get() != 0 {
+            self.finish_reserved_local(charge);
+        } else {
+            self.remote_finish_reserved(charge);
+        }
+    }
+
+    pub(super) fn finish_reserved_local(self, charge: u64) {
         // SAFETY: the cell owns this unmerged record; no other handle charges it.
         unsafe {
             let r = &mut *self.local();

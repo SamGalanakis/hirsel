@@ -20,6 +20,8 @@ name = "package_layer"
 harness = false
 
 [features]
+default = ["mimalloc"]
+mimalloc = ["dep:mimalloc"]
 # The opt-in comptime G1 measurement.
 comptime-g1 = ["hirsel-core-eval/host-instructions"]
 
@@ -35,7 +37,7 @@ cranelift-codegen = { version = "=0.136.3", default-features = false, features =
 cranelift-frontend = { version = "=0.136.3", default-features = false, features = ["std"] }
 cranelift-module = { version = "=0.136.3", default-features = false, features = ["std"] }
 cranelift-object = { version = "=0.136.3", default-features = false }
-mimalloc = { version = "=0.1.52", default-features = false, features = ["override"] }
+mimalloc = { version = "=0.1.52", default-features = false, features = ["override"], optional = true }
 rustc-hash = "2"
 rustix = { version = "1.1.6", features = ["fs"] }
 hirsel-core-ids = { path = "../hirsel-core-ids" }

@@ -382,6 +382,13 @@ impl Stack {
         (self.base.as_ptr().addr(), self.guard_end, self.top())
     }
 
+    pub(crate) fn sanitizer_bounds(&self) -> hirsel_stack::sanitizer::StackBounds {
+        let guard = self.guard_bytes();
+        // SAFETY: `guard` lies within this stack's mapping.
+        let bottom = unsafe { self.base.as_ptr().add(guard) };
+        hirsel_stack::sanitizer::StackBounds::from_raw(bottom, self.len - guard - HEADER)
+    }
+
     /// True when an `mprotect` growth failure retired this stack (EMB-3). A
     /// retired stack is never trimmed or recycled; it is unmapped whole on drop.
     pub(crate) fn is_retired(&self) -> bool {
@@ -406,6 +413,7 @@ impl Stack {
             previous: *mut u8,
             bounds: (usize, usize, usize),
             previous_guard: ((usize, usize, usize), StackKind),
+            sanitizer: hirsel_stack::sanitizer::FiberState,
             result: std::mem::MaybeUninit<T>,
         }
         unsafe extern "C" fn invoke<T, F: FnOnce() -> T>(first: *mut u8, _: *mut u8) -> ! {
@@ -413,6 +421,7 @@ impl Stack {
             // own it. The single invocation initializes the result.
             unsafe {
                 let frame = first.cast::<Frame<T, F>>();
+                let _ = (*frame).sanitizer.entered();
                 // This stack is current from its first frame on, marked Native
                 // so a foreign overflow or growth refusal is never recovered.
                 guard_full(((*frame).bounds, StackKind::Native));
@@ -423,19 +432,21 @@ impl Stack {
                 // fault while `callee` is still the active guard.
                 let previous = (*frame).previous;
                 guard_full((*frame).previous_guard);
-                let mut discard = std::ptr::null_mut();
-                hirsel_stack::switch(&mut discard, previous);
-                std::hint::unreachable_unchecked();
+                (*frame).sanitizer.switch_abandon(previous)
             }
         }
         // The switch saves registers on the caller's stack, which may cross
         // its commit edge: keep the caller's guard until `invoke` runs.
         let previous_guard = guarded_full();
+        let sanitizer = hirsel_stack::sanitizer::FiberState::new();
+        // SAFETY: freshly created fiber state has no active TSan fiber.
+        unsafe { sanitizer.reset() };
         let mut frame = Frame {
             call: Some(call),
             previous: std::ptr::null_mut(),
             bounds: self.bounds(),
             previous_guard,
+            sanitizer,
             result: std::mem::MaybeUninit::uninit(),
         };
         // SAFETY: the borrowed stack is idle. Only invoke can switch back,
@@ -447,7 +458,10 @@ impl Stack {
                 (&raw mut frame).cast(),
                 std::ptr::null_mut(),
             );
-            hirsel_stack::switch(&raw mut frame.previous, start);
+            frame
+                .sanitizer
+                .switch_in(&raw mut frame.previous, start, self.sanitizer_bounds());
+            frame.sanitizer.clear();
             frame.result.assume_init()
         }
     }
@@ -463,6 +477,8 @@ impl Stack {
         let words = hirsel_stack::initial_frame(entry, first, second);
         // SAFETY: 16-aligned top and sufficient space for this architecture's frame.
         unsafe {
+            let (bottom, size) = self.sanitizer_bounds().into_raw();
+            hirsel_stack::sanitizer::asan_unpoison(bottom, size);
             let start = self
                 .base
                 .as_ptr()
@@ -485,11 +501,10 @@ impl Stack {
         // red zone below `sp` is inside it.
         unsafe {
             let low = (*low_word(top)).max(sp.addr().saturating_sub(128));
-            std::ptr::write_bytes(
-                std::ptr::with_exposed_provenance_mut::<u8>(low),
-                0xA5,
-                top - HEADER - low,
-            );
+            let ptr = std::ptr::with_exposed_provenance_mut::<u8>(low);
+            let len = top - HEADER - low;
+            hirsel_stack::sanitizer::asan_unpoison(ptr, len);
+            std::ptr::write_bytes(ptr, 0xA5, len);
         }
     }
 

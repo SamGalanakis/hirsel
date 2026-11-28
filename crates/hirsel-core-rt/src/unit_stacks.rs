@@ -83,6 +83,13 @@ impl UnitStack {
         unsafe { self.base.as_ptr().add(self.len) }
     }
 
+    pub(crate) fn sanitizer_bounds(&self) -> hirsel_stack::sanitizer::StackBounds {
+        let guard = crate::task_heap::page_bytes();
+        // SAFETY: `guard` lies within this unit stack's mapping.
+        let bottom = unsafe { self.base.as_ptr().add(guard) };
+        hirsel_stack::sanitizer::StackBounds::from_raw(bottom, self.len - guard - 16)
+    }
+
     /// Write an initial entry frame at the top of this unit stack and return its `sp`.
     /// # Safety
     /// The caller exclusively owns this idle stack.
@@ -90,6 +97,8 @@ impl UnitStack {
         let words = hirsel_stack::initial_frame(entry, arg, std::ptr::null_mut());
         // SAFETY: the top of the unit stack is 16-aligned and writable.
         unsafe {
+            let (bottom, size) = self.sanitizer_bounds().into_raw();
+            hirsel_stack::sanitizer::asan_unpoison(bottom, size);
             let start = self.top().sub(16 + size_of_val(&words));
             std::ptr::copy_nonoverlapping(words.as_ptr().cast::<u8>(), start, size_of_val(&words));
             start
@@ -163,5 +172,17 @@ impl AdmittedStacks {
 
     pub(crate) fn take(&mut self) -> Self {
         std::mem::replace(self, Self::EMPTY)
+    }
+
+    pub(crate) unsafe fn switch_in(
+        &self,
+        sanitizer: &hirsel_stack::sanitizer::FiberState,
+        host: *mut *mut u8,
+        sp: *mut u8,
+    ) {
+        // SAFETY: the unit stack is mounted and pinned while the worker runs it.
+        unsafe {
+            sanitizer.switch_in(host, sp, self.unit.as_ref().unwrap().sanitizer_bounds());
+        }
     }
 }

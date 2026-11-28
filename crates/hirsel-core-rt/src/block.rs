@@ -36,8 +36,8 @@ struct Frame {
 }
 #[repr(C)]
 pub(crate) struct Dead {
-    /// A worklist link (counted::Worklist).
-    pub(crate) next: usize,
+    /// A worklist link (counted::Worklist), preserving pointer provenance.
+    pub(crate) next: *mut u8,
     pub(crate) charge: u64,
     pub(crate) recipe: crate::counted::Recipe,
     pub(crate) payload: *mut u8,
@@ -88,7 +88,7 @@ pub(crate) unsafe fn dead_buffer(
     // SAFETY: the buffer owns its prepaid GRAPH frame.
     unsafe {
         (*frame(block)).dead.write(Dead {
-            next: 0,
+            next: std::ptr::null_mut(),
             charge,
             recipe,
             payload,

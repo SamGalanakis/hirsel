@@ -27,7 +27,7 @@ pub(crate) type Step = unsafe fn(*mut Context, *mut Holder, *mut Worklist) -> bo
 /// holder's own record, in words only its cleanup uses from then on.
 #[repr(C)]
 pub(crate) struct Holder {
-    next: usize,
+    next: *mut u8,
     step: Step,
 }
 
@@ -40,10 +40,10 @@ const HOLDER: *const Descriptor = std::ptr::without_provenance(8);
 /// Generated glue stages a descendant inline (abi_layout WORKLIST_*).
 #[repr(C)]
 pub struct Worklist {
-    /// 0 when empty. With bit 0 set, the address of a suspended fixed block's
-    /// A word; with bit 1 set, a holder's frame; otherwise a dead GRAPH
+    /// Null when empty. With bit 0 set, the tagged pointer to a suspended fixed
+    /// block's A word; with bit 1 set, a holder's frame; otherwise a dead GRAPH
     /// buffer's payload.
-    head: usize,
+    head: *mut u8,
     /// The staged descendant, null when none.
     node: *mut u8,
     /// The staged fixed block's descriptor; null for a staged GRAPH buffer.
@@ -131,12 +131,12 @@ impl Worklist {
         if self.descriptor.is_null() {
             // SAFETY: stage_buffer wrote this frame; the buffer is ours.
             unsafe { (*block::dead(buffer)).next = self.head };
-            self.head = node as usize;
+            self.head = node;
             None
         } else if self.descriptor == HOLDER {
             // SAFETY: stage_holder handed over this frame.
             unsafe { (*node.cast::<Holder>()).next = self.head };
-            self.head = node as usize | 2;
+            self.head = node.map_addr(|addr| addr | 2);
             None
         } else {
             Some((buffer, self.descriptor, 0))
@@ -297,7 +297,7 @@ unsafe fn clean_fixed(
                 break;
             }
         }
-        debug_assert!(!list.staged() && list.head == 0);
+        debug_assert!(!list.staged() && list.head.is_null());
         block::free_dead_in(&*context, node, d.charge);
     }
 }
@@ -375,7 +375,7 @@ pub(crate) unsafe fn drain_place(context: *mut Context, place: *mut u8, recipe: 
 impl Worklist {
     fn new(site: u64, site_owner: *const crate::causes::CauseData) -> Self {
         Worklist {
-            head: 0,
+            head: std::ptr::null_mut(),
             node: std::ptr::null_mut(),
             descriptor: std::ptr::null(),
             point: 0,
@@ -417,20 +417,20 @@ unsafe fn run(context: *mut Context, list: &mut Worklist, mut current: Option<Fi
                 if p.index != FIXED_POINT_NO_INDEX {
                     payload.add(p.index as usize).cast::<u64>().write(cursor);
                 }
-                payload.add(p.b as usize).cast::<usize>().write(list.head);
+                payload.add(p.b as usize).cast::<*mut u8>().write(list.head);
                 let a = payload.add(p.a as usize);
                 a.cast::<*const u8>().write(point);
-                list.head = a as usize | 1;
+                list.head = a.map_addr(|addr| addr | 1);
                 current = list.take();
-            } else if list.head == 0 {
+            } else if list.head.is_null() {
                 return list.failed != 0;
-            } else if list.head & 1 != 0 {
-                let a = (list.head & !1) as *mut u8;
+            } else if list.head.addr() & 1 != 0 {
+                let a = list.head.map_addr(|addr| addr & !1);
                 let point = a.cast::<*const u8>().read();
                 let p = &*point.cast::<Point>();
                 let descriptor = point.sub(p.back as usize).cast::<Descriptor>();
                 let payload = a.sub(p.a as usize);
-                list.head = payload.add(p.b as usize).cast::<usize>().read();
+                list.head = payload.add(p.b as usize).cast::<*mut u8>().read();
                 let cursor = if p.index == FIXED_POINT_NO_INDEX {
                     p.cursor
                 } else {
@@ -444,8 +444,8 @@ unsafe fn run(context: *mut Context, list: &mut Worklist, mut current: Option<Fi
                 } else {
                     current = Some((node, descriptor, cursor));
                 }
-            } else if list.head & 2 != 0 {
-                let holder = (list.head & !2) as *mut Holder;
+            } else if list.head.addr() & 2 != 0 {
+                let holder = list.head.map_addr(|addr| addr & !2).cast::<Holder>();
                 // Read first: a finished step may have freed the holder.
                 let next = (*holder).next;
                 (*context).site_owner = list.site_owner;
@@ -456,7 +456,7 @@ unsafe fn run(context: *mut Context, list: &mut Worklist, mut current: Option<Fi
                     current = list.take();
                 }
             } else {
-                let buffer = NonNull::new_unchecked(list.head as *mut u8);
+                let buffer = NonNull::new_unchecked(list.head);
                 let frame = &mut *block::dead(buffer);
                 (*context).site_owner = list.site_owner;
                 if (frame.recipe)(context, frame.payload, &mut frame.cursor, list) {

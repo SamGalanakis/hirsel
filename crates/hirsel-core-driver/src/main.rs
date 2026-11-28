@@ -1,4 +1,7 @@
+#[cfg(feature = "mimalloc")]
 hirsel_guard::install!(mimalloc::MiMalloc: mimalloc::MiMalloc);
+#[cfg(not(feature = "mimalloc"))]
+hirsel_guard::install!();
 
 fn main() {
     // Every write to stdout or stderr meets a reader that may close early

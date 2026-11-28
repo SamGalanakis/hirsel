@@ -17,7 +17,7 @@
 //! their physical pages (`sys::discard`, never splitting a Linux VMA); freeing
 //! the trailing committed prefix shrinks `committed` back to `PROT_NONE`
 //! (returning `VmData`), and emptying a range unmaps it whole.
-use super::{SLAB, host_memory, page_bytes};
+use super::{SLAB, host_memory};
 use std::cell::Cell;
 use std::num::NonZeroUsize;
 use std::ptr::{self, NonNull};
@@ -80,10 +80,33 @@ struct Range {
     first_free_word: usize,
 }
 
+#[cfg(miri)]
+struct MiriAllocation(NonNull<u8>, std::alloc::Layout);
+#[cfg(miri)]
+// SAFETY: protected by `MIRI_RANGES` mutex; owns the backing allocation until Range::drop.
+unsafe impl Send for MiriAllocation {}
+#[cfg(miri)]
+static MIRI_RANGES: Mutex<Vec<(usize, MiriAllocation)>> = Mutex::new(Vec::new());
+
 impl Drop for Range {
     fn drop(&mut self) {
+        #[cfg(miri)]
+        {
+            let mut ranges = MIRI_RANGES.lock().unwrap();
+            if let Some(pos) = ranges
+                .iter()
+                .position(|(addr, _)| *addr == self.base.addr().get())
+            {
+                let (_, MiriAllocation(raw, layout)) = ranges.swap_remove(pos);
+                // SAFETY: `raw` and `layout` came from `alloc_zeroed` in `Range::map_raw`.
+                unsafe { std::alloc::dealloc(raw.as_ptr(), layout) };
+            }
+        }
+        #[cfg(not(miri))]
         // SAFETY: the range has zero live granules and has been unlinked from its shard.
-        unsafe { libc::munmap(self.base.as_ptr().cast(), self.granules * SLAB) };
+        unsafe {
+            libc::munmap(self.base.as_ptr().cast(), self.granules * SLAB)
+        };
     }
 }
 
@@ -104,45 +127,66 @@ impl Range {
     /// Reserve an anonymous `PROT_NONE` mapping of `len` bytes whose `base` is
     /// `SLAB`-aligned and whose `base + prefix` is `align`-aligned.
     pub(crate) fn map_raw(len: usize, align: usize, prefix: usize) -> Option<NonNull<u8>> {
-        let align = align.max(SLAB);
-        let extra = if align > page_bytes() { align } else { 0 };
-        let total = len.checked_add(extra)?;
-        if total > isize::MAX as usize {
-            return None;
+        #[cfg(miri)]
+        {
+            let align = align.max(SLAB);
+            let total = len.checked_add(align)?;
+            let layout = std::alloc::Layout::from_size_align(total, align).ok()?;
+            #[cfg(test)]
+            super::MAP_REQUESTS.with(|count| count.set(count.get() + 1));
+            // SAFETY: layout has non-zero size and power-of-two alignment.
+            let raw = NonNull::new(unsafe { std::alloc::alloc_zeroed(layout) })?;
+            let offset = (align - (prefix % align)) % align;
+            // SAFETY: `offset < align`, so `[base, base + len)` lies within `[raw, raw + total)`.
+            let base = unsafe { raw.add(offset) };
+            MIRI_RANGES
+                .lock()
+                .unwrap()
+                .push((base.addr().get(), MiriAllocation(raw, layout)));
+            return Some(base);
         }
-        #[cfg(test)]
-        super::MAP_REQUESTS.with(|count| count.set(count.get() + 1));
-        // SAFETY: reserve an anonymous private PROT_NONE mapping without replacing any address.
-        let raw = unsafe {
-            libc::mmap(
-                ptr::null_mut(),
-                total,
-                libc::PROT_NONE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        };
-        if raw == libc::MAP_FAILED {
-            return None;
-        }
-        // SAFETY: a successful NULL-hint mapping is non-null. Trim excess head
-        // and tail pages so `base` is SLAB-aligned and `base + prefix` is align-aligned.
-        unsafe {
-            let raw = NonNull::new_unchecked(raw.cast::<u8>());
-            let payload = raw.add(prefix).map_addr(|address| {
-                NonZeroUsize::new(address.get().next_multiple_of(align)).unwrap()
-            });
-            let base = payload.sub(prefix);
-            let left = base.addr().get() - raw.addr().get();
-            let right = total - left - len;
-            if left != 0 {
-                libc::munmap(raw.as_ptr().cast(), left);
+        #[cfg(not(miri))]
+        {
+            let align = align.max(SLAB);
+            let extra = if align > page_bytes() { align } else { 0 };
+            let total = len.checked_add(extra)?;
+            if total > isize::MAX as usize {
+                return None;
             }
-            if right != 0 {
-                libc::munmap(base.add(len).as_ptr().cast(), right);
+            #[cfg(test)]
+            super::MAP_REQUESTS.with(|count| count.set(count.get() + 1));
+            // SAFETY: reserve an anonymous private PROT_NONE mapping without replacing any address.
+            let raw = unsafe {
+                libc::mmap(
+                    ptr::null_mut(),
+                    total,
+                    libc::PROT_NONE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            if raw == libc::MAP_FAILED {
+                return None;
             }
-            Some(base)
+            // SAFETY: a successful NULL-hint mapping is non-null. Trim excess head
+            // and tail pages so `base` is SLAB-aligned and `base + prefix` is align-aligned.
+            unsafe {
+                let raw = NonNull::new_unchecked(raw.cast::<u8>());
+                let payload = raw.add(prefix).map_addr(|address| {
+                    NonZeroUsize::new(address.get().next_multiple_of(align)).unwrap()
+                });
+                let base = payload.sub(prefix);
+                let left = base.addr().get() - raw.addr().get();
+                let right = total - left - len;
+                if left != 0 {
+                    libc::munmap(raw.as_ptr().cast(), left);
+                }
+                if right != 0 {
+                    libc::munmap(base.add(len).as_ptr().cast(), right);
+                }
+                Some(base)
+            }
         }
     }
 
@@ -165,20 +209,28 @@ impl Range {
     }
 
     fn commit_to(&mut self, target: usize) -> bool {
-        let from = self.committed;
-        let delta = target - from;
-        // SAFETY: `[from, target)` lies within this range's reserved PROT_NONE tail.
-        let ok = unsafe {
-            libc::mprotect(
-                self.base.add(from * SLAB).as_ptr().cast(),
-                delta * SLAB,
-                WRITABLE,
-            ) == 0
-        };
-        if ok {
+        #[cfg(miri)]
+        {
             self.committed = target;
+            true
         }
-        ok
+        #[cfg(not(miri))]
+        {
+            let from = self.committed;
+            let delta = target - from;
+            // SAFETY: `[from, target)` lies within this range's reserved PROT_NONE tail.
+            let ok = unsafe {
+                libc::mprotect(
+                    self.base.add(from * SLAB).as_ptr().cast(),
+                    delta * SLAB,
+                    WRITABLE,
+                ) == 0
+            };
+            if ok {
+                self.committed = target;
+            }
+            ok
+        }
     }
 
     fn maybe_shrink(&mut self) {
@@ -846,5 +898,29 @@ impl Shard {
             return Some(unsafe { Box::from_raw(range_pointer.as_ptr()) });
         }
         None
+    }
+}
+
+pub(crate) fn page_bytes() -> usize {
+    #[cfg(miri)]
+    {
+        super::MIN_PAGE_BYTES
+    }
+    #[cfg(not(miri))]
+    {
+        static PAGE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *PAGE.get_or_init(|| {
+            // SAFETY: sysconf reads the kernel's immutable page size.
+            let value = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+            match usize::try_from(value) {
+                Ok(bytes)
+                    if bytes.is_power_of_two()
+                        && (super::MIN_PAGE_BYTES..=SLAB).contains(&bytes) =>
+                {
+                    bytes
+                }
+                _ => crate::run_stop::raise(crate::run_stop::Stop::from_static(b"PageSize")),
+            }
+        })
     }
 }

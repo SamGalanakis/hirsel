@@ -816,10 +816,10 @@ unsafe extern "C" fn cancel_timer_root(context: *mut Context, _: *mut u8, input:
         hirsel_core_cancel(context, spawned.task);
         let joined = hirsel_core_join(context, spawned.task, ptr::null_mut(), 123);
         assert_eq!((joined.kind, joined.status), (2, 0));
+        drop(crate::causes::Causes::from_raw(joined.causes));
         0
     }
 }
-
 unsafe extern "C" fn timer_root(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
     // SAFETY: root owns the copied input and each child handle until join.
     unsafe {

@@ -3,7 +3,10 @@
 use hirsel_core_driver::{CheckRequest, Driver, LibraryInput, Meter, PackageProduct};
 use hirsel_core_ids::DefPath;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "mimalloc")]
 hirsel_guard::install!(mimalloc::MiMalloc: mimalloc::MiMalloc);
+#[cfg(not(feature = "mimalloc"))]
+hirsel_guard::install!();
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if (args.len() == 2 || args.len() == 3) && args[0] == "produce" {

@@ -396,6 +396,15 @@ impl Context {
 impl Drop for Context {
     fn drop(&mut self) {
         data_decode::discard(self);
+        // Release all context-owned heap blocks and limit charges while both
+        // `self.current` and `self.heap` are still live and open.
+        self.isolates.clear();
+        self.causes = causes::Causes::default();
+        self.primary = None;
+        self.spare_isolate_cell = None;
+        self.task_record = None;
+        self.regions = region::RegionCache::default();
+        self.contained = Default::default();
         while self.bound_depth != 0 {
             self.limit_exit();
         }

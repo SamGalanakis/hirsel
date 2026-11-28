@@ -677,12 +677,14 @@ fn an_answered_slot_is_not_reused_before_its_notification() {
         return;
     };
     let slot = cancelled_send(&mut sockets, &poller, tag);
+    let (notified, _) = poller.tx_notifications();
     slot.cancel();
     reap_until(&mut sockets, || matches!(slot.state(), TxState::Sent(_)));
     let n = sent(&slot);
     drop(slot);
     let _next = refill(&poller);
     read_all_a(&mut peer, n);
+    reap_until(&mut sockets, || poller.tx_notifications().0 > notified);
 }
 
 /// A claim dropped before its cancelled send answers: the answer comes
@@ -722,6 +724,7 @@ fn a_cancelled_send_keeps_its_slot_until_the_notification() {
         "{wrong} of {} bytes the peer read are not the sent bytes",
         got.len()
     );
+    reap_until(&mut sockets, || poller.tx_notifications().0 > notified);
 }
 
 /// A ring closed while the kernel still reads a slot: those bytes must

@@ -28,9 +28,10 @@ law_status=
 media_status=
 w2_status=
 n1_status=
+sanitizers_status=
 record() {
   local auxiliary=() stage field
-  for stage in bootstrap boat toolchain cgroup containment ownership vopr law media w2 n1; do
+  for stage in bootstrap boat toolchain cgroup containment ownership vopr law media w2 n1 sanitizers; do
     field=${stage}_status
     if [[ -n "${!field}" ]]; then auxiliary+=("--${stage}-status" "${!field}"); fi
   done
@@ -424,6 +425,18 @@ fi
 if (( n1_status != 0 )); then
   printf 'N1 browser_room exited %s. See %s/n1.log.\n' "$n1_status" "$run" >>"$run/run.log"
 fi
+step="Sanitizers & Miri"
+record
+sanitizers_status=0
+taskset -c 8-11 python3 "$checkout/tools/sanitizers/run.py" all \
+  --defer-if-missing --clean-target \
+  --target-dir "$run/sanitizers-target" \
+  --json "$run/sanitizers.json" >>"$run/sanitizers.log" 2>&1 || sanitizers_status=$?
+if (( sanitizers_status == 75 )); then
+  echo "Sanitizers & Miri deferred (nightly/miri toolchain unavailable)." >>"$run/run.log"
+elif (( sanitizers_status != 0 )); then
+  printf 'Sanitizers & Miri exited %s. See %s/sanitizers.log.\n' "$sanitizers_status" "$run" >>"$run/run.log"
+fi
 if (( status == 3 )) && [[ -n "$baseline_path" ]]; then
   step="Board bisect"
   record
@@ -439,7 +452,8 @@ step=$performance_step
 if (( status == 0 )); then
   if (( bootstrap_status || boat_status || toolchain_status || cgroup_status || containment_status ||
         ownership_status || (vopr_status && vopr_status != 75) || law_status || media_status ||
-        (w2_status && w2_status != 75) || n1_status )); then
+        (w2_status && w2_status != 75) || n1_status ||
+        (sanitizers_status && sanitizers_status != 75) )); then
     echo "Nightly board auxiliary checks failed. See $current and $run." >&2
     exit 4
   fi

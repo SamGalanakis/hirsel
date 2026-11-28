@@ -216,17 +216,22 @@ impl WorkingSets {
     }
 }
 
-// Link the mimalloc native library in the driver and its test harnesses.
+// Link the mimalloc native library in the driver and its test harnesses when enabled.
+#[cfg(feature = "mimalloc")]
 use mimalloc as _;
+#[cfg(feature = "mimalloc")]
 unsafe extern "C" {
     fn mi_collect(force: bool);
 }
 
 /// Return the allocator's free pages to the system, as an idle server does.
 pub(super) fn release_unused_pages() {
+    #[cfg(feature = "mimalloc")]
     // SAFETY: mimalloc can collect its unused pages at any time. The CLI
     // uses it as its allocator, and this call takes no pointers.
-    unsafe { mi_collect(true) };
+    unsafe {
+        mi_collect(true)
+    };
 }
 
 struct Value<V> {

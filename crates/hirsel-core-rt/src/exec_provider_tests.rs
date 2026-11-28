@@ -539,8 +539,9 @@ fn exec_provider_refuses_post_launch_modification_replacement_and_symlink_swap()
         assert_eq!(rewritten.pipes, [0; 3]);
 
         // Replacement by a new inode must also be refused.
-        std::fs::remove_file(&pinned).unwrap();
-        std::fs::copy(&altered, &pinned).unwrap();
+        let replacement = root.join("replacement-bin");
+        std::fs::copy(&altered, &replacement).unwrap();
+        std::fs::rename(&replacement, &pinned).unwrap();
         assert_ne!(std::fs::metadata(&pinned).unwrap().ino(), original_ino);
         let replaced = spawn(context, 706);
         assert_eq!(replaced.outcome.error.tag, 4);

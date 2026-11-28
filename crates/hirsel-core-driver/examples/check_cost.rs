@@ -4,7 +4,10 @@ use hirsel_core_front::cost;
 use hirsel_intern::instructions::InstructionCounter;
 use serde_json::json;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "mimalloc")]
 hirsel_guard::install!(mimalloc::MiMalloc: mimalloc::MiMalloc);
+#[cfg(not(feature = "mimalloc"))]
+hirsel_guard::install!();
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();

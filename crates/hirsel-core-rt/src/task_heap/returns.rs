@@ -5,10 +5,10 @@
 use super::{Page, PagePointer};
 use std::cell::UnsafeCell;
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
-const CLOSED: usize = 1;
-const _: () = assert!(align_of::<usize>() >= align_of::<AtomicUsize>());
+const CLOSED: *mut Page = ptr::without_provenance_mut(1);
+const _: () = assert!(align_of::<*mut Page>() >= align_of::<AtomicPtr<Page>>());
 
 #[cfg(test)]
 thread_local! {
@@ -30,15 +30,15 @@ pub(super) fn purge() {
 }
 
 pub(super) struct Inbox {
-    slots: AtomicUsize,
-    next: UnsafeCell<usize>,
+    slots: AtomicPtr<u8>,
+    next: UnsafeCell<*mut Page>,
 }
 
 impl Inbox {
     pub(super) const fn new() -> Self {
         Self {
-            slots: AtomicUsize::new(0),
-            next: UnsafeCell::new(0),
+            slots: AtomicPtr::new(ptr::null_mut()),
+            next: UnsafeCell::new(ptr::null_mut()),
         }
     }
 
@@ -48,7 +48,7 @@ impl Inbox {
     #[cold]
     #[inline(never)]
     pub(super) unsafe fn publish(&self, heap: &Queue, page: PagePointer, payload: NonNull<u8>) {
-        let address = payload.as_ptr().expose_provenance();
+        let address = payload.as_ptr();
         let mut head = self.slots.load(Ordering::Acquire);
         #[cfg(test)]
         if let Some(pause) = BEFORE_PUBLISH.take() {
@@ -60,7 +60,7 @@ impl Inbox {
             unsafe {
                 #[cfg(feature = "memcheck")]
                 super::allocation_check::link_access(payload, true);
-                payload.cast::<usize>().write(head);
+                payload.cast::<*mut u8>().write(head);
                 #[cfg(feature = "memcheck")]
                 super::allocation_check::link_access(payload, false);
             }
@@ -70,7 +70,7 @@ impl Inbox {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(0) => {
+                Ok(prev) if prev.is_null() => {
                     // SAFETY: the first slot owns publication of the page.
                     // It pins the page until a notification consumer takes it.
                     unsafe { heap.notify(page, self.next.get()) };
@@ -83,25 +83,25 @@ impl Inbox {
     }
 }
 
-pub(super) struct Queue(AtomicUsize);
+pub(super) struct Queue(AtomicPtr<Page>);
 
 impl Queue {
     pub(super) const fn new() -> Self {
-        Self(AtomicUsize::new(0))
+        Self(AtomicPtr::new(ptr::null_mut()))
     }
 
     pub(super) fn pending(&self) -> bool {
-        self.0.load(Ordering::Relaxed) != 0
+        !self.0.load(Ordering::Relaxed).is_null()
     }
 
     /// # Safety
     /// This producer owns the page's notification link, which is embedded
     /// in the page and pinned by its nonempty slot list.
-    unsafe fn notify(&self, page: PagePointer, next: *mut usize) {
-        let address = page.as_ptr().expose_provenance();
+    unsafe fn notify(&self, page: PagePointer, next: *mut *mut Page) {
+        let address = page.as_ptr();
         let mut head = self.0.load(Ordering::Acquire);
         loop {
-            if head == CLOSED {
+            if ptr::eq(head, CLOSED) {
                 // SAFETY: this acquire sees the custodian's final slot counts.
                 // The producer still owns the link and the orphan queue is open.
                 unsafe { ORPHANED.notify(page, next) };
@@ -124,9 +124,9 @@ impl Queue {
     /// The queue stays open throughout this call.
     pub(super) unsafe fn take(&self) -> Batch {
         if self.pending() {
-            Batch(self.0.swap(0, Ordering::Acquire))
+            Batch(self.0.swap(ptr::null_mut(), Ordering::Acquire))
         } else {
-            Batch(0)
+            Batch(ptr::null_mut())
         }
     }
 
@@ -137,19 +137,19 @@ impl Queue {
     }
 }
 
-pub(super) struct Batch(usize);
+pub(super) struct Batch(*mut Page);
 
 impl Batch {
     pub(super) fn pop(&mut self) -> Option<(PagePointer, Slots)> {
-        // The producer exposed provenance. The detached notification pins
-        // the descriptor until this consumer takes its outstanding slots.
-        let page = NonNull::new(ptr::with_exposed_provenance_mut::<Page>(self.0))?;
+        // The detached notification pins the descriptor until this consumer
+        // takes its outstanding slots.
+        let page = NonNull::new(self.0)?;
         // SAFETY: only this consumer can read the page link while its slots
         // list stays nonempty. Clearing the list allows a new notification.
         let slots = unsafe {
             let inbox = &page.as_ref().returned;
             self.0 = inbox.next.get().read();
-            inbox.slots.swap(0, Ordering::AcqRel)
+            inbox.slots.swap(ptr::null_mut(), Ordering::AcqRel)
         };
         Some((page, Slots(slots)))
     }
@@ -173,17 +173,17 @@ impl Batch {
     }
 }
 
-pub(super) struct Slots(usize);
+pub(super) struct Slots(*mut u8);
 
 impl Slots {
     pub(super) fn pop(&mut self) -> Option<NonNull<u8>> {
-        let payload = NonNull::new(ptr::with_exposed_provenance_mut(self.0))?;
+        let payload = NonNull::new(self.0)?;
         // SAFETY: the acquire detach gave this consumer the slot and its link.
         // The original payer may have retired. Only the physical link is read.
         unsafe {
             #[cfg(feature = "memcheck")]
             super::allocation_check::link_access(payload, true);
-            self.0 = payload.cast::<usize>().read();
+            self.0 = payload.cast::<*mut u8>().read();
             #[cfg(feature = "memcheck")]
             super::allocation_check::link_access(payload, false);
         }

@@ -7,6 +7,7 @@ use std::process::Command;
 #[cfg(test)]
 pub(crate) const KERNEL_LIMIT: bool = true;
 
+#[cfg(not(miri))]
 fn data_limit() -> libc::rlimit {
     let mut current = libc::rlimit {
         rlim_cur: libc::RLIM_INFINITY,
@@ -17,16 +18,31 @@ fn data_limit() -> libc::rlimit {
     current
 }
 
+#[cfg(miri)]
+fn data_limit() -> libc::rlimit {
+    libc::rlimit {
+        rlim_cur: libc::RLIM_INFINITY,
+        rlim_max: libc::RLIM_INFINITY,
+    }
+}
+
 /// Limit the process to `requested` bytes, never above a limit it inherited.
 /// The hard limit stays, so [`lift_for_sanitizer`] can restore it in a child.
 pub(crate) fn set_limit(requested: u64) {
-    let current = data_limit();
-    let limited = libc::rlimit {
-        rlim_cur: requested.min(current.rlim_cur),
-        rlim_max: current.rlim_max,
-    };
-    // SAFETY: setrlimit reads one record.
-    unsafe { libc::setrlimit(libc::RLIMIT_DATA, &limited) };
+    #[cfg(miri)]
+    {
+        let _ = requested;
+    }
+    #[cfg(not(miri))]
+    {
+        let current = data_limit();
+        let limited = libc::rlimit {
+            rlim_cur: requested.min(current.rlim_cur),
+            rlim_max: current.rlim_max,
+        };
+        // SAFETY: setrlimit reads one record.
+        unsafe { libc::setrlimit(libc::RLIMIT_DATA, &limited) };
+    }
 }
 
 /// The limit in force, or `None` when there is none.

@@ -220,6 +220,7 @@ pub struct Task {
     /// Owning pins on loaded code generations promoted when this task leaves
     /// worker custody (PACK-14). Must be last so it drops after frame/result cleanup.
     pub(crate) code_pins: Vec<(u64, crate::code::CodePin)>,
+    sanitizer: hirsel_stack::sanitizer::FiberState,
 }
 #[derive(Clone, Copy, Eq)]
 struct ReadyToken(u64);
@@ -480,15 +481,7 @@ unsafe fn trim_run_heap(root: *mut Task) {
     }
 }
 
-unsafe fn switch_to_idle(task: *mut Task) {
-    // SAFETY: the running task is pinned here; only its run's dispatcher owns the idle stack.
-    unsafe {
-        // MEM-30: a fiber off the CPU holds no step credit; it draws again at
-        // its next charged step.
-        crate::steps::suspend(&mut *(*task).context);
-        hirsel_stack::switch(&raw mut (*task).sp, (*(*task).run).idle)
-    }
-}
+use stop::{recycle_ended, switch_to_idle, switch_to_idle_exit, switch_to_task};
 
 /// Return what ended tasks left resident: retained task-heap pages and this
 /// run's surplus stacks.
@@ -3415,6 +3408,7 @@ unsafe fn mount(task: *mut Task, stack: Stack) {
     unsafe {
         (*task).sp = stack.prepare(start, task.cast(), ptr::null_mut());
         (*task).stack = Some(stack);
+        (*task).sanitizer.reset();
     }
 }
 /// Take back the stack of a task that parked in the returnable form.
@@ -3428,6 +3422,7 @@ unsafe fn unmount(task: *mut Task) -> Stack {
         #[cfg(any(test, debug_assertions, feature = "testing"))]
         stack.poison_above((*task).sp);
         (*task).sp = ptr::null_mut();
+        (*task).sanitizer.clear();
         stack
     }
 }
@@ -3463,6 +3458,8 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
     // SAFETY: start owns this fiber. The body cleans its input/temporaries;
     // its result is initialized only on status zero.
     unsafe {
+        let (asan, tsan) = (*task).sanitizer.entered();
+        crate::run_stop::set_idle_sanitizer(asan, tsan);
         // FAIL-17: the limit is committed before the body first runs on this stack.
         crate::stack::commit(
             &mut *(*task).context,
@@ -3495,7 +3492,7 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
                     (*task).moved = Moved::Consumed { code };
                     (*task).body = resume;
                 }
-                switch_to_idle(task);
+                switch_to_idle_exit(task);
                 std::hint::unreachable_unchecked();
             }
             let Some((moved, body, resume)) = (*task).transfer.take() else {
@@ -3546,7 +3543,7 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
             #[cfg(feature = "prof")]
             (WakeSource::Task, task, (*task).id),
         );
-        switch_to_idle(task);
+        switch_to_idle_exit(task);
         std::hint::unreachable_unchecked();
     }
 }
@@ -3734,6 +3731,7 @@ unsafe fn run_root_scheduler(
         holder: std::mem::MaybeUninit::uninit(),
         cursor: 0,
         code_pins: Vec::new(),
+        sanitizer: hirsel_stack::sanitizer::FiberState::new(),
     });
     // A recorded helper's root task runs in its own tape group.
     #[cfg(feature = "record")]
@@ -3759,6 +3757,7 @@ unsafe fn run_root_scheduler(
             .as_ref()
             .unwrap()
             .prepare(start, root_pointer.cast(), ptr::null_mut());
+        root.sanitizer.reset();
         #[cfg(feature = "prof")]
         prof_created(root_pointer, ptr::null_mut());
         run.all = root_pointer;
@@ -3894,8 +3893,7 @@ impl RunPtr {
                 prof_dispatch(task, true);
                 abi::task_resume((*task).context);
                 let prev_idle = crate::run_stop::set_idle_ptr(idle);
-                crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
-                hirsel_stack::switch(idle, (*task).sp);
+                switch_to_task(task, idle);
                 if (*task).state != State::Ended {
                     crate::code::promote_worker_borrows(task);
                 }
@@ -3909,9 +3907,7 @@ impl RunPtr {
                     break;
                 }
                 match (*task).state {
-                    State::Ended => (*self.0)
-                        .stacks
-                        .recycle_ended(task == root, (*task).stack.take().unwrap()),
+                    State::Ended => recycle_ended(self.0, root, task),
                     State::Provider => {
                         if (*task).stackless {
                             (*self.0).stacks.recycle(unmount(task));
@@ -4014,6 +4010,7 @@ unsafe fn spawn_in(
             holder: std::mem::MaybeUninit::uninit(),
             cursor: 0,
             code_pins: Vec::new(),
+            sanitizer: hirsel_stack::sanitizer::FiberState::new(),
         });
         // The scheduler's published task now owns the allocation until retire.
         std::mem::forget(storage);
@@ -4038,6 +4035,7 @@ unsafe fn spawn_in(
             .as_ref()
             .unwrap()
             .prepare(start, task.cast(), ptr::null_mut());
+        (*task).sanitizer.reset();
         if !(*task).all.is_null() {
             (*(*task).all).all_previous = task;
         }

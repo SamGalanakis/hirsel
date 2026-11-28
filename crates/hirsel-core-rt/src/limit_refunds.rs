@@ -554,6 +554,7 @@ impl Remote {
 pub(super) struct Post {
     payer: Payer,
     bytes: u64,
+    reserved: bool,
     next: *mut Post,
     #[cfg(feature = "record")]
     retirement: Option<crate::tape::Retirement>,
@@ -586,6 +587,7 @@ impl Domain {
         Self::fold(
             remote,
             batch,
+            None,
             #[cfg(feature = "record")]
             None,
         );
@@ -598,6 +600,7 @@ impl Domain {
     pub(super) fn fold(
         remote: &mut Remote,
         mut batch: *mut Post,
+        mut reserved: Option<&mut Vec<(Payer, u64)>>,
         #[cfg(feature = "record")] hold_foreign: Option<usize>,
     ) {
         let mut fifo: *mut Post = std::ptr::null_mut();
@@ -614,6 +617,12 @@ impl Domain {
             // SAFETY: as above; each node was boxed by its poster.
             let post = unsafe { Box::from_raw(fifo) };
             fifo = post.next;
+            if post.reserved
+                && let Some(out) = reserved.as_deref_mut()
+            {
+                out.push((post.payer, post.bytes));
+                continue;
+            }
             #[cfg(feature = "record")]
             if let Some(own) = hold_foreign
                 && post.retirement.is_none()
@@ -667,6 +676,17 @@ impl Payer {
     pub(super) fn remote_refund(self, bytes: u64) {
         self.post_refund(
             bytes,
+            false,
+            #[cfg(feature = "record")]
+            None,
+        );
+    }
+
+    #[cold]
+    pub(super) fn remote_finish_reserved(self, bytes: u64) {
+        self.post_refund(
+            bytes,
+            true,
             #[cfg(feature = "record")]
             None,
         );
@@ -680,12 +700,13 @@ impl Payer {
 
     #[cfg(feature = "record")]
     pub(crate) fn post_retirement(self, bytes: u64, retirement: crate::tape::Retirement) {
-        self.post_refund(bytes, Some(retirement));
+        self.post_refund(bytes, false, Some(retirement));
     }
 
     fn post_refund(
         self,
         bytes: u64,
+        reserved: bool,
         #[cfg(feature = "record")] retirement: Option<crate::tape::Retirement>,
     ) {
         let d = self.domain();
@@ -693,6 +714,7 @@ impl Payer {
         let post = Box::into_raw(Box::new(Post {
             payer: self,
             bytes,
+            reserved,
             next: std::ptr::null_mut(),
             #[cfg(feature = "record")]
             retirement,
@@ -842,28 +864,35 @@ impl Funding {
     #[cold]
     pub(super) fn drain_pending(&self) {
         let domain = self.payer.get().domain();
-        // SAFETY: drains run on the owner Unit.
-        let remote = unsafe { &mut *domain.remote() };
-        let batch = domain.mail.swap(std::ptr::null_mut(), Ordering::Acquire);
-        debug_assert!(batch != closed(), "a drain after retirement");
-        #[cfg(feature = "record")]
-        let hold_foreign = crate::tasks::current_group()
-            .filter(|g| g.replaying())
-            .and_then(|_| crate::tape::units::poster());
-        Domain::fold(
-            remote,
-            batch,
+        let mut reserved = Vec::new();
+        {
+            // SAFETY: drains run on the owner Unit.
+            let remote = unsafe { &mut *domain.remote() };
+            let batch = domain.mail.swap(std::ptr::null_mut(), Ordering::Acquire);
+            debug_assert!(batch != closed(), "a drain after retirement");
             #[cfg(feature = "record")]
-            hold_foreign,
-        );
-        self.drain_locked(remote, false);
-        // Lower, then recheck the mailbox: a post pushed after the swap either
-        // shows here or raises `pending` after this store (both SeqCst).
-        domain.pending.store(remote.pending(), Ordering::SeqCst);
-        if !domain.mail.load(Ordering::SeqCst).is_null() {
-            domain.pending.store(true, Ordering::Relaxed);
+            let hold_foreign = crate::tasks::current_group()
+                .filter(|g| g.replaying())
+                .and_then(|_| crate::tape::units::poster());
+            Domain::fold(
+                remote,
+                batch,
+                Some(&mut reserved),
+                #[cfg(feature = "record")]
+                hold_foreign,
+            );
+            self.drain_locked(remote, false);
+            // Lower, then recheck the mailbox: a post pushed after the swap either
+            // shows here or raises `pending` after this store (both SeqCst).
+            domain.pending.store(remote.pending(), Ordering::SeqCst);
+            if !domain.mail.load(Ordering::SeqCst).is_null() {
+                domain.pending.store(true, Ordering::Relaxed);
+            }
+            remote.reap(domain);
         }
-        remote.reap(domain);
+        for (payer, bytes) in reserved {
+            payer.finish_reserved_local(bytes);
+        }
     }
     pub(super) fn drain_locked(&self, remote: &mut Remote, retired: bool) {
         // A live drain takes each folded post from another unit, by its limit

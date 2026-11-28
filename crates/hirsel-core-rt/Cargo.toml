@@ -23,6 +23,8 @@ memcheck = []
 charge-observation = []
 allocation-count = []
 mimalloc = ["dep:libmimalloc-sys"]
+sanitizer-asan = ["hirsel-stack/sanitizer-asan"]
+sanitizer-tsan = ["hirsel-stack/sanitizer-tsan"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(hirsel_runtime_size)"] }

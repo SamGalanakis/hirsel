@@ -268,6 +268,7 @@ fn new_unit(id: u32, execution: &crate::run_stop::Execution) -> Box<Unit> {
         config,
         execution,
         job: Cell::new(None),
+        sanitizer: hirsel_stack::sanitizer::FiberState::new(),
     })
 }
 

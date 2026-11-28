@@ -458,6 +458,7 @@ impl Memory {
                     super::unit_entry,
                     (u as *const super::Unit).cast_mut().cast(),
                 );
+                u.sanitizer.reset();
             }
             *u.stack.get() = AdmittedStacks {
                 unit: Some(pair.unit),

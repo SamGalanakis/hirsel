@@ -214,3 +214,47 @@ pub(super) fn stop_static(name: &'static [u8]) -> ! {
 pub(super) fn record_static(name: &'static [u8]) {
     crate::run_stop::record(Stop::from_static(name))
 }
+
+pub(super) unsafe fn switch_to_idle(task: *mut Task) {
+    // SAFETY: the running task is pinned here; only its run's dispatcher owns the idle stack.
+    unsafe {
+        // MEM-30: a fiber off the CPU holds no step credit; it draws again at
+        // its next charged step.
+        crate::steps::suspend(&mut *(*task).context);
+        let (asan, tsan) = (*task)
+            .sanitizer
+            .switch_out(&raw mut (*task).sp, (*(*task).run).idle);
+        crate::run_stop::set_idle_sanitizer(asan, tsan);
+    }
+}
+
+pub(super) unsafe fn switch_to_idle_exit(task: *mut Task) {
+    // SAFETY: terminal exit from this task stack; it will not be resumed.
+    unsafe {
+        crate::steps::suspend(&mut *(*task).context);
+        (*task)
+            .sanitizer
+            .switch_exit(&raw mut (*task).sp, (*(*task).run).idle);
+    }
+}
+
+pub(super) unsafe fn switch_to_task(task: *mut Task, idle: *mut *mut u8) {
+    // SAFETY: task stack is mounted and pinned while the dispatcher switches in.
+    unsafe {
+        let task_stack = (*task).stack.as_ref().unwrap();
+        crate::fiber::guard(task_stack.bounds());
+        (*task)
+            .sanitizer
+            .switch_in(idle, (*task).sp, task_stack.sanitizer_bounds());
+    }
+}
+
+pub(super) unsafe fn recycle_ended(run: *mut Scheduler, root: *mut Task, task: *mut Task) {
+    // SAFETY: task has exited its stack and returned to the idle dispatcher.
+    unsafe {
+        (*task).sanitizer.clear();
+        (*run)
+            .stacks
+            .recycle_ended(task == root, (*task).stack.take().unwrap());
+    }
+}

@@ -426,3 +426,17 @@ fn a_frame_charge_returns_to_its_limit_after_a_scope_outranks_the_body_record() 
         assert_eq!(unsafe { (*p.local()).outstanding }, expected);
     }
 }
+
+#[test]
+fn payer_record_pointer_preserves_full_slot_provenance() {
+    let ctx = Context::new(4096);
+    let payer = ctx.payer();
+    // Round-trip through `record_pointer` -> `from_current` (the path used by
+    // `Region::refund` and C-ABI limit record callers) and dereference fields
+    // beyond `LimitRecord` (`slot.domain`, `slot.links`) under Stacked Borrows.
+    let round_tripped = Payer::from_current(payer.record_pointer());
+    round_tripped.admit(Some(64)).unwrap();
+    assert_eq!(round_tripped.usage(), (64, 4096));
+    round_tripped.refund(64);
+    assert_eq!(round_tripped.usage(), (0, 4096));
+}

@@ -520,7 +520,7 @@ impl Payer {
     }
     #[inline(always)]
     fn local(self) -> *mut LimitRecord {
-        self.slot().local.get()
+        self.0.as_ptr().cast()
     }
     #[cfg(feature = "prof")]
     fn observe(self, available: u64) {

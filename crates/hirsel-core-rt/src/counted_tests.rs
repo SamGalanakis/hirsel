@@ -14,6 +14,14 @@ pub(crate) struct Fixed<const N: usize> {
     pub(crate) points: [Point; N],
 }
 
+impl<const N: usize> Fixed<N> {
+    /// Pointer to the leading descriptor with provenance covering the entire
+    /// `Fixed<N>` (including inline trailing `points`).
+    pub(crate) const fn as_ptr(&self) -> *const Descriptor {
+        (self as *const Self).cast()
+    }
+}
+
 /// Point `k` (1-based) of a counted fixture: no array index.
 pub(crate) const fn at(k: u64, cursor: u64, a: u64, b: u64) -> Point {
     Point {
@@ -46,7 +54,7 @@ pub(crate) unsafe fn release_leaf(context: *mut Context, node: NonNull<u8>, atom
     // SAFETY: the caller transfers a live holder; the last one owns the node.
     unsafe {
         if counted::decrement(node, atomic) {
-            crate::abi::hirsel_core_release(context, node, &LEAF.descriptor, 0);
+            crate::abi::hirsel_core_release(context, node, LEAF.as_ptr(), 0);
         }
     }
 }
@@ -73,7 +81,7 @@ unsafe extern "C" fn chain(
             if let Some(child) = NonNull::new(payload.cast::<*mut u8>().read())
                 && counted::decrement(child, false)
             {
-                (*work).stage_fixed(child, &CHAIN.descriptor, 1);
+                (*work).stage_fixed(child, CHAIN.as_ptr(), 1);
                 return false;
             }
         }
@@ -85,7 +93,8 @@ unsafe extern "C" fn chain(
 fn counted_chain_releases_with_constant_stack_and_no_admission() {
     let mut ctx = Context::new(2_000_000);
     let mut head = ptr::null_mut();
-    for _ in 0..100_000 {
+    let count = if cfg!(miri) { 256 } else { 100_000 };
+    for _ in 0..count {
         // Count, one child word and the spare: 24 native bytes, 16 charged.
         let node = block::allocate(&ctx, ctx.payer(), Some(16), 24, 8, block::PLAIN).unwrap();
         // SAFETY: a freshly allocated count/payload pair receives its sole child.
@@ -100,7 +109,7 @@ fn counted_chain_releases_with_constant_stack_and_no_admission() {
     unsafe {
         let node = NonNull::new(head).unwrap();
         assert!(counted::decrement(node, false));
-        crate::abi::hirsel_core_release(&mut ctx, node, &CHAIN.descriptor, 0);
+        crate::abi::hirsel_core_release(&mut ctx, node, CHAIN.as_ptr(), 0);
     }
     assert_eq!(ctx.available(), 2_000_000);
     assert_eq!(ctx.current.attempts(), 0);
@@ -229,7 +238,7 @@ fn resumed_drop_glue_cleans_descendants_before_siblings_and_parent_refunds() {
                 if let Some(child) = NonNull::new(child)
                     && counted::decrement(child, false)
                 {
-                    (*list).stage_fixed(child, &TREE.descriptor, *cursor);
+                    (*list).stage_fixed(child, TREE.as_ptr(), *cursor);
                     return false;
                 }
             }
@@ -265,7 +274,7 @@ fn resumed_drop_glue_cleans_descendants_before_siblings_and_parent_refunds() {
     unsafe {
         let one = NonNull::new(one).unwrap();
         assert!(counted::decrement(one, false));
-        crate::abi::hirsel_core_release(&mut ctx, one, &TREE.descriptor, 0);
+        crate::abi::hirsel_core_release(&mut ctx, one, TREE.as_ptr(), 0);
     }
     TRACE.with(|t| assert_eq!(*t.borrow(), [3, 4, 2, 1]));
     assert_eq!(ctx.available(), 128);
@@ -375,7 +384,7 @@ unsafe extern "C" fn kids(
             let child = NonNull::new_unchecked(data.add(*cursor as usize).read());
             *cursor += 1;
             if counted::decrement(child, false) {
-                (*work).stage_fixed(child, &HOLDER.descriptor, 0);
+                (*work).stage_fixed(child, HOLDER.as_ptr(), 0);
                 return false;
             }
         }
@@ -387,7 +396,8 @@ unsafe extern "C" fn kids(
 fn fixed_frames_and_buffer_frames_share_one_nonrecursive_worklist() {
     let mut ctx = Context::new(8_000_000);
     let mut head: Option<NonNull<u8>> = None;
-    for _ in 0..100_000 {
+    let depth = if cfg!(miri) { 256 } else { 100_000 };
+    for _ in 0..depth {
         let node = block::allocate(&ctx, ctx.payer(), Some(24), 40, 8, block::PLAIN).unwrap();
         // SAFETY: a fresh counted holder receives a one-element GRAPH buffer
         // holding the previous node, or an empty static carrier.
@@ -397,11 +407,13 @@ fn fixed_frames_and_buffer_frames_share_one_nonrecursive_worklist() {
             if let Some(child) = head {
                 let data = block::allocate(&ctx, ctx.payer(), Some(8), 8, 8, block::GRAPH).unwrap();
                 data.as_ptr().cast::<*mut u8>().write(child.as_ptr());
-                carrier.write(data.as_ptr() as u64);
+                carrier.cast::<*mut u8>().write(data.as_ptr());
                 carrier.add(1).write(1);
                 carrier.add(2).write(1);
             } else {
-                carrier.write(8);
+                carrier
+                    .cast::<*mut u8>()
+                    .write(ptr::without_provenance_mut(8));
                 carrier.add(1).write(0);
                 carrier.add(2).write(0);
             }
@@ -413,7 +425,7 @@ fn fixed_frames_and_buffer_frames_share_one_nonrecursive_worklist() {
     unsafe {
         let node = head.unwrap();
         assert!(counted::decrement(node, false));
-        crate::abi::hirsel_core_release(&mut ctx, node, &HOLDER.descriptor, 0);
+        crate::abi::hirsel_core_release(&mut ctx, node, HOLDER.as_ptr(), 0);
     }
     assert_eq!(ctx.available(), 8_000_000);
     assert_eq!(ctx.current.attempts(), 0);
@@ -445,7 +457,7 @@ unsafe extern "C" fn last(
         }
         match NonNull::new(payload.cast::<*mut u8>().read()) {
             Some(child) if counted::decrement(child, false) => {
-                (*work).stage_fixed(child, &LAST.descriptor, 1);
+                (*work).stage_fixed(child, LAST.as_ptr(), 1);
                 false
             }
             _ => true,
@@ -472,7 +484,7 @@ fn finished_points_free_without_resuming_and_deep_failures_reach_the_root() {
     let failed = unsafe {
         let node = NonNull::new(head).unwrap();
         assert!(counted::decrement(node, false));
-        counted::drain(&mut ctx, node, &LAST.descriptor, 0)
+        counted::drain(&mut ctx, node, LAST.as_ptr(), 0)
     };
     assert!(failed);
     assert_eq!(ctx.available(), 1_600);

@@ -409,6 +409,12 @@ pub(crate) fn running_image(fd: RawFd) -> io::Result<bool> {
 /// The caller owns the range, which holds no live data.
 #[inline]
 pub(crate) unsafe fn discard(start: usize, bytes: usize) -> bool {
+    #[cfg(miri)]
+    {
+        let _ = (start, bytes);
+        true
+    }
+    #[cfg(not(miri))]
     // SAFETY: per the contract.
     unsafe {
         libc::madvise(
@@ -427,6 +433,12 @@ pub(crate) unsafe fn discard(start: usize, bytes: usize) -> bool {
 /// The caller owns the range, which holds no live data.
 #[inline]
 pub(crate) unsafe fn decommit(start: usize, bytes: usize) -> bool {
+    #[cfg(miri)]
+    {
+        let _ = (start, bytes);
+        true
+    }
+    #[cfg(not(miri))]
     // SAFETY: per the contract.
     unsafe {
         libc::mprotect(

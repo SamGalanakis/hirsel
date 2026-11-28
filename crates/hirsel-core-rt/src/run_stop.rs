@@ -315,6 +315,10 @@ pub(crate) struct WorkerFaultSlot {
     /// Pointer to the worker's `idle: *mut u8` stack pointer slot saved by
     /// `hirsel_stack::switch`. Null when not running a recoverable fiber.
     pub(crate) idle_ptr: AtomicPtr<*mut u8>,
+    /// Sanitizer fiber metadata for returning to `idle_ptr` on abort/stop.
+    idle_asan_bottom: AtomicPtr<u8>,
+    idle_asan_size: AtomicUsize,
+    idle_tsan_fiber: AtomicPtr<u8>,
     /// Active generation end slot for this thread, or null outside a run.
     pub(crate) generation: AtomicPtr<Execution>,
 }
@@ -328,8 +332,27 @@ impl WorkerFaultSlot {
             top: AtomicUsize::new(0),
             kind: AtomicU8::new(StackKind::None as u8),
             idle_ptr: AtomicPtr::new(ptr::null_mut()),
+            idle_asan_bottom: AtomicPtr::new(ptr::null_mut()),
+            idle_asan_size: AtomicUsize::new(0),
+            idle_tsan_fiber: AtomicPtr::new(ptr::null_mut()),
             generation: AtomicPtr::new(ptr::null_mut()),
         }
+    }
+
+    #[inline(always)]
+    fn get_idle_sanitizer(
+        &self,
+    ) -> (
+        hirsel_stack::sanitizer::StackBounds,
+        hirsel_stack::sanitizer::TsanFiber,
+    ) {
+        let bottom = self.idle_asan_bottom.load(Ordering::Relaxed);
+        let size = self.idle_asan_size.load(Ordering::Relaxed);
+        let tsan = self.idle_tsan_fiber.load(Ordering::Relaxed);
+        (
+            hirsel_stack::sanitizer::StackBounds::from_raw(bottom, size),
+            hirsel_stack::sanitizer::TsanFiber::from_raw(tsan),
+        )
     }
 
     #[inline(always)]
@@ -541,6 +564,23 @@ pub(crate) fn set_idle_ptr(idle: *const *mut u8) -> *mut *mut u8 {
     prev
 }
 
+/// Record the active scheduler's ASan stack bounds and TSan fiber handle on
+/// the current worker slot so `raise`/`leave_on_ended` annotate their exit switch.
+#[inline(always)]
+pub(crate) fn set_idle_sanitizer(
+    asan: hirsel_stack::sanitizer::StackBounds,
+    tsan: hirsel_stack::sanitizer::TsanFiber,
+) {
+    if let Some(slot) = current_slot() {
+        let (bottom, size) = asan.into_raw();
+        slot.idle_asan_bottom
+            .store(bottom.cast_mut(), Ordering::Relaxed);
+        slot.idle_asan_size.store(size, Ordering::Relaxed);
+        slot.idle_tsan_fiber
+            .store(tsan.into_raw(), Ordering::Relaxed);
+    }
+}
+
 /// Active generation pointer on this thread, if any.
 #[inline(always)]
 pub(crate) fn current_execution() -> Option<&'static Execution> {
@@ -603,9 +643,10 @@ pub fn raise(stop: Stop) -> ! {
             unsafe {
                 let target = *idle_ptr;
                 if !target.is_null() {
-                    let mut discard = ptr::null_mut();
-                    hirsel_stack::switch(&mut discard, target);
-                    std::hint::unreachable_unchecked();
+                    let (asan, tsan) = slot.get_idle_sanitizer();
+                    hirsel_stack::sanitizer::asan_start_switch_exit(asan);
+                    tsan.switch_to();
+                    hirsel_stack::switch_abandon(target);
                 }
             }
         }
@@ -626,9 +667,10 @@ pub(crate) fn leave_on_ended() -> ! {
             unsafe {
                 let target = *idle_ptr;
                 if !target.is_null() {
-                    let mut discard = ptr::null_mut();
-                    hirsel_stack::switch(&mut discard, target);
-                    std::hint::unreachable_unchecked();
+                    let (asan, tsan) = slot.get_idle_sanitizer();
+                    hirsel_stack::sanitizer::asan_start_switch_exit(asan);
+                    tsan.switch_to();
+                    hirsel_stack::switch_abandon(target);
                 }
             }
         }

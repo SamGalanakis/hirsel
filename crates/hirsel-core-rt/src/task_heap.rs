@@ -1562,19 +1562,7 @@ unsafe fn release_slow(mut state: Local<'_>, page: PagePointer, payload: NonNull
     }
 }
 
-pub(crate) fn page_bytes() -> usize {
-    static PAGE: OnceLock<usize> = OnceLock::new();
-    *PAGE.get_or_init(|| {
-        // SAFETY: sysconf reads the kernel's immutable page size.
-        let value = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        match usize::try_from(value) {
-            Ok(bytes) if bytes.is_power_of_two() && (MIN_PAGE_BYTES..=SLAB).contains(&bytes) => {
-                bytes
-            }
-            _ => crate::run_stop::raise(crate::run_stop::Stop::from_static(b"PageSize")),
-        }
-    })
-}
+pub(crate) use slabs::page_bytes;
 
 #[cold]
 fn host_memory<T>() -> T {

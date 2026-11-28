@@ -25,9 +25,9 @@ AUXILIARY_STAGES = {
     "bootstrap": "Fresh worktree bootstrap", "toolchain": "Toolchain build",
     "cgroup": "Launcher cgroup law", "containment": "Containment generator",
     "ownership": "Ownership soundness",
-    "w2": "W2 damage sweep", "n1": "N1 browser_room",
+    "w2": "W2 damage sweep", "n1": "N1 browser_room", "sanitizers": "Sanitizers & Miri",
 }
-DEFERRED_STAGES = {"vopr", "w2"}
+DEFERRED_STAGES = {"vopr", "w2", "sanitizers"}
 
 
 def read_report(path):

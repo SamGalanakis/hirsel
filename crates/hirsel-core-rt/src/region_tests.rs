@@ -182,8 +182,9 @@ fn demand_sized_chunks_bound_reserved_bytes_at_each_allocation() {
     let context = Context::new(u64::MAX);
     let mut region = Region::open(&context);
     let mut occupied = 0;
+    let small_count = if cfg!(miri) { 64 } else { 2_000 };
     for (i, bytes) in std::iter::once(73)
-        .chain(std::iter::repeat_n(24, 2_000))
+        .chain(std::iter::repeat_n(24, small_count))
         .chain((1..64).map(|n| n * 73))
         .enumerate()
     {
@@ -228,7 +229,8 @@ fn mixed_region_pools_pack_slots_at_their_own_size_and_alignment() {
 fn closing_and_reopening_a_region_reuses_chunks_without_visiting_values() {
     use crate::region::{CHUNK_RELEASES, CHUNK_REQUESTS};
     let context = Context::new(u64::MAX);
-    for length in [1, 1_000_000] {
+    let large_len = if cfg!(miri) { 2_048 } else { 1_000_000 };
+    for length in [1, large_len] {
         let before = CHUNK_REQUESTS.with(std::cell::Cell::get);
         let mut requests_after_first = 0;
         for iteration in 0..2 {

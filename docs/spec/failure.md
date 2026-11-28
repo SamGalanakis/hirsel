@@ -167,11 +167,8 @@ resource type Temp { dir: Dir, name: String }
   drop(t) { let _ = host.remove(t.dir, t.name) }
 ```
 
-A resource literal admits the resource's storage, cause cell and grant
-([MEM-24](budgets.md#mem-24-logical-charges)) and has type `Result[T, (Capacity, F)]`, with
-`F` its one field or the tuple of its fields in declaration order, or `Result[T, Capacity]`
-when it has no fields ([T1.2](ownership.md#own-26-the-transition-table)). A
-resource is cleaned exactly once: by its finalizer on implicit drop, or by an explicit
+[T1.2](ownership.md#own-26-the-transition-table) specifies resource literal admission
+and its result type. A resource is cleaned exactly once: by its finalizer on implicit drop, or by an explicit
 consuming function. A consuming function in the defining module ends a resource without
 its finalizer by a whole destructure ([T3.7](ownership.md#own-26-the-transition-table)),
 which is how fallible finalisation (`close`, `commit`, `flush`) is written; after its fields
@@ -397,7 +394,9 @@ fn guard(f: scoped fn() -> u64) -> u64 {
 ### FAIL-17: Stack exhaustion
 
 Each task runs on its own stack. The part of that stack that user code may use is the task's
-**stack allowance**. It is the same for every task of one build, and is fixed by the build.
+**stack allowance**. A build fixes one catchable user-stack allowance for every task.
+Worker count and host address-space limits cannot change that allowance or where a
+user activation fails with `Stack`.
 It is not a limit (MEM-19): nothing admits, refunds or hands it over, and nothing names it.
 Below the allowance lie the **cleanup margin** and then the **engine reserve**, for the
 engine code that runs between activations: cleanup, refunds, cause recording, and core
@@ -456,7 +455,7 @@ functions.
 - **Determinism.** Where an activation is refused depends on the build's frame sizes. Every
   run of one build with the same inputs is refused at the same entry, so a `Stack` failure
   passes the replay point like any other failure ([SEM-8](semantics.md#sem-8-determinism)).
-  Across builds the point differs, as for limits (MEM-28) and step bounds (MEM-30). An
+  Across builds the refusal site may differ ([SEM-8](semantics.md#sem-8-determinism)). An
   engine or optimisation level may use larger or smaller frames, or inline calls, so no
   program or test may rely on a depth across engines, and no engine keeps a portable depth
   count. A build may leave unchecked an activation whose stack need is bounded and small,
@@ -470,8 +469,7 @@ functions.
   guest stack runs out ([FFI-14](foreign.md#ffi-14-determinism-traps-and-replay)).
 - **No per-scope stack bound.** `bound bytes` does not charge the stack (MEM-19), and no
   scope narrows the allowance. A stack figure is one engine's frame size, so a bound
-  written in one would mean something different on each build. A portable depth bound,
-  counted in activations as MEM-34 counts them for constants, is reserved.
+  written in one would mean something different on each build.
 
 **The native layout.** Not observable, and listed so the engines and the runtime agree.
 A native task stack reserves 16 MiB of address space above one guard page; pages become
@@ -479,13 +477,11 @@ writable when first touched, so an unused reservation costs neither memory nor t
 limit. From the top: the allowance, 7.5 MiB; the cleanup margin, 256 KiB, room for 64
 activations of a 4 KiB frame (HotSpot's reserved zone plays the same part); and the engine
 reserve, the rest, which holds a frame as large as the ceiling plus 512 KiB for the
-runtime, so a frame made just past the limit never reaches the guard page. A smaller stack
-(a unit's) has an allowance of at most half of what lies above its margin. The limit is
+runtime, so a frame made just past the limit never reaches the guard page. The limit is
 one word of the task's context, at byte 24 of its first cache line, committed before the
 task first runs. An `isolate` saves the word at entry and restores it when it returns or
-catches. The evaluator applies the same allowance and margin to the bytes of its
-activations' frame slots, and also refuses an activation when its own host stack nears its
-end.
+catches. The evaluator applies its build's allowance and margin to the bytes of its
+activations' frame slots.
 
 ```hirsel
 fn depth(n: u64) -> u64 { if n == 0 { 0 } else { depth(n - 1) + 1 } }

@@ -151,7 +151,7 @@ is the most any build charges for the allocation (MEM-28):
 | a flow port | `cap × (16 + size(T)) + 64`, refunded to its limit record on flow cleanup ([CONC-14](tasks.md#conc-14-flows)) |
 | a flow stage | `m + size(X) + 320`, refunded to its limit record on flow cleanup ([CONC-14](tasks.md#conc-14-flows)) |
 | a virtual provider's port or cell ([core](core.md#provide)) | a port: 32 and its room `n`; a Clock, Random or Process cell: 32; each from the current limit, refunded when that limit ends, by a fault too, which withdraws the cell: a copy of its plain capability that outlives the limit designates a withdrawn provider ([core](core.md#provide)). Withdrawal releases the port room and makes its slot reusable |
-| a packet key ([TLS-8](tls.md#tls-8-packet-ciphers-and-key-agreement)) | the row TLS-8's charge table gives it: a `Schedule` 512, from the current limit at each constructor and `srtp`, refunded at drop; a `KeyShare` 64; a `Sealer` or `Opener` 1024; a `HeaderMask` 512; a registry entry 48; a ledger entry 16; `p256_key`'s document 176; the AAD scratch its span's length plus `extra`, refunded at the call's return |
+| a packet key | see the [TLS-8 charge table](tls.md#tls-8-packet-ciphers-and-key-agreement) |
 | `isolate` | 32 for its cause cell, from the current limit (inside a finalizer, its grant); refunded when `body` returns, and when a caught failure leaves the current obligation's cell unused ([FAIL-16](failure.md#fail-16-isolation)) |
 
 `list.new`, `string.new`, `map.new`, `deque.new`, `heap.new`, `list.with_capacity(0)` and an empty span builder
@@ -361,16 +361,6 @@ exactly MEM-24's rows; a later policy (MEM-24's last paragraph) changes the modu
   them with the provider's published figure, so a provider's change moves no caller's
   literal.
 
-Prior art:
-
-| system | what it exposes | verdict |
-|---|---|---|
-| Rust `core::mem::size_of::<T>()`, `Layout::new::<T>()`, `Layout::array::<T>(n)` | a `const fn` for a type's size and a checked layout calculator for arrays and extension | **ADAPTED.** A size readable in constants and generic code, and a checked composite (`Layout::array` returns `Err` on overflow, as `charge.*` returns `None`), are taken. Rust's figure is the target's layout, padding and alignment included, and differs by target; `bytes[T]` is the logical size, the same on every target. Rust has no recipe for a channel's or a task's cost: `std::sync::mpsc` and `tokio` allocate behind the call and no budget sees it, which MEM-24 exists to avoid. |
-| Zig `@sizeOf(T)`, `@alignOf(T)`, `std.mem.Allocator` byte counts | a builtin read at compile time; allocators take explicit byte counts | **ADAPTED.** A keyword-introduced form with a type operand, legal in comptime code, is the shape `bytes[T]` takes, since Hirsel never writes type arguments at a call (LANG-12) and `bytes` is already a keyword. Zig's figure is again the target's layout. Zig's allocator interface asks the caller for raw byte counts and leaves composite costs to each caller, the hand-copying this rule removes. |
-| Goose (`/tmp/ref-goose` at `d5ae5bb`) | no type-size expression in its spec, reference or stdlib docs (goose goose_spec.md, reference.md, stdlib.md); its tutorial measures C++ and Rust with `sizeof` and reads Goose's own sizes off packed declarations (goose tutorial.md:732) | **NOT TAKEN.** Its sizes are fixed by its packed layouts and are written beside declarations, which is the hand-copying this rule replaces. Its stdlib's explicit-cost stance (adopted in [HTTP](http.md)) is kept: every price is still explicit, only its source changes. |
-
-Reversible: before 1.0, the form, the module and the split are each spec and library text.
-
 ### MEM-30: Step bounds
 
 In the reference count (Determinism, below), a **step** is taken at each call, each loop
@@ -471,12 +461,7 @@ is core's plain record `{ steps: u64 }`.
   byte after them. A call on a fixed-size `Inline` (`sha1.block`,
   `sha256.block`, `sha512.block`, `check.xxh3_stripe`, `check.xxh3_short_inline`) and
   `check.xxh3_short`, whose input is at most 240 bytes, does work its types bound and takes
-  none. Not yet counted, each a named gap: `==` at a type parameter counts only its fixed
-  part; a sequence nested in a derived `==` (the bytes of a `List[String]`'s elements, a list
-  in a record) counts its element only; map key hashing and equality, beyond their depth
-  steps; key derivation; the
-  copy of a large `Inline` by assignment; `==` on `Deque` and `Map`; and core-source loops
-  outside the table (`string.find` and its kin). A closure written in core source takes a
+  none. A closure written in core source takes a
   step at each entry, as any closure does, so `from_utf8`'s scalar tail over multibyte text
   takes those steps besides its row.
 - **Depth steps.** A walk the engine generates over a value whose depth the value chooses
@@ -614,8 +599,8 @@ fn grow(mut xs: List[u64], k: u64) -> Result[(), OutOfTime] {
 
 ### MEM-34: Constant budgets
 
-A computed constant ([LANG-20](language.md#lang-20-constants)) is evaluated under a **constant
-budget**, the same for every constant and every build: its own root
+A computed constant ([LANG-20](language.md#lang-20-constants)) is evaluated under a
+**computed constant evaluation budget**, the same for every computed constant and build: its own root
 step bound of **16,777,216** steps (2^24), its own root limit of **67,108,864** bytes (64 MiB)
 and at most **4,096** activations. Each assertion (`const _`) has a budget of its own, as
 every other computed constant has. The budget is part of the meaning of the program
@@ -680,45 +665,3 @@ fn count(n: u64) -> u64 { let mut i: u64 = 0; while i < n { i += 1 }; i }
 const SMALL: u64 = count(1000)            // 1000, in 1,002 steps: the entry, the call and 1,000 back edges
 const HUGE: u64 = count(16777216)         // refused: LANG-20, OutOfTime: 2^24 back edges and two steps more
 ```
-
-Version note (2026-11-25, comptime-phase1-spec-2686; COMPTIME-DIRECTION 3.1 C4 and §5;
-built in `PureInput::constant`, `crates/hirsel-core-eval/src/pure.rs`): the new rule. The numbers come from Phase 0's measurements, since nothing else
-had been measured:
-- **Steps 16,777,216.** Measured by the reference count: `crc32.table()` takes 5,889 steps,
-  and `regex.valid` of the 25-byte date pattern takes 80,853 (comptime-eval-split-2612 and
-  comptime-e3c-dispatch-2663). That leaves room of 2,849 times for crc and 207 times for
-  regex. The old CT-5 budget of 1,000,000 source events, against which the old flate tables
-  took 598,608, is a different unit, and 2^24 is 28 times that. At the limit, if each step
-  costs as those two workloads do, the tree walker costs about 2,892 to 3,143 host
-  instructions per step and the flat engine 1,219 to 1,253, so 48.5 to 52.7 billion and
-  20.5 to 21.0 billion instructions. That is seconds, not minutes, for the one constant a
-  build might have that large. A step that is a core call can cost more, and the byte limit
-  bounds what it works on (MEM-30, "Waits, bytes and tasks").
-- **Bytes 67,108,864.** Not measured: Phase 0's probes recorded no bytes. Derived from the
-  spec instead. `crc32.table()` charges 0, because an `Inline` array is a plain value.
-  `regex.new` of a pattern of length L admits two arenas of 64 × (L + 1) bytes, 1,664 each
-  for the date pattern, a group-name list and a class-range pool, which grow with the
-  pattern, and a program of at most RE-8's `SIZE_LIMIT`, 10,485,760. A program at
-  that limit leaves 56,623,104 bytes, and the arenas alone fit in it for every L up to
-  442,367 ((67,108,864 − 10,485,760) / 128 = 442,368 = L + 1), so every pattern a program
-  would write as a literal fits with room for the rest. A 64 KiB table, the largest Phase 4 plans, is 1/1,024 of it.
-- **Activations 4,096.** Not measured: Phase 0's probes recorded no depth. Derived instead:
-  the deepest recursive path in the corpus is 27 activations, so this is 151 times as many.
-  `std`'s regex checks its 250 levels of nesting with an explicit work list, not recursion.
-  At that path's 27,520 host stack bytes, about 1,019 per activation, 4,096 activations take
-  about 4.2 MB, far less than the 128 MiB root stack. So the activation count, not the host
-  stack, decides where deep recursion stops, and it stops at the same place on every host.
-Reversible before 1.0 in one direction only: raising a number turns refusals into
-acceptances and changes no accepted constant's value, while lowering one can refuse
-programs that were accepted.
-
-Version note (2026-11-27, capability-reachability-spec-3207; containment study 3202, H4): the
-package budget, built in `constant_refusals`, `crates/hirsel-core-driver/src/comptime.rs`.
-Before it, each constant had only its own budget, so a package's comptime work grew with its
-number of constants: ten constants of 5,000,000 steps each took 8.8 s to check, and were
-accepted. **2^25** is twice one constant's budget, so one constant may spend all of its own
-and the package still has as much again. Measured by the reference count with `hirsel check`
-on every package in `core/programs/` and the `std` they check against, the largest package
-total is `std`'s, 11,828 steps over 11 constants, about 1/2,800 of the budget; no program
-package passes 400. At the instruction rates above, the budget costs 41 to 105 billion host
-instructions at most per package. Reversible in the same one direction.

@@ -121,14 +121,9 @@ type Point { x: i64, y: i64 }
 const ORIGIN: Point = Point(x: 0, y: 0)
 fn left() -> i64 { ORIGIN.x }
 ```
-```hirsel unbuilt
+```hirsel
 // in a package that depends on package store, whose root module is store/store.hirsel
-fn count(db: store.Db, t: store.Table[u64, u64]) -> u64 {
-  let n = result.unwrap(store.look(store.snapshot(db), None, fn(tx: store.Tx) -> u64 {
-    option.unwrap(result.unwrap(store.fetch(tx, t, 1u64)))
-  }));
-  n
-}
+fn latest(db: store.Db) -> store.Snapshot { store.snapshot(db) }
 fn stutter(db: store.store.Db) -> u64 { 0 }               // refused: LANG-7, at the second store
 ```
 ```hirsel
@@ -751,9 +746,8 @@ constants it names, without running anything.
 - **Manifest constants** are evaluated once, before any body is checked, in dependency
   order, by the rules of [semantics](semantics.md). They belong to the declarations: types,
   retention ([PROG-6](programs.md#prog-6-one-meaning)) and checking may read their values.
-  An integer one whose initialiser holds only integer literals, operators and other such
-  constants is a **length constant**, and an `Inline` length may name it
-  ([SEM-9](semantics.md#sem-9-inline-arrays)).
+  [SEM-9](semantics.md#sem-9-inline-arrays) defines which manifest constants can supply
+  an `Inline` length.
 - **Computed constants** are evaluated after their initialiser and
   every function it can reach are checked. The initialiser's retained code
   ([PROG-10](programs.md#prog-10-code-addresses)) runs as a call with no argument, with the
@@ -819,12 +813,13 @@ bytes:
   ([MEM-28](budgets.md#mem-28-charges-are-an-upper-bound)).
 
 There is no second representation: no program can tell a static computed constant from the
-literal with the same bytes, by content, length, capacity or charge. Its size is bounded by
-the run that made it: the returned bytes were admitted under the constant's root limit
-([MEM-34](budgets.md#mem-34-constant-budgets)), so a value is at most 64 MiB, and no other
-limit applies. A `String`'s bytes are UTF-8 because the run built a `String`.
+literal with the same bytes, by content, length, capacity or charge.
+[MEM-34](budgets.md#mem-34-constant-budgets) defines the static-value budget.
+A `String`'s bytes are UTF-8 because the run built a `String`.
 
-**Refusal.** A computed constant is refused when its run fails
+**Refusal.** An initialiser that reaches a refused body does not run. The checker
+reports the body's refusal without adding a second refusal for the initialiser.
+A computed constant is refused when its run fails
 ([FAIL-2](failure.md#fail-2-causes)), reaches a function on the closed list or a foreign
 function, or exceeds its budget or its package's (MEM-34). The refusal names the constant, the cause (a
 failure's primary cause with its message, the closed-list or foreign function, or the budget
@@ -920,41 +915,6 @@ const RAMP: FrozenBytes = ramp()                          // static computed: re
 fn raw() -> Bytes { list.new() }
 const RAW: Bytes = raw()                                  // refused: LANG-20, a Bytes constant is never static
 ```
-
-Version note (2026-11-25, comptime-phase1-spec-2686; COMPTIME-DIRECTION decisions 1, 2, 3a, 6
-and 11, ruled A; not yet built): a constant's initialiser may call functions. It was "calls no
-function". The constants LANG-20 admitted before are now the manifest constants, with the same
-meaning, so every program accepted before is accepted with the same values. A computed
-constant is evaluated after checking, under MEM-34's budget. Its value decides no type and no
-retention. `const _` is an assertion. The closed list was settled from core's operation table
-(the runtime lanes of the front's core bindings). Beyond the direction's six functions, it
-adds every `provide` function, which mints virtual capabilities without authority, so CAP-1
-alone does not keep a provider out of an initialiser. It also adds the key-material makers and
-the task-object makers. `charge.latest` is not on the list: it is a MEM-33 recipe, a pure
-function. Reversible before 1.0: the spec only. Shrinking the closed list or raising MEM-34's
-numbers later turns refusals into acceptances and changes no accepted value.
-
-Version note (2026-11-25, comptime-phase2b-2715): computed constants and assertions are
-built. Their examples above are checked. An initialiser that reaches a refused body is not
-run, so a constant reports no second refusal for a body refused already; this adds no
-refusal and removes none of the program's. A `String` constant whose initialiser calls a
-function is refused as a static string, at the initialiser, as before this change; the text
-had also said "at the type". Reversible: the spec and the driver.
-
-Version note (2026-11-26, comptime-phase4-bytes-2836; COMPTIME-DIRECTION C4 and decision 7,
-ruled A; built, and its examples above are checked): a computed constant may have type `String` or `FrozenBytes`, stored
-in the literal's static carrier and read as the literal with the same bytes. A `String`
-constant whose initialiser calls a function was refused as a static string; it is now
-computed. A `FrozenBytes` constant was refused at its type; it is now always computed. The
-direction says "`Bytes` or `String`", but `Bytes` is `List[u8]` and no `List` is static
-(core, "Literals"), so the static byte type is `FrozenBytes`, the type a byte-string literal
-already takes in static storage, and `Bytes` stays refused. Every program accepted before is
-accepted with the same values. Reversible before 1.0: the spec, the front and the driver.
-
-Version note (2026-11-26, comptime-phase5-2883; COMPTIME-DIRECTION decision 8, ruled A;
-built): a length constant may be an `Inline` length (SEM-9), so a type reads a manifest
-constant's value. No type reads a computed constant's. Reversible before 1.0: the spec and
-the front.
 
 ### LANG-21: Operators
 

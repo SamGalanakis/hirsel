@@ -7,12 +7,7 @@ guarantee it asks of v1 binds v1.
 
 ## Reservation clauses
 
-Each clause is numbered as in the risk audit it comes from; R25 and R26 come from the
-review of compact sequences, and R28 and R29 from the verification-seam review, ruled on
-2026-11-22, which also amended R5's *Later* list. Clauses R3, R5, R8, R11,
-R14, R15, R18, R19, R21 and R23 are quoted from that audit, and R13 restates its clause
-with registration; the line after each says where
-v1 meets it.
+Each reservation links to the current rule it constrains.
 
 **R1.** `send` is checked from declarations and capture lists; `Rc`, scoped and region
 values are never `send`; every sent block keeps a limit that outlives its holders,
@@ -53,18 +48,6 @@ memory to the byte limit and fuel to the step bound, maps traps to failures, and
 recording and replay for contained-only reach. The test configuration supplies the
 contained grant without a separate command-line grant. See the
 [contained foreign code status](foreign.md#contained-foreign-code) for remaining W1 work.
-*Later:* callbacks into Hirsel and a restricted worker process per interface or package
-for native code that cannot be compiled to Wasm. A contained boundary is required before Hirsel
-admits any foreign package that has not been audited under FFI-1. Moving only the `waits` calls out of
-process is not such a boundary, because one package may use a handle from both kinds of
-call, and neither process could use the other's C pointers or byte loans; a provider contract that records a foreign call so that replay admits it; native time
-and memory budgets with `sqlite3_interrupt` or a progress handler as fuel; a typed reading
-of a refused handle; varargs, arbitrary pointers and dynamic loading.
-iOS (`aarch64-apple-ios`, `aarch64-apple-ios-sim`): the [embedding](embed.md) rules
-are written but not built. The targets are named, every request for them is refused until
-the static-library slices land. Once the simulator gate (EMB-9) is green, iOS is
-supported **simulator only**; it leaves this list when a signed device run passes its device
-gate (EMB-9).
 
 **R6.** `String`/`List` and `Text`/`FixedSpan` are distinct types; compact fields declare
 inline or linked storage and links stay in one blob; wire formats are separate;
@@ -261,29 +244,20 @@ or a prover, is an input to acceptance, lowering, code identity, replay or any o
 of SEM-8, and no program reads one. *v1:* LANG-2, LANG-5, PROG-6, SEM-8, MEM-28, MEM-30,
 CAP-9. "Contracts and facts" stays under "Not in v1".
 
-**R29 (the causes are these eight).** No later version adds, removes or changes a case of
-`CauseKind`. A later refusal, and a later claim checked at run time that does not hold,
-raises `Fail(text)`. A later typed reading of a failure is a core function over `Cause`.
-*v1:* FAIL-2; LANG-17's exhaustive `match`.
+**R29 (the closed cause list).** [FAIL-2](failure.md#fail-2-causes) owns the list of
+`CauseKind` cases. No later version adds, removes or changes a case. A later refusal
+or failed run-time claim raises `Fail(text)`. A later typed reading of a failure is a
+core function over `Cause`. *v1:* FAIL-2; LANG-17's exhaustive `match`.
 
-## Hooks for later libraries
-
-| hook | v1 | state |
-|---|---|---|
-| O, scoped ownership and authority | scoped types and callbacks, declared anchors, regions and limits; authority only through arguments | open: authority facades (R19), static brands (R24) and callable results anchored to a place ([LANG-13](language.md#lang-13-callables)) |
-| F, failure boundary | cleanup on every exit edge; one owner per survivor; ordered causes; `isolate` (FAIL-16) | open: a single `Result[R, Causes]` form, which needs a per-boundary cause cell; a form that moves owned state into the body and back; `shield` |
-| C, derivation and codecs | nominal identity, opacity, rigid bounds, declaration field order; the `codec` bound (OWN-4), decode-only field defaults, the `via` override, tombstones, appended variants and the `u32` tag, schema resolution and the decode contract (SEM-10) | open: how the checker hands a `codec` declaration's traversal to the library that generates its codec; order-preserving key codecs; the schema fingerprint that keys a registered entry (R13). The content hash of a declaration for stored data is SEM-10's storage fingerprint |
-| D, code descriptors | code identity; identity bytes of closed named functions (PROG-9), including typed `StaticFn` values passed into generic parameters; no address or order dependence; the revision, `code.revision(s)` (PROG-9), never part of equality | open: for registration (R13), identity bytes for instances, so that each instance of the generic adapter has them |
-| L, append-only log and task-local cell | `Cell[T]` (MEM-29), readable and task-local; `Log[E]` is a library type over it | open: shared cells, which wait for R3 |
-| I, providers | host primitives in core, `host.rename` and `host.sleep_until` among them; issue and delivery replay points (CAP-8); `WriteError`; the sync barriers `host.sync` and `host.sync_dir`, plus `host.random` and `host.stopped` ([core](core.md#contracts-the-signatures-do-not-state)) | socket declarations and owned resources ([Net](net.md)); open: socket OS attempts/readiness; providers for `Stdin` and `Env`; watching, renaming across directories |
-| T, tasks | spawn, join, channels, cancellation points, `Arc`, the event order | settled for v1 with flows (CONC-14). Selection, shared limits, mutexes and atomics later. |
+[PROG-9](programs.md#prog-9-code-descriptors) defines code descriptors.
+[SEM-10](semantics.md#sem-10-codecs) defines codecs and storage fingerprints.
+[CAP-8](capabilities.md#cap-8-the-replay-point) defines provider issue and delivery.
 
 ## Not in v1
 
 User-made shared limits; mutexes and shared cells; atomics, which are not planned (R3); weak counted references; catching
-failures other than by `isolate`; deadlines and timeouts other than `host.sleep_until` and the network operations' declared `until`; task sets and selection; `@noalloc`; compile-time
-evaluation other than LANG-20's computed constants, whose limits are listed below; unsafe code; foreign functions other than FFI-2's, and every R5
-*Later* item; layout declarations other
+failures other than by `isolate`; deadlines and timeouts beyond the explicit `Until` operations defined by the library; task sets and selection; `@noalloc`; compile-time
+evaluation other than LANG-20's computed constants, whose limits are listed below; unsafe code; foreign functions other than FFI-2's; layout declarations other
 than `@compact`; methods, traits and implementation contracts; imports; list and map
 literals (an `Inline` array literal is not one); format strings; `forget`; static brands;
 conversion of errors by `?`; ranges over `char`, which would need to step over the surrogate
@@ -295,10 +269,8 @@ library writes one function per width; generics over an `Inline` length, and a l
 facts; `@varint` (R25); documents in segments (R26); the store, runners and places; a step grant for
 finalizers, which would let cleanup under an exhausted step bound take steps ([MEM-30](budgets.md#mem-30-step-bounds)).
 
-**Compile-time evaluation.** A computed constant ([LANG-20](language.md#lang-20-constants)) is
-an ordinary function run by the compiler under a fixed budget
-([MEM-34](budgets.md#mem-34-constant-budgets)) to make a plain value. Everything else that other
-languages run at compile time stays out:
+**Compile-time evaluation.** [LANG-20](language.md#lang-20-constants) defines the
+initializer and result types. The following compile-time forms are reserved:
 - **Native plugins.** No code runs in the compiler with the host's authority. An initialiser
   runs checked Hirsel only, and a foreign function it reaches refuses the constant.
 - **Host I/O at compile time.** An initialiser holds no capability and reaches no clock, file,
@@ -317,8 +289,3 @@ languages run at compile time stays out:
   or `StaticFn`: a `List` is never static, and a function value is code, not data. Static
   bytes are `FrozenBytes`, and computed `String` and `FrozenBytes` constants are LANG-20's
   static computed constants.
-
-Version note (2026-11-25, comptime-phase1-spec-2686; COMPTIME-DIRECTION §0 and §5; not yet
-built): "compile-time evaluation beyond `const`" became LANG-20's computed constants plus this
-list of what stays out. Each item is reversible before 1.0 only by a later ruling, and the
-first six are permanent refusals by that direction's intent.

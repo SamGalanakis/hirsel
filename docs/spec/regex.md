@@ -2,7 +2,7 @@
 
 This chapter specifies std `regex`: regular expressions over `String`. The API uses a lazy DFA with literal prefilters and falls back to the PikeVM.
 
-**Reference.** The pattern language and its meaning are those of the Rust `regex` crate at commit fde4946 (2026-11-18), built with default features off and the features `std`, `perf`, `unicode-case` and `unicode-perl`: its `regex::Regex` type, with the `*_at` semantics of `find_at`, `is_match_at` and `captures_at`. Where this chapter says "the crate", it means that build. A conformance corpus generated from it is the oracle for every answer below. std regex differs from it in one place only, the start-offset precondition of RE-3.
+**Reference.** The pattern language and its meaning are those of the Rust `regex` crate at commit `fde4946`, built with default features off and the features `std`, `perf`, `unicode-case` and `unicode-perl`: its `regex::Regex` type, with the `*_at` semantics of `find_at`, `is_match_at` and `captures_at`. Where this chapter says "the crate", it means that build. A conformance corpus generated from it is the oracle for every answer below. [UNI-1](unicode.md#uni-1-one-pinned-unicode-version) owns the Unicode data version. [RE-3](#re-3-matching) defines the start-offset condition. [RE-8](#re-8-size-limits) defines the compiled size refusal.
 
 **Naming.** `regex` is std's alone, so another package writes `std.regex.new`, `std.regex.Regex` and so on. Variants are written bare (`Syntax(e)`, `TooBig(n)`).
 
@@ -111,7 +111,7 @@ fn property() -> Result[std.regex.Regex, std.regex.Error] {
 A search of `s` from `at` gives the crate's `find_at(s, at)` answer: the **leftmost-first** match, which starts earliest at or after `at`, and is the one the pattern prefers among the matches that start there. Alternatives are preferred in order, greedy repetition prefers more and lazy repetition prefers fewer.
 
 - **`at`.** The search starts at `at`, but assertions see the whole haystack: `^`, `\b` and the other look-behind assertions at `at` look at `s` before `at`, as in the crate.
-- **The one difference from the crate.** `at` must be at most `string.byte_len(s)` and a scalar boundary, as for `string.slice`. Otherwise the operation fails with `Bounds` (RE-7). The crate accepts an `at` inside a scalar: the empty pattern on `"é"` from 1 gives `[2,2)` there and `Bounds` here.
+- **Start-offset condition.** `at` must be at most `string.byte_len(s)` and a scalar boundary, as for `string.slice`. Otherwise the operation fails with `Bounds` (RE-7). The crate accepts an `at` inside a scalar: the empty pattern on `"é"` from 1 gives `[2,2)` there and `Bounds` here.
 - **Positions** are byte offsets into `s`. No match, empty or not, starts or ends inside a scalar: a candidate empty match that would is skipped, as in the crate.
 - `is_match(re, mut c, s, at)` is whether `find` would return a match.
 - `find(re, mut c, s, at)` returns the match, or `None`.

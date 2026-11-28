@@ -357,12 +357,3 @@ The invariant binds the run's own code. Code behind a `Foreign[I]`
 ([FFI-4](foreign.md#ffi-4-the-foreign-capability)) and a child an `Exec` grant starts
 ([EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them))
 are outside it: the grant confers what they can do.
-
-Version note (2026-11-27, capability-reachability-spec-3207; containment study 3202, R7): the
-invariant written down. About 70 probes found no capability escape, and each rule above was
-already in force except CAP-1 for constants, which accepted a capability nested in a type
-such as `Option[Dir]`; the checker now refuses it
-(`core/front/cases/rules/CAP-1-constant-capability.hirsel`). The argument is prose, not a
-mechanised model: authority flows only through the type checker, so a model would restate
-the typing rules and drift from them. A mechanised model is worth its cost if capabilities
-gain dynamic features such as revocation or membranes. Reversible: the text only.

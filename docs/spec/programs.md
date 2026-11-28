@@ -164,9 +164,6 @@ calls was (held, truncated, vacuous, closed, to depth, …). A row never changes
 above, and no program reads it (R28). Under `--laws` a pass is reused only together with the
 rows recorded with it; otherwise the test is executed.
 
-Version note (2026-11-24, verify-observer-2037): adds the `--laws` strength row
-beside the PROG-4 outcome and its reuse condition. The outcome rules are unchanged.
-
 In `hirsel.hcfg`, use plural `grants` and `dirs` in `[tests]` or an individual
 test's run table. The `test` command accepts `--grant` and `--dir` when the package
 has no manifest test configuration.
@@ -360,21 +357,6 @@ not detected; one that keeps the revision as well detects it. Storage identity i
 code revision: a store keys stored data on its codecs' storage fingerprints
 ([SEM-10](semantics.md#sem-10-codecs)), which a lowering or charge change leaves equal, and
 keeps exact revisions only for the arbitrary code that decides what is stored.
-
-Version note (2026-11-21, code addresses): the revision was a hash over the reach's
-`(identity, IR)` rows under `hirsel.code-revision.v1`. It is now derived from the address,
-under `hirsel.code-revision.v2`. Every revision value, and so every release digest
-([launch](launch.md#release-manifest)), changes once; its size and every format that carries
-it do not. No migration is provided before 1.0.
-
-Version note (2026-11-24, generic descriptors; not yet built): `code.describe` was refused for
-a function with type parameters, and the identity text was `D S`. It now describes an instance
-at closed type arguments and the text is `D A S`. The version byte stays `0x01`: for a function
-without type parameters `A` is empty and `S` writes no `$i`, so every identity a program,
-store catalog, runner key or recording holds today is unchanged, and no byte string that
-names an instance equals one that names a function without type parameters, because `D` is
-then followed by `[`, which no earlier text had there. One encoding covers both, so there is
-no second version for a reader to accept. Reversible: the spec only.
 
 ```hirsel
 type Handler = fn(Bytes) -> Bytes
@@ -617,66 +599,19 @@ outcomes. A cache of one function's results keys each function argument by its t
 and its captured values, since two function values with equal identity bytes can run different
 code.
 
-The domains `hirsel.code-annex.v1`, `hirsel.code-group.v1`, `hirsel.code-address.v1`,
-`hirsel.code-builtin.v1` and `hirsel.code-revision.v2` are added by the 2026-11-21 version of
-this section, and `hirsel.code-body.v3` by the 2026-11-22 version, which retires
-`hirsel.code-body.v2`; `hirsel.code-body.v4` by the 2026-11-25 version retires
-`hirsel.code-body.v3`. A change to the normal form or to a group's encoding takes a new version
-and a new domain. It never reuses an old one. `hirsel.code-annex.v2` by the 2026-11-25
-version (coverage-gen-anchors-2579) retires `hirsel.code-annex.v1`, and `hirsel.code-annex.v3`
-(cli-s1a-launch-2709, the entry's error description) retires `hirsel.code-annex.v2`. The 2026-11-26
-version (comptime-phase2b-2715) adds `hirsel.code-value.v1`, and `hirsel.code-body.v5` and
-`hirsel.code-group.v2`, which retire `hirsel.code-body.v4` and `hirsel.code-group.v1`.
-`hirsel.code-annex.v4` adds the checked entry parameter types and retires
-`hirsel.code-annex.v3`.
+The current code domains are:
 
-Version note (2026-11-21, code-address attacks): the traversal now follows every instruction's
-failure target; slots are the functions retained code can run, and type hooks are metadata;
-every use of a builtin, lowered inline or not, is a `Builtin(n)` slot over the identity
-encoding; addresses are computed per build after the reach walk; compact-root types are ordered
-by closure hash; the identity order, the identity encoding and the closure encoding are fixed;
-generated functions are named by ordinal; and a program has one address per identity. Earlier
-text took slots from every bodiless row, wrote lowered builtins as instructions only, and stored
-an address at materialisation. No address had been published, so nothing migrates.
+| input | domain |
+|---|---|
+| annex | `hirsel.code-annex.v4` |
+| body | `hirsel.code-body.v5` |
+| group | `hirsel.code-group.v2` |
+| address | `hirsel.code-address.v1` |
+| builtin | `hirsel.code-builtin.v1` |
+| revision | `hirsel.code-revision.v2` |
+| computed constant value | `hirsel.code-value.v1` |
 
-Version note (2026-11-22, Map index): normal form 3 replaces the linear-probe index of words
-with the grouped index of PROG-11, adds the fast placement operations, and changes the meaning of
-every private Map builtin that reads or writes a Map's block. Bodies of version 2 are refused,
-not converted.
-
-Version note (2026-11-22, Map index corrections): before any NF3 body was published, PROG-11
-gained a strong placement key derived from the run key, and the strong-empty carrier mark. It
-also gained one writer with a staged commit, promotion that abandons a partial rebuild, a
-capacity bound of 2^59, unaligned group loads, the entry recipe's own field order, and the
-private builtin table with its numbers. The body header is `HIRBODY`, a zero byte, then 3 as a
-16-bit little-endian number, and both the writer and the reader use it.
-
-Version note (2026-11-25, macos-s9-target-consts-2508): normal form 4 encodes retained code,
-so a branch on a constant expression keeps only its taken arm, per target. The header carries
-4, the body domain is `hirsel.code-body.v4`, and bodies of version 3 are refused, not
-converted.
-
-Version note (2026-11-25, comptime-phase1-spec-2686; COMPTIME-DIRECTION 3.3 and decision 4;
-not yet built): a computed constant's initialiser is an instance and a root of the reach walk.
-A reader names a computed constant in a constant slot bound `Value(h)`, so the reader's address
-includes the value hash and its body does not. This takes a new normal form and a new group
-encoding. When it is built, normal form 5 (`hirsel.code-body.v5`) and `hirsel.code-group.v2`
-replace version 4 and `hirsel.code-group.v1`, and bodies and groups of the old versions are
-refused, not converted. The domain `hirsel.code-value.v1` is added. The new versions follow
-this section's own rule that a change to the normal form or to a group's encoding takes a new
-version. PROG-9's 2026-11-24 note kept its version byte, but that concerned identity bytes, and
-here every body that reads a computed constant changes. With this design the cache never
-records which bodies a run read, so the 2026-11-12 hybrid ruling is met by its reversal
-clause. An address names every body an initialiser can run, so the key is complete, and the
-value hash stops an over-approximated re-evaluation from spreading to readers. Reversible
-before 1.0: the spec only. No address carrying a constant slot has been published.
-
-Version note (2026-11-25, comptime-phase2b-2715): built. An initialiser's address now comes from
-its own reach walk, evaluated at check, rather than from the program's reach walk, so a check
-gives every computed constant's address and value without a build; the address is the same. A
-scalar or unit constant type's closure hash is the hash of its name, since it reaches no row. An
-assertion's source order is made exact: files in index order, then items. A library image now
-holds a values table by initialiser address. Reversible before 1.0: the spec and the driver.
+A change to the normal form or group encoding takes a new version and domain.
 
 ### PROG-11: Map index
 
@@ -716,14 +651,8 @@ published library by its root, a workspace member by its captured files, and a t
 package by the toolchain, so `--locked` and `--frozen` decide only whether a command
 proceeds.
 
-Version note (2026-11-25, macos-s0-spec-2495; macOS decision D1; built by
-macos-s9-target-consts-2508): the target
-becomes a named input through core module `target`, whose contract is
-[target](../../core/std/api/target.md). Nothing is conditionally compiled out of checking,
-and the host stays invisible.
-
 A program is checked identically for every target. The target of a build enters a program
-only as the values of the constants of core module `target`, `target.os` and `target.arch`,
+only through [`target.os` and `target.arch`](../../core/std/api/target.md),
 which the toolchain supplies (LANG-20). These rules hold:
 
 - **Every arm is checked on every target.** Every arm of a branch on such a constant is
@@ -731,16 +660,12 @@ which the toolchain supplies (LANG-20). These rules hold:
   has no target, checks them all. Types never differ by target: a foreign module's interface
   is one text for all targets, and only its archive rows differ
   ([FFI-3](foreign.md#ffi-3-archives-are-admitted-by-their-pin-before-linking)).
-- **A constant that depends on `target` is evaluated for every target the module names**,
-  reserved ones included. A
-  failure on any one is a refusal on all, so acceptance never depends on the target
-  ([LANG-20](language.md#lang-20-constants)).
+- [LANG-20](language.md#lang-20-constants) governs evaluation of target-dependent constants.
 - **Retention is decided by form.** A `match` whose scrutinee, or an `if` whose condition,
   is a constant expression keeps only its taken arm in retained code (PROG-10). A constant
   expression here is a manifest constant expression (LANG-20): literals, operators,
   constructions, manifest constants, toolchain constants and `bytes[T]`, so it has no call
-  and no local. Retention and types read manifest constant expressions only; a computed
-  constant that depends on `target` is evaluated for every target.<!-- doc-ref: planned -->
+  and no local. Retention and types read manifest constant expressions only.
   So `match target.os { ... }` keeps one
   arm, and `let o = target.os` followed by `match o { ... }` keeps every arm, on every engine. A
   branch on a computed constant is an ordinary branch: every arm is retained, and an engine
@@ -808,15 +733,3 @@ is not provided. The shipped targets are `x86_64-unknown-linux-gnu`,
 `aarch64-unknown-linux-gnu` and `aarch64-apple-darwin`. A value of `target.Os` is not by
 itself a claim that Hirsel ships that target: the iOS targets stay in
 [reserved](reserved.md) until their device gate is green.
-
-Version note (2026-11-25, comptime-phase1-spec-2686; COMPTIME-DIRECTION 3.5 and decision 11;
-not yet built): LANG-20 admits calls, so the definition of a constant expression above now
-names manifest constant expressions. Before this change it was "exactly what LANG-20 admits",
-which would have taken in calls. The definition's text was edited, not only extended, but
-every branch that qualified before still qualifies, and nothing that qualifies is new. Two
-sentences are added. The first says retention and types read manifest constant expressions
-only, and a computed constant that depends on `target` is evaluated for every target. The
-second makes a computed constant's budget a meaning of the program, not a build's resource
-outcome. Reversible: the spec only. Letting a computed constant decide retention later would
-be compatible, but it would make the retained set depend on evaluation, which depends on the
-retained set.

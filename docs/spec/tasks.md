@@ -6,9 +6,11 @@ A **task** is a sequential computation with its own stack, limit and regions. Ta
 created only through a `Tasks` capability ([CAP-1](capabilities.md#cap-1-authority-is-explicit)).
 A task's handle is a resource that is not `send`, so it stays in the task that spawned it,
 and a task ends only after cleaning its handles (CONC-8): no task outlives its spawner.
-A value passes from one task to another only by moving through a spawn, a channel, a
-connection ([CONC-17](#conc-17-connections)) or a join. A flow stage ([CONC-14](#conc-14-flows)) receives and sends plain values through its flow's ports. The only program memory two tasks can both read is the immutable payload of an `Arc`
-(CONC-11). Whether tasks and stages run in parallel is the engine's choice
+A value passes from one task to another by moving through a spawn, channel,
+[connection](#conc-17-connections) or join. A [flow stage](#conc-14-flows) receives and
+sends plain values through its ports. Tasks can read immutable counted payloads through
+[`Arc`](#conc-11-arc-across-tasks) within a unit and [`Shared`](#conc-15-units) across units.
+Whether tasks and stages run in parallel is the engine's choice
 ([SEM-8](semantics.md#sem-8-determinism)), except in a run that CONC-10 leaves unspecified.
 
 ### CONC-2: The send bound
@@ -533,20 +535,12 @@ The untied engine uses `k + root_limit/288`, with `k` initial units, as a sizing
 This clause fixes no order between the actions of different units, and does not say when an
 action in one unit becomes visible in another.
 
-**Unbuilt.** These are not built, and no program or test may rely on them:
-
-- Boards, which would publish the latest version of a `Shared` payload to many units; no
-  program can name them.
-- The replay of a unit that crosses a `Schedule`, `Sealer`, `Opener` or `HeaderMask`, a
-  `UdpSocket`, a foreign `Shared` holder whose payload holds owners, a `Secret` derived or
-  unwrapped in another unit, a capability of virtual construction, or a `Net`, `Env`, `Exec`
-  or `Cred` capability in a helper's entry, its result or an item: such a replay is refused,
-  so no equality of recordings made at different worker counts is promised for such a
-  program. What does replay is listed in
-  [What this build replays](../recording.md#replay-of-a-run-with-helpers).
-- A test configuration that fixes every input of a unit, including how many of the inputs
-  that have reached it it takes at each point; until it exists, a test of units asserts only
-  what holds for every such count.
+Replay refuses a unit that crosses a `Schedule`, `Sealer`, `Opener`, `HeaderMask`,
+`UdpSocket`, a foreign `Shared` holder whose payload holds owners, a `Secret` derived
+or unwrapped in another unit, a capability of virtual construction, or a `Net`, `Env`,
+`Exec` or `Cred` capability in a helper's entry, result or item. See
+[What this build replays](../recording.md#replay-of-a-run-with-helpers). A test of units
+asserts only what holds for every count of inputs the unit can take at each point.
 
 ```hirsel
 type Table: cross { rows: List[u64] }
@@ -599,8 +593,7 @@ cancellation points ([CONC-7](#conc-7-cancellation-points)), and a send cancelle
 not accepted. Waiting sends are accepted oldest first, by the order in which they began
 waiting, and no send is accepted while an older one waits, even one that would fit. One
 large waiting send therefore holds back every smaller one behind it; a program that needs
-small items to pass a large one sends them on another connection. Accepting a newer send
-that fits ahead of an older one is not built.
+small items to pass a large one sends them on another connection.
 `conn.try_send(c, take x) -> Result[(), SendError[T]]` decides as `send` does, but never
 waits and is not a cancellation point: it returns `Full(x)` where `send` would wait.
 

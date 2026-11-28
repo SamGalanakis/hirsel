@@ -2,8 +2,9 @@
 
 ### LANG-1: Source text
 
-Source is UTF-8 with no byte order mark; invalid UTF-8 is refused before any position is
-assigned. LF and CRLF are newlines; a bare CR is refused. The `Bidi_Control` characters
+Source is UTF-8 with no byte order mark. The parser refuses invalid UTF-8 at its first
+invalid byte span, before tokenization ([PROG-7](diagnostics.md#prog-7-one-rule-one-site)).
+LF and CRLF are newlines. The parser refuses a bare CR. The `Bidi_Control` characters
 (U+061C, U+200E–U+200F, U+202A–U+202E, U+2066–U+2069) are refused everywhere, comments
 included; a string escape can denote them. Identifiers are ASCII. Positions are byte
 offsets; columns count Unicode scalars, a tab counting one.
@@ -391,9 +392,3 @@ clone[T](b: Bag[T]) { Bag(items: clone(b.items)) }
 type Own { n: u64 }
 fn placed(r: Region) { let _ = Own(n: 1) in r }           // refused: MEM-2, no postfix in
 ```
-
-Version note (2026-11-25, comptime-phase1-spec-2686; COMPTIME-DIRECTION decision 11; not yet
-built, in the compiler or the editor grammar): `const-def` admits `_` in place of the name,
-for LANG-20's assertions, and LANG-2 says that `_` after `const` is not a name. LANG-20's
-assertion example is a `text` fence until the editor grammar parses it. Reversible before
-1.0.

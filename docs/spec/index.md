@@ -17,9 +17,9 @@ and diagnostics, and the signatures of the core operations those rules name.
 These goals decide between designs. A rule that would break one of them is wrong.
 
 1. **An agent can write correct code without global knowledge.** Every top-level
-   definition has a complete signature, and checking a definition reads only its own body
-   and the declarations it names ([LANG-8](language.md#lang-8-signatures)). No rule needs a
-   solve, a fixpoint or a walk over other definitions' bodies. Before any body is checked,
+   definition has a complete signature. Ordinary body checking is local
+   ([LANG-8](language.md#lang-8-signatures)). [CONC-14](tasks.md#conc-14-flows) defines
+   the reach inspection for a flow transform. Before any body is checked,
    **declaration preprocessing** computes each type's summary
    ([OWN-2](ownership.md#own-2-type-summaries)) and each manifest constant's value
    ([LANG-20](language.md#lang-20-constants)) once, in dependency order, from declarations
@@ -42,7 +42,8 @@ These goals decide between designs. A rule that would break one of them is wrong
 5. **Deterministic.** Given the same outside inputs and limits, every run that no run
    stop ends, and that reaches no foreign code, behaves identically on every run of one
    build, including its steps and where it runs out of memory, and the same on every engine
-   and build apart from steps and exact charges ([SEM-8](semantics.md#sem-8-determinism)). A
+   and build under the conditions in [SEM-8](semantics.md#sem-8-determinism). Step counts,
+   exact charges and stack refusal sites may vary by build. A
    program that fits its logical charges fits on every engine
    ([MEM-28](budgets.md#mem-28-charges-are-an-upper-bound)).
 6. **One meaning.** No flag, build mode, optimiser or engine changes what is accepted or
@@ -106,8 +107,8 @@ The [DTLS and SRTP specification](dtls.md) defines the sans-IO DTLS 1.2 endpoint
 certificate fingerprints and SRTP exporter, and SRTP/SRTCP sessions (built; `dtls@1`, `srtp@1`).
 The [RTP and RTCP specification](rtp.md) defines the sans-IO `rtp` package: headers and
 extensions, RTCP, retransmission, congestion control, pacing and stream rewriting (built; `rtp@1`).
-The [HTTP specification](http.md) defines std `http` (built, Layer 1), the runner's HTTP bindings
-and keyed operations (Part B, design).
+The [HTTP specification](http.md) defines std `http` and the Runner's HTTP bindings,
+including keyed operations.
 The [WebRTC specification](webrtc.md) defines the `webrtc_sfu` package (built; `webrtc_sfu@1`, RTC-1 to RTC-9; RTC-10 pooled rooms specified, not built):
 JSEP SDP, the sans-IO PeerSession, the room router with dynacast, active speakers,
 the revocation fence, `media_record`, and one service serving many rooms from one unit pool.
@@ -115,10 +116,10 @@ The [QUIC specification](quic.md) defines the sans-IO QUIC v1 endpoint written i
 The [WebTransport specification](webtransport.md) defines WebTransport over HTTP/3 (draft-ietf-webtrans-http3-17) with static-only QPACK and browser certificate hashes (specified, not built).
 The [MoQ specification](moq.md) defines the Media over QUIC endpoint and relay on draft-ietf-moq-transport-23 (specified, not built).
 The [SFU cascade specification](sfu_cascade.md) defines rooms that span SFU nodes over QUIC links, with a cross-node revocation fence that fails closed under partition (specified, not built; its room directory is a contract with an in-memory fake, and the Store adapter comes later).
-The [Fleet specification](fleet.md) defines single-binary multi-machine orchestration over `objects@1`: the three workload archetypes, `ClaimAuth` + `ORIGIN` move fencing, controller takeover and scoped barriers, dedicated `Directory[K]` Places, proof-ready kernel rules K1–K13, and verification tiers T0–T3 (Phase 1 kernel and proofs; orchestration seams unbuilt).
+The [Fleet specification](fleet.md) defines single-binary multi-machine orchestration over `objects@1`: the three workload archetypes, `ClaimAuth` + `ORIGIN` move fencing, controller takeover and scoped barriers, dedicated `Directory[K]` Places, proof-ready kernel rules K1–K13, and verification tiers T0–T3.
 The [Embedding specification](embed.md) defines the static-library output kind, the embedded launch and its versioned C embed ABI over runner entries, generated Swift bindings and a static XCFramework, the Apple target records (one per platform variant, from which every floor and triple is derived), and the `aarch64-apple-ios` and `aarch64-apple-ios-sim` targets with their capability refusals (EMB-1 to EMB-9; specified, not built).
 The [in-process code loading specification](packing.md) defines how a pack host installs compiled Hirsel code while it runs: the `.hirsel-mod` v1 artifact, the out-of-process capped `Compiler` service, the write-xor-execute code slab, the counted `Code[F]` handle with `activate`, the closed import mask, the PC table, the hot context line and fused scope rows (PACK-1 to PACK-12; each rule states what is built).
-The [Compute specification](compute.md) defines the reusable core scheduler for Archetype C elastic remote compute (`compute@1`) outside `fleet@1`: worker-only admission, hard per-principal concurrency limits, placement (`COMP-3`, credit desk), three retry classes, `AccountBeforeMint` restart custody by `ReapBeforeMint`, opaque versioned handles, contained Wasm pricing, multi-cell federation, and the formal/statistical verification split (specified, not built).
+The [Compute specification](compute.md) defines the reusable core scheduler for Archetype C elastic remote compute (`compute@1`) outside `fleet@1`: worker-only admission, hard per-principal concurrency limits, placement (`COMP-3`, credit desk), three retry classes, `AccountBeforeMint` restart custody by `ReapBeforeMint`, opaque versioned handles, contained Wasm pricing, multi-cell federation, and the formal/statistical verification split. See [dependencies](compute.md#dependencies) for integration status.
 The [TURN specification](turn.md) defines the sans-IO TURN client and relay, long-term credentials and the TCP fallback (built; `turn@1`).
 The [SFrame specification](sframe.md) defines the `sframe` package: RFC 9605 end-to-end media encryption with AES-128-GCM, the sender-key ratchet, a replay window, and a ranged framing that keeps codec headers clear and authenticated (built; `sframe@1`, v4; v5 TLS-8 schedule slice E1 planned).
 The [packages specification](packages.md) defines `hirsel.hcfg`, `hirsel.lock`, local
@@ -200,8 +201,3 @@ archives, the `Foreign[I]` capability, the call ABI and its handles, and the `sq
 | workspace, member, top member | [packages §4, §5](packages.md#4-workspaces) |
 | writable | [OWN-5](ownership.md#own-5-availability) |
 | writer | [MEM-4](memory.md#mem-4-sized-destinations) |
-
-## Status
-
-This is the specification of the v1 core language, which the `hirsel` compiler
-implements. The previous specification and its corpus were deleted at M3.

@@ -238,11 +238,7 @@ target, at one optimisation level. A recording or coverage build of it is the sa
 - its host effects: each provider operation's issue, its arguments and its order
   ([CAP-5](capabilities.md#cap-5-provider-operations), [CAP-8](capabilities.md#cap-8-the-replay-point)).
 
-A build with recording machinery is one of these builds: compiling recording in, and
-switching it on, changes none of the observables
-([CAP-9](capabilities.md#cap-9-recording-is-outside-the-program)).
-
-**Across builds.** Two of the observables are a build's own. Steps are fuel: each build
+**Across builds.** Step counts, exact charges and stack refusal sites may vary by build. Each build
 counts them deterministically, but two engines or optimisation levels may take different
 steps for the same code, so where a step bound runs out and where slices end can differ
 between builds ([MEM-30](budgets.md#mem-30-step-bounds)). Charges are an upper-bound
@@ -250,12 +246,13 @@ contract: a build charges at most the logical charge of
 [MEM-24](budgets.md#mem-24-logical-charges) and may charge less, so an admission that the
 logical charges admit is admitted by every build, and the amounts, the `Capacity` values
 and the refusals of an admission the logical charges refuse can differ between builds
-([MEM-28](budgets.md#mem-28-charges-are-an-upper-bound)). Every other observable, from
-values and output to events and host effects, is the same on every engine, build and
-optimisation level for every run in which no step bound runs out, no admission is refused,
-and every slice end resumes the task that reached it. No test may compare steps, slice ends
-or exact charges between builds; a test compares them between runs of one build, or
-checks a charge against its logical bound.
+([MEM-28](budgets.md#mem-28-charges-are-an-upper-bound)). Frame sizes determine where a
+build may refuse an activation ([FAIL-17](failure.md#fail-17-stack-exhaustion)). Values, output
+and other observables apart from steps, slice ends and exact charges agree across builds
+when no step bound runs out, no admission is refused, no activation is refused for stack
+space, and every slice end resumes the task that reached it. Tests compare steps, slice
+ends, exact charges and stack refusal sites between runs of one build. A test may also
+check a charge against its logical bound.
 
 **As if.** An engine may do anything whose effects on the observables are those this
 specification gives. Anything not listed is the engine's choice: layout, addresses (of
@@ -321,15 +318,6 @@ fn four() -> u64 { 4 }
 const N: u64 = four()
 type T { xs: Inline[u8, N] }                               // refused: SEM-9, N is computed
 ```
-
-Version note (2026-11-26, comptime-phase5-2883; COMPTIME-DIRECTION decision 8 and T2.1,
-ruled A; built, and its examples are checked): an `Inline` length may name a length
-constant. It was "an integer literal". Decision 8 admits a manifest constant expression;
-this admits a name only, which needs no change to the grammar, and `Inline[u32, A * B]` is
-written `const N: u64 = A * B` and `Inline[u32, N]`. A length constant excludes `bytes[T]`,
-projections and indexing because types are lowered before layouts exist. Reversible before
-1.0: widening to expressions, or to `bytes[T]` once layouts can be ordered before the types
-that need them, turns refusals into acceptances and changes no accepted type.
 
 ### SEM-10: Codecs
 
@@ -539,15 +527,6 @@ Programs declare no storage version of their own. Store's frozen format corpus
 (`test_frozen_format_corpus`) opens and decodes every stored value and key after an upgrade,
 so a rule change without its version increment shows up there.
 
-Version note (2026-11-27, storage fingerprint): stores keyed indexes on
-`codec.revision` and `codec.key_revision`, so every toolchain change to a reached std body
-forced a rebuild although no stored byte changed (STORE-SPEC v2.172). The revisions stay, with
-their 96 bytes, for consumers that name code; `fingerprint` and `key_fingerprint` are added.
-The same day, before any build, groups were corrected from components over nominal instances
-alone to components over every descriptor node: a recursion through `List` or another
-built-in constructor had no canonical form, since the constructor's node needed the group's
-hash. Fingerprints of codecs that reach no cycle are unchanged by the correction.
-
 **Old data.** Bytes are decoded against the **writer's schema**, the schema of the
 declaration that encoded them, which the library keeps with them. Decoding resolves the
 writer's schema against the reading declaration's, matching fields and variants by name,
@@ -615,13 +594,12 @@ returns and inverts it; the checker cannot verify that, so it is the owner's obl
 
 Every decode, whatever its bytes:
 
-- never fails ([FAIL-1](failure.md#fail-1-errors-failures-and-run-stops)) unless an owner's
-  `from` does or an admission is refused: every malformed input is a `DecodeError`;
-- has no fixed limit on nesting: it keeps the values still being built on a work stack in
-  storage it admits from the current limit ([MEM-21](budgets.md#mem-21-admission)), never
-  on the call stack, so depth costs storage and never exhausts the stack
-  ([FAIL-15](failure.md#fail-15-run-stops)), and the one resource failure is `Capacity`
-  ([MEM-21](budgets.md#mem-21-admission));
+- can fail ([FAIL-1](failure.md#fail-1-errors-failures-and-run-stops)) if an owner's
+  `from` fails, byte admission raises `Capacity`, or the decoder exhausts a step bound
+  ([MEM-30](budgets.md#mem-30-step-bounds)). Malformed input is a `DecodeError`;
+- has no fixed limit on nesting. It keeps values still being built in a work stack
+  admitted from the current byte limit ([MEM-21](budgets.md#mem-21-admission)). Depth
+  uses this storage without growing the call stack ([FAIL-15](failure.md#fail-15-run-stops));
 - leaves nothing behind on an error or a refusal: before it returns an `Error` or raises
   `Capacity`, it has released and refunded every block it admitted, its work stack included,
   and the bytes, which it only views, are unchanged;
@@ -631,13 +609,13 @@ Every decode, whatever its bytes:
 ```hirsel
 pub type Row: codec { id: u64, name: String, pinned: bool = false }
 ```
-```hirsel unbuilt
+```hirsel
 fn rows() -> codec.Codec[Row] { codec.of() }   // bytes written before `pinned` decode with false
 ```
 ```hirsel
 type Pair[T]: codec { a: T, b: T }
 ```
-```hirsel unbuilt
+```hirsel
 fn files() -> codec.Codec[Pair[HostFile]] { codec.of() }   // refused: LANG-12, HostFile is not codec
 ```
 ```hirsel

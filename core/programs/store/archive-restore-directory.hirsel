@@ -276,6 +276,18 @@ fn reserve_restore_child(to: Dir, work: String, point: RestorePoint, origin: man
     Ok((store_key_from_rep(id), false))
 }
 
+resource type RestoreStaging {
+    dir: Dir,
+    path: String,
+    armed: bool
+} drop(staging) {
+    if staging.armed {
+        if let Ok(()) = host.remove_tree(staging.dir, staging.path) {
+            let _ = host.sync_dir(staging.dir)
+        }
+    }
+}
+
 fn restore_directory_locked(tasks: Tasks, mut input: RestoreSource, to: Dir, c: Clock, r: Random, options: Options, point: RestorePoint, attempt: Inline[u8, 16], work: String) -> Result[Restored, DeployError] waits {
     let origin = restore_origin_for(point, attempt)
     let (child, published) = restore_reserve_directory(to, work, point, origin, r)?
@@ -285,10 +297,14 @@ fn restore_directory_locked(tasks: Tasks, mut input: RestoreSource, to: Dir, c: 
             Error(NotFound) => (),
             Error(problem) => return Error(Scratch(Io(problem))),
         }
+        // The EXPORT fence retains the reserved identity on error. Before
+        // foundation installation, nothing in the work directory must survive.
+        let mut staging = RestoreStaging(dir: to, path: clone(work), armed: true) ?=> |(room, _)| Scratch(Full(Allocation(room)))
         scratch_result(failure_result_from_rep(manifest.disk_io(host.mkdir(to, work))))?
         let private_dir = scratch_result(failure_result_from_rep(manifest.disk_io(host.open_dir(to, work))))?
-        let stamp = restore_stage(mut input, private_dir, point)?
+        let stamp = restore_stage(tasks, mut input, private_dir, point)?
         restore_fold(tasks, private_dir, c, r, options, point, stamp)?
+        staging.armed = false
         deploy_result(restore_write_foundation(private_dir, to, child, point, origin))?
         scratch_result(failure_result_from_rep(manifest.disk_io(host.remove_tree(to, work))))?
         scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
@@ -376,9 +392,9 @@ fn restore_directory(tasks: Tasks, mut input: RestoreSource, to: Dir, c: Clock, 
     take answer
 }
 
-fn restore_stage(mut input: RestoreSource, private_dir: Dir, point: RestorePoint) -> Result[ExportStamp, DeployError] waits {
+fn restore_stage(tasks: Tasks, mut input: RestoreSource, private_dir: Dir, point: RestorePoint) -> Result[ExportStamp, DeployError] waits {
     match input {
         StampedBackup(d) => restore_copy_backup(d, private_dir, point),
-        ArchivedStore(mut src, _, ms) => restore_copy_archive(mut src, private_dir, point, ms),
+        ArchivedStore(mut src, _, ms) => restore_copy_archive(tasks, mut src, private_dir, point, ms),
     }
 }

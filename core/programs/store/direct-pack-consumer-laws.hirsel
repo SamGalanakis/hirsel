@@ -165,7 +165,7 @@ fn direct_directory_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSi
         fail("missing interior version")
     }
     let private_dir = disk_test_directory(d)
-    let copied = match restore_copy_covered(mut sink, private_dir, interior, head, due) {
+    let copied = match restore_copy_covered(tasks, mut sink, private_dir, interior, head, due) {
         Ok(take exact) => take exact,
         Error(Store(take e)) => return Error(take e),
         Error(_) => fail("restore copy refused the interior version"),
@@ -398,7 +398,7 @@ fn direct_bucket_archive_law(d: Dir, sim: BucketSim, r: Random, tasks: Tasks, mu
         fail("missing interior GROUP frame")
     }
     let work = disk_test_directory(d)
-    let copied = match restore_copy_covered(mut sink, work, point, head, due) {
+    let copied = match restore_copy_covered(tasks, mut sink, work, point, head, due) {
         Ok(take exact) => take exact,
         Error(Store(take e)) => return Error(take e),
         Error(_) => fail("Bucket interior restore copy failed"),

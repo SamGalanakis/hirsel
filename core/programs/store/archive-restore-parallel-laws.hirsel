@@ -1,0 +1,218 @@
+// Hold the first pack until three other packs have been served. The serial
+// restore cannot release this hold before its deadline.
+@test
+fn test_restore_parallel_delayed_first(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    restore_parallel_law(d, c, r, tasks, false)
+}
+
+@test
+fn test_restore_parallel_corrupted_last(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    restore_parallel_law(d, c, r, tasks, true)
+}
+
+const RESTORE_LAW_PREFIX: String = "parallel-restore/"
+
+fn restore_parallel_fixture(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result[(RestorePoint, Options, List[String]), Error] waits {
+    let src = disk_test_directory(d)
+    let opts = l96_tiered_options(182375272, 65536, 500)?
+    let mut db = open(tasks, src, sim.time, r, opts)?
+    let parent = db.store
+    let rows = archive_hold_table(mut db)?
+    for i in 0u64 .. 12 {
+        l96_put_bytes(mut db, rows, i, l96_blob_value(int.truncate(i), 32768))?
+    }
+    set_residency(mut db, rows.id, Tiered)?
+    let bound_archive = bind_archive_hold(mut db, 42, Some(8388608))?
+    durable(mut db, bound_archive)?
+    close(take db)?
+    let mut sink = arch_law_sink_client(sim, tasks, 34810, RESTORE_LAW_PREFIX)?
+    let due = std.object.deadline_after_ms(sink, DF_OP_MS)
+    let _ = failure_result_from_rep(history.archive_step_directory(r, src, store_key_to_rep(parent), 42, false, mut sink, due))?
+    let RestorePresent(point) = plan_archive_restore(mut sink, parent, Latest, DF_OP_MS)? else {
+        fail("parallel restore fixture did not publish a base")
+    }
+    let (take head, _) = preview_head(mut sink, parent, due)?
+    let chain = failure_result_from_rep(history.archive_restore_index(mut sink, head, due))?
+    let mut keys: List[String] = list.new()
+    let id = store_key_to_rep(parent)
+    for page_ref in chain.pages {
+        let page = failure_result_from_rep(history.archive_index_page(mut sink, id, head.incarnation, head.source_kind, page_ref, due))?
+        for row in page.bases {
+            if row.base_ordinal == point.token.boundary.base_ordinal && row.digest == point.token.boundary.base_digest {
+                for p in row.packs {
+                    let key = format.archive_key(id, head.incarnation, format.archive_log_pack_rel(p.seq, p.digest))
+                    let mut served_key = string.from(RESTORE_LAW_PREFIX)
+                    string.push(mut served_key, key)
+                    list.push(mut keys, take served_key)
+                }
+            }
+        }
+    }
+    if list.len(keys) < 5 {
+        fail("parallel restore fixture needs at least five packs")
+    }
+    Ok((point, opts, take keys))
+}
+
+fn restore_parallel_seed(take original: std.sim.s3.Report, mut writer: std.object.Client, bad: String) -> Result[(), Error] waits {
+    let due = std.object.deadline_after_ms(writer, DF_OP_MS)
+    for (key, obj) in original.objects {
+        let mut body: Bytes = clone(obj.data)
+        if key == bad {
+            body[list.len(body) - 1] ^= 1u8
+        }
+        let (take answer, _) = std.object.store(mut writer, key, take body, due)
+        let _ = (take answer) ?=> Remote
+    }
+    Ok(())
+}
+
+fn restore_parallel_law(d: Dir, c: Clock, r: Random, tasks: Tasks, corrupt: bool) -> Result[(), DeployError] waits {
+    let setup = df_complete_expired_sim(tasks, c, 34811)
+    let (point, opts, take keys) = deploy_result(restore_parallel_fixture(d, setup, r, tasks))?
+    let original = bucket_law_report(take setup)
+    let first = keys[0u64]
+    let second = keys[1u64]
+    let last_pack = keys[list.len(keys) - 1]
+    let mut holds: List[std.sim.s3.Hold] = list.new()
+    let held: String = if corrupt {
+        clone(keys[list.len(keys) - 2])
+    } else {
+        clone(first)
+    }
+    let overtakes: String = if corrupt {
+        clone(last_pack)
+    } else {
+        clone(keys[3u64])
+    }
+    list.push(mut holds, restore_parallel_hold(held, Applied(string.from("GET"), clone(overtakes), 1)))
+    if corrupt {
+        list.push(mut holds, restore_parallel_hold(overtakes, Requested(string.from("GET"), clone(held), 1)))
+    } else {
+        list.push(mut holds, restore_parallel_hold(second, Requested(string.from("GET"), clone(first), 1)))
+        list.push(mut holds, restore_parallel_hold(keys[2u64], Applied(string.from("GET"), clone(second), 1)))
+        list.push(mut holds, restore_parallel_hold(overtakes, Applied(string.from("GET"), clone(keys[2u64]), 1)))
+    }
+    let uncut = bucket_law_wire_cut(0xffffffffffffffffu64, false)
+    let sim = bucket_law_sim_holds(tasks, c, 34812, Some(uncut), list.new(), take holds, std.sim.world.plan(34812))
+    {
+        let mut writer = deploy_result(arch_law_sink_client(sim, tasks, 34813, ""))?
+        let bad = if corrupt {
+            last_pack
+        } else {
+            ""
+        }
+        deploy_result(restore_parallel_seed(take original, mut writer, bad))?
+    }
+    let dest = disk_test_directory(d)
+    let client = deploy_result(df_client_host(sim.endpoint, sim.time, tasks, "spare.test", 34814, RESTORE_LAW_PREFIX, 8))?
+    let restored = restore_from_archive(tasks, take client, point.token.parent, dest, sim.time, r, opts, Boundary(point.token),[81; 16], DF_OP_MS)
+    let report = bucket_law_report(take sim)
+    let mut earlier_applied = false
+    let mut held_applied = false
+    let mut before_release: Map[String, ()] = map.new()
+    for item in report.requests {
+        if item.method == "GET" && item.applied {
+            if item.key == overtakes {
+                earlier_applied = true
+            }
+            if !corrupt && !held_applied && item.key != held && list.contains(keys, item.key) {
+                map.insert(mut before_release, clone(item.key), ())
+            }
+            if item.key == held {
+                if !earlier_applied {
+                    fail("held pack was served before the independent pack")
+                }
+                held_applied = true
+            }
+        }
+    }
+    if !held_applied {
+        fail("independent pack could not overtake the held pack")
+    }
+    if corrupt {
+        match take restored {
+            Error(Store(Corrupt(Fault(file: name, offset: 0, why: Checksum)))) if string.ends_with(last_pack, name) => (),
+            _ => fail("damaged archive pack did not return its checksum fault"),
+        }
+        restore_parallel_clean(dest)
+        return Ok(())
+    }
+    // The service has eight lanes. Three other packs may complete while the
+    // first holds its write slot and 64 KiB range reservation.
+    if map.len(before_release) != 3 {
+        fail("restore did not stay within four pack slots and their range budget")
+    }
+    let child = (take restored)?
+    let mut reopened = deploy_result(open(tasks, dest, c, r, opts))?
+    if reopened.store != child.child || version(snapshot(reopened)) != point.main_version {
+        fail("parallel restore published a different Store")
+    }
+    let rows = deploy_result(table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let read = deploy_result(reader(reopened, VALUE_LIMIT + 1048576))?
+    for i in 0u64 .. 12 {
+        if deploy_result(get(read, snapshot(reopened), rows, i))? != Some(l96_blob_value(int.truncate(i), 32768)) {
+            fail("parallel restore changed a row's bytes")
+        }
+    }
+    deploy_result(close(take reopened))
+}
+
+fn restore_parallel_hold(key: String, take until: std.sim.s3.Until) -> std.sim.s3.Hold {
+    std.sim.s3.Hold(method: string.from("GET"), key: clone(key), from: 1, count: 1, until: take until, then: Apply)
+}
+
+fn restore_parallel_clean(dest: Dir) waits {
+    for entry in result.unwrap(std.dir.list(dest, None)) {
+        if entry.name != "EXPORT" && entry.name != "LOCK" {
+            fail("failed archive restore left private staging or published files")
+        }
+    }
+    if !result.unwrap(journal.disk_exists(dest, "EXPORT")) {
+        fail("failed archive restore lost its durable retry fence")
+    }
+}
+
+type ParallelRestoreCall: send {
+    endpoint: std.sim.s3.Endpoint,
+    time: Clock,
+    tasks: Tasks,
+    point: RestorePoint,
+    dest: Dir,
+    random: Random,
+    opts: Options
+}
+
+fn restore_parallel_call(take job: ParallelRestoreCall) -> Result[Restored, DeployError] waits {
+    let client = deploy_result(df_client_host(job.endpoint, job.time, job.tasks, "spare.test", 34815, RESTORE_LAW_PREFIX, 8))?
+    restore_from_archive(job.tasks, take client, job.point.token.parent, job.dest, job.time, job.random, job.opts, Boundary(job.point.token),[82; 16], DF_OP_MS)
+}
+
+@test
+fn test_restore_parallel_cancelled(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let setup = df_complete_expired_sim(tasks, c, 34811)
+    let (point, opts, take keys) = deploy_result(restore_parallel_fixture(d, setup, r, tasks))?
+    let original = bucket_law_report(take setup)
+    let blocked = keys[0u64]
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    let mut hold = restore_parallel_hold(blocked, Never)
+    hold.count = 0xffffffffffffffffu64
+    list.push(mut holds, take hold)
+    let uncut = bucket_law_wire_cut(0xffffffffffffffffu64, false)
+    let sim = bucket_law_sim_holds(tasks, c, 34812, Some(uncut), list.new(), take holds, std.sim.world.plan(34812))
+    {
+        let mut writer = deploy_result(arch_law_sink_client(sim, tasks, 34813, ""))?
+        deploy_result(restore_parallel_seed(take original, mut writer, ""))?
+    }
+    let dest = disk_test_directory(d)
+    let job = ParallelRestoreCall(endpoint: sim.endpoint, time: sim.time, tasks, point, dest, random: r, opts)
+    let running = task.spawn(tasks, bytes 268435456, take job, restore_parallel_call)
+    result.unwrap(std.sim.s3.requested(sim.endpoint, "GET", blocked, 1))
+    match task.cancel_join(take running) {
+        Error(Cancelled(_)) => (),
+        _ => fail("archive restore did not observe cancellation during its pack read"),
+    }
+    restore_parallel_clean(dest)
+    let _ = bucket_law_report(take sim)
+    Ok(())
+}

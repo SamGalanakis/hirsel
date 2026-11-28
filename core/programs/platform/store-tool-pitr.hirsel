@@ -125,7 +125,7 @@ fn backup_pitr(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdou
             return selected_point(resolution, err, out)
         }
         let mut input: store.RestoreSource = StampedBackup(from)
-        return match store.verify_restore_point(mut input, to, c, options, point, runner.restored_release) {
+        return match store.verify_restore_point(tasks, mut input, to, c, options, point, runner.restored_release) {
             Ok(verified) => say(out, point_text(verified, None)?),
             Error(e) => refused(err, deploy_refusal(e)),
         }

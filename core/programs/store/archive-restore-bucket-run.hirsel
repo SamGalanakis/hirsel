@@ -9,7 +9,7 @@ fn bucket_restore_release(db: Db, selected: RestorePoint, verify: fn(Db) -> Resu
 fn restore_bucket_staged(tasks: Tasks, mut source: RestoreSource, mut dst: std.object.Client, work: Dir, c: Clock, r: Random, options: Options, selected: RestorePoint, attempt: Inline[u8, 16], exact_retry: bool, level_name: String, deadline: u64, verify: fn(Db) -> Result[RestoreRelease, Error] waits) -> Result[Restored, DeployError] waits {
     let mut point = selected
     let requested = restore_origin_for(point, attempt)
-    let stamp = restore_stage(mut source, work, point)?
+    let stamp = restore_stage(tasks, mut source, work, point)?
     let recovered = open_copied(work, c, stamp.attempt, options, false)?
     point = bucket_restore_release(recovered.db, point, verify)?
     let _ = take recovered
@@ -39,9 +39,12 @@ pub fn restore_to_bucket(tasks: Tasks, take input: RestoreSource, mut destinatio
     deploy_result(failure_result_from_rep(history.history_check_endpoint(mut destination, deadline)))?
     let mut tmp = string.with_capacity(64)
     string.push(mut tmp, "restore-")
-    let work = scratch_result(failure_result_from_rep(manifest.disk_io(host.mkdtemp(scratch, mut tmp))))?
+    let mut staging = RestoreStaging(dir: scratch, path: take tmp, armed: false) ?=> |(room, _)| Scratch(Full(Allocation(room)))
+    let work = scratch_result(failure_result_from_rep(manifest.disk_io(host.mkdtemp(scratch, mut staging.path))))?
+    staging.armed = true
     let answer_out = restore_bucket_staged(tasks, mut source, mut destination, work, c, r, options, point, attempt, restore_is_pinned(target), level_name, deadline, verify)
-    scratch_result(failure_result_from_rep(manifest.disk_io(host.remove_tree(scratch, tmp))))?
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.remove_tree(scratch, staging.path))))?
+    staging.armed = false
     take answer_out
 }
 
@@ -52,7 +55,7 @@ fn bucket_restore_selection(mut source: RestoreSource, target: RestoreTarget) ->
     }
 }
 
-pub fn plan_bucket_restore(mut source: RestoreSource, mut destination: std.object.Client, namespaces: RestoreNamespaces, work: Dir, c: Clock, options: Options, target: RestoreTarget, op_ms: u64, verify: fn(Db) -> Result[RestoreRelease, Error] waits) -> Result[RestoreResolution, DeployError] waits {
+pub fn plan_bucket_restore(tasks: Tasks, mut source: RestoreSource, mut destination: std.object.Client, namespaces: RestoreNamespaces, work: Dir, c: Clock, options: Options, target: RestoreTarget, op_ms: u64, verify: fn(Db) -> Result[RestoreRelease, Error] waits) -> Result[RestoreResolution, DeployError] waits {
     deploy_result(restore_disjoint(std.object.bucket_config(destination), source, namespaces))?
     let due = std.object.deadline_after_ms(destination, op_ms)
     deploy_result(failure_result_from_rep(history.history_check_endpoint(mut destination, due)))?
@@ -61,7 +64,7 @@ pub fn plan_bucket_restore(mut source: RestoreSource, mut destination: std.objec
     let RestorePresent(point) = resolution else {
         return Ok(take resolution)
     }
-    let stamp = restore_stage(mut source, work, point)?
+    let stamp = restore_stage(tasks, mut source, work, point)?
     let recovered = open_copied(work, c, stamp.attempt, options, false)?
     Ok(RestorePresent(bucket_restore_release(recovered.db, point, verify)?))
 }

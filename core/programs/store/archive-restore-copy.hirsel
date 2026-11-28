@@ -5,12 +5,22 @@ fn restore_output(mut file: HostFile, data: Bytes) -> Result[(), Error] waits {
     }
 }
 
-fn restore_stream_unit(mut src: std.object.Client, key: String, mut file: HostFile, parent: StoreId, pack: pages.HistoryRef, object_header: bool, deadline: u64) -> Result[(), Error] waits {
+const RESTORE_PACK_CHUNK: u64 = 65536
+
+const RESTORE_PACK_WRITE_SLOTS: u64 = 4
+
+const RESTORE_PACK_IN_FLIGHT_BYTES: u64 = 262144
+
+const RESTORE_PACK_WORKER_BYTES: u64 = RESTORE_PACK_CHUNK + 16384
+
+fn restore_stream_unit(src: std.object.Opener, lane: u64, key: String, mut file: HostFile, parent: StoreId, pack: pages.HistoryRef, object_header: bool, deadline: u64) -> Result[(), Error] waits {
     let mut pos = 0u64
     let mut digest = std.check.start()
     while pos < pack.len {
-        let end = pos + order.min(65536u64, pack.len - pos)
-        let (meta, take raw) = restore_range(mut src, key, pos, end, deadline)?
+        let end = pos + order.min(RESTORE_PACK_CHUNK, pack.len - pos)
+        let buffer = failure_result_from_rep(manifest.disk_read_buffer(end - pos))?
+        let fetched = std.object.read_range_joined(src, lane, std.object.GetRange(key: clone(key), lo: pos, hi: end, buffer: take buffer, deadline))
+        let (meta, take raw) = restore_range_result(key, pos, end, take fetched)?
         if meta.size != pack.len {
             return Error(Lost)
         }
@@ -32,6 +42,10 @@ fn restore_stream_unit(mut src: std.object.Client, key: String, mut file: HostFi
 }
 
 fn restore_copy_pack(mut src: std.object.Client, dir: Dir, parent: StoreId, inc: Inline[u8, 16], ref: pages.HistoryRef, objects: bool, deadline: u64) -> Result[(), Error] waits {
+    restore_copy_pack_read(std.object.opener(src), 0, dir, parent, inc, ref, objects, deadline)
+}
+
+fn restore_copy_pack_read(src: std.object.Opener, lane: u64, dir: Dir, parent: StoreId, inc: Inline[u8, 16], ref: pages.HistoryRef, objects: bool, deadline: u64) -> Result[(), Error] waits {
     let key = if objects {
         restore_object_key(parent, inc, "p-", ref)?
     } else {
@@ -39,9 +53,74 @@ fn restore_copy_pack(mut src: std.object.Client, dir: Dir, parent: StoreId, inc:
     }
     let path = failure_result_from_rep(manifest.paged_pack_path(ref.seq))?
     let mut output = failure_result_from_rep(manifest.disk_io(host.open(dir, path, Write)))?
-    restore_stream_unit(mut src, key, mut output, parent, ref, objects, deadline)?
+    restore_stream_unit(src, lane, key, mut output, parent, ref, objects, deadline)?
     failure_result_from_rep(manifest.disk_io(host.sync(mut output)))?
     failure_result_from_rep(manifest.disk_io(host.close(take output)))
+}
+
+type RestorePackCopy: send {
+    src: std.object.Opener,
+    lane: u64,
+    dir: Dir,
+    parent: StoreId,
+    inc: Inline[u8, 16],
+    pack: format.ArchivePackRefRep,
+    objects: bool,
+    deadline: u64
+}
+
+fn restore_pack_copy_worker(take job: RestorePackCopy) -> Result[(), Error] waits {
+    let RestorePackCopy(src: take src, lane, dir, parent, inc, pack, objects, deadline) = take job
+    let ref = pages.HistoryRef(seq: pack.seq, epoch: pack.epoch, len: pack.len, digest: pack.digest)
+    restore_copy_pack_read(src, lane, dir, parent, inc, ref, objects, deadline)
+}
+
+fn restore_pack_batch_count(packs: List[format.ArchivePackRefRep], start: u64, width: u64) -> u64 {
+    let limit = order.min(width, list.len(packs) - start)
+    for slot in 1u64 .. limit {
+        for earlier in 0u64 .. slot {
+            if packs[start + earlier].seq == packs[start + slot].seq {
+                return slot
+            }
+        }
+    }
+    limit
+}
+
+fn restore_copy_packs(tasks: Tasks, src: std.object.Opener, dir: Dir, parent: StoreId, inc: Inline[u8, 16], packs: List[format.ArchivePackRefRep], objects: bool, deadline: u64) -> Result[(), Error] waits {
+    // Each worker owns a file and at most one live range buffer until it
+    // writes it. Reserve a full chunk per slot even for a short final range.
+    let width = order.min(std.object.range_lanes(src), order.min(RESTORE_PACK_WRITE_SLOTS, RESTORE_PACK_IN_FLIGHT_BYTES / RESTORE_PACK_CHUNK))
+    let mut batch_start = 0u64
+    while batch_start < list.len(packs) {
+        // A repeated ordinal must never have two writers to the same path.
+        let batch_count = restore_pack_batch_count(packs, batch_start, width)
+        let mut active: List[Task[Result[(), Error]]] = list.with_capacity(batch_count)
+        for lane in 0u64 .. batch_count {
+            let job = RestorePackCopy(src: std.object.share_opener(src), lane, dir, parent, inc, pack: packs[batch_start + lane], objects, deadline)
+            let worker = task.try_spawn(tasks, bytes RESTORE_PACK_WORKER_BYTES, take job, restore_pack_copy_worker) ?=> |(room, _)| Full(Allocation(room))
+            list.push(mut active, take worker)
+        }
+        // Join in archive order to preserve the first failure. On cancellation,
+        // dropping the remaining handles cancels and joins them before unwind.
+        let mut first: Result[(), Error] = Ok(())
+        for take worker in take active {
+            let done = match task.join(take worker) {
+                Ok(take result_copy) => take result_copy,
+                Error(Failed(causes)) => match manifest.raised_capacity(causes) {
+                    Some(room) => Error(Full(Allocation(room))),
+                    None => Error(Io(Closed)),
+                },
+                Error(Cancelled(_)) => Error(Io(Closed)),
+            }
+            if let Ok(()) = first {
+                first = take done
+            }
+        }
+        (take first)?
+        batch_start += batch_count
+    }
+    Ok(())
 }
 
 fn restore_copy_log(mut src: std.object.Client, dir: Dir, parent: StoreId, inc: Inline[u8, 16], row: format.ArchiveBaseRowRep, b: manifest.RestoreBoundary, deadline: u64) -> Result[(u64, u64), Error] waits {
@@ -95,7 +174,7 @@ fn restore_copy_log_read(src: std.object.Opener, dir: Dir, parent: StoreId, inc:
     }
 }
 
-fn restore_copy_archive(mut src: std.object.Client, dir: Dir, point: RestorePoint, op_ms: u64) -> Result[ExportStamp, DeployError] waits {
+fn restore_copy_archive(tasks: Tasks, mut src: std.object.Client, dir: Dir, point: RestorePoint, op_ms: u64) -> Result[ExportStamp, DeployError] waits {
     let parent = point.token.parent
     let id = store_key_to_rep(parent)
     let b = point.token.boundary
@@ -111,7 +190,7 @@ fn restore_copy_archive(mut src: std.object.Client, dir: Dir, point: RestorePoin
             return Error(Expired)
         }
     }
-    let copied = restore_copy_covered(mut src, dir, point, head, due)
+    let copied = restore_copy_covered(tasks, mut src, dir, point, head, due)
     match take copied {
         Error(Store(Remote(NotFound))) => (),
         Error(Store(HistoryMissing(_, _))) => (),
@@ -131,7 +210,7 @@ fn restore_copy_archive(mut src: std.object.Client, dir: Dir, point: RestorePoin
     Error(Store(Lost))
 }
 
-fn restore_copy_covered(mut src: std.object.Client, dir: Dir, point: RestorePoint, head: format.ArchiveHeadRep, due: u64) -> Result[ExportStamp, DeployError] waits {
+fn restore_copy_covered(tasks: Tasks, mut src: std.object.Client, dir: Dir, point: RestorePoint, head: format.ArchiveHeadRep, due: u64) -> Result[ExportStamp, DeployError] waits {
     let inc = head.incarnation
     let parent = point.token.parent
     let id = store_key_to_rep(parent)
@@ -146,10 +225,7 @@ fn restore_copy_covered(mut src: std.object.Client, dir: Dir, point: RestorePoin
                 if !row.pack_continuation {
                     found = Some(format.archive_base_summary(row))
                 }
-                for p in row.packs {
-                    let ref = pages.HistoryRef(seq: p.seq, epoch: p.epoch, len: p.len, digest: p.digest)
-                    deploy_result(restore_copy_pack(mut src, dir, parent, inc, ref, objects, due))?
-                }
+                deploy_result(restore_copy_packs(tasks, std.object.opener(src), dir, parent, inc, row.packs, objects, due))?
             }
         }
     }

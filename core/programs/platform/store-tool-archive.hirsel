@@ -130,7 +130,7 @@ pub fn archive_command(work: Dir, net: Net, tasks: Tasks, c: Clock, r: Random, o
             return selected_point(resolution, err, out)
         }
         let mut source: store.RestoreSource = ArchivedStore(take src, parent, ARCHIVE_OP_MS)
-        return match store.verify_restore_point(mut source, work, c, options, point, runner.restored_release) {
+        return match store.verify_restore_point(tasks, mut source, work, c, options, point, runner.restored_release) {
             Ok(checked) => say(out, point_text(checked, None)?),
             Error(Store(e)) => archive_failure(err, e),
             Error(e) => refused(err, deploy_refusal(e)),

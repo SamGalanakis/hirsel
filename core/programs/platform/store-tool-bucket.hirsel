@@ -29,7 +29,7 @@ pub fn bucket_command(from: Dir, work: Dir, net: Net, tasks: Tasks, c: Clock, r:
     }
     let options = store.sized(Directory, 2147483648u64) ?=> |_| Exit(status: 1u8)
     if verb == "plan-bucket" {
-        return match store.plan_bucket_restore(mut source, mut dst, names, work, c, options, target, ARCHIVE_OP_MS, runner.restored_release) {
+        return match store.plan_bucket_restore(tasks, mut source, mut dst, names, work, c, options, target, ARCHIVE_OP_MS, runner.restored_release) {
             Ok(take resolution) => selected_point(take resolution, err, out),
             Error(Store(e)) => archive_failure(err, e),
             Error(e) => refused(err, deploy_refusal(e)),

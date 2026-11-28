@@ -119,10 +119,6 @@ fn request_path(bucket: Bucket, key: String, bucket_only: bool) -> String {
     take out
 }
 
-fn new_meta() -> Meta {
-    Meta(size: 0, etag: empty_tag(), crc64: None, put_id: None)
-}
-
 fn copy_bytes(b: Bytes) -> Bytes {
     let mut out: Bytes = list.with_capacity(list.len(b))
     list.append(mut out, b)
@@ -139,64 +135,6 @@ fn size_or(n: Option[u64], fallback: u64) -> u64 {
 /// The half-open span selected from the object, or None for an unsatisfiable range.
 pub fn range_span(want: Want, size: u64) -> Option[(u64, u64)] {
     object_ranges.range_span(want, size)
-}
-
-fn empty_tag() -> ETag {
-    ETag(octets: [0; 64], len: 0)
-}
-
-fn etag(data: Bytes) -> Result[ETag, Error] {
-    if list.len(data) > 64 {
-        return Error(Fatal(Malformed))
-    }
-    let mut result = empty_tag()
-    result.len = list.len(data)
-    for i in 0u64 .. result.len {
-        result.octets[i] = data[i]
-    }
-    Ok(result)
-}
-
-fn strong_tag(tag: ETag) -> bool {
-    if tag.len < 2 || tag.len > 64 || tag.octets[0] != b'"' || tag.octets[tag.len - 1] != b'"' {
-        return false
-    }
-    for i in 1u64 .. tag.len - 1 {
-        let b = tag.octets[i]
-        if b < 33 || b == b'"' || b == 127 {
-            return false
-        }
-    }
-    true
-}
-
-fn tag_bytes(tag: ETag) -> Bytes {
-    let mut out: Bytes = list.with_capacity(tag.len)
-    let _ = bytebuf.append_inline(mut out, tag.octets, 0, tag.len)
-    take out
-}
-
-fn read_meta(head: http_client.ResponseHead, size: u64) -> Result[Meta, Error] {
-    let mut out = new_meta()
-    out.size = size
-    if let Some(value) = object_request.header(head, "etag") {
-        out.etag = etag(value)?
-    }
-    if let Some(value) = object_request.header(head, "x-amz-meta-hirsel-put-id") {
-        out.put_id = object_request.decode_id(value)
-    }
-    if let Some(value) = object_request.header(head, "x-amz-checksum-crc64nvme") {
-        if let Some(raw) = base64.decode(value) {
-            if list.len(raw) == 8 {
-                let mut n = 0u64
-                for b in raw {
-                    n = (n << 8) | int.widen(b)
-                }
-                out.crc64 = Some(n)
-            }
-        }
-    }
-    Ok(take out)
 }
 
 type Endpoint: send {
@@ -585,7 +523,7 @@ fn parse_listing_fields(body: String, prefix: String, mut decoded: String) -> Re
     }
     object_xml.decode_xml(mut decoded, raw_etag)?
     let size = object_ranges.decimal(string.as_bytes(raw_size), 0, string.byte_len(raw_size))?
-    Ok(Entry(key: name, size, etag: etag(string.as_bytes(decoded))?))
+    Ok(Entry(key: name, size, etag: object_request.etag(string.as_bytes(decoded))?))
 }
 
 type ListScratch: send {
@@ -862,10 +800,10 @@ fn receive_object(mut c: http_client.Connection, mut into: Bytes, mut progress: 
                     return Invalid(Fatal(Malformed))
                 }
             }
-            (read_meta(head, range.size), Some(n))
+            (object_request.read_meta(head, range.size), Some(n))
         } else if status == 200 && lo == 0 && hi == MAX_U64 {
             let size = object_request.content_length(head)
-            (read_meta(head, size_or(size, 0)), size)
+            (object_request.read_meta(head, size_or(size, 0)), size)
         } else {
             return Invalid(Fatal(Malformed))
         }
@@ -911,11 +849,11 @@ fn receive_object(mut c: http_client.Connection, mut into: Bytes, mut progress: 
 // if any, of that span; a 200 is the whole object and needs its length.
 fn open_part(head: http_client.ResponseHead, want: Want, status: u16) -> Exchange {
     let tag = match object_request.header(head, "etag") {
-        Some(value) => match etag(value) {
+        Some(value) => match object_request.etag(value) {
             Ok(found) => found,
             Error(take e) => return Invalid(take e),
         },
-        None => empty_tag(),
+        None => object_request.empty_tag(),
     }
     let length = object_request.content_length(head)
     if status == 200 {
@@ -999,7 +937,7 @@ fn receive_control(mut c: http_client.Connection, octets: u64, put: Option[Inlin
         }
     }
     let head = http_client.head(c)
-    let mut info = match read_meta(head, if op == S3Head {
+    let mut info = match object_request.read_meta(head, if op == S3Head {
         size_or(object_request.content_length(head), 0)
     } else {
         octets
@@ -1012,7 +950,7 @@ fn receive_control(mut c: http_client.Connection, octets: u64, put: Option[Inlin
             return Invalid(take e)
         },
     }
-    if op == S3PutIf && !strong_tag(info.etag) {
+    if op == S3PutIf && !object_request.strong_tag(info.etag) {
         return bad_success(op)
     }
     if op == S3Complete || op == S3CompleteConditional {
@@ -1025,7 +963,7 @@ fn receive_control(mut c: http_client.Connection, octets: u64, put: Option[Inlin
         let Ok(decoded) = object_xml.xml_decoded(tag) else {
             return bad_success(op)
         }
-        info.etag = match etag(string.as_bytes(decoded)) {
+        info.etag = match object_request.etag(string.as_bytes(decoded)) {
             Ok(value) => value,
             Error(_) => return bad_success(op),
         }
@@ -1390,7 +1328,7 @@ fn validate_credentials(n: Net, server: Endpoint, c: Clock, pool: Sender[PoolMes
     }
     let mut probe = new_job(S3Head, string.from(bucket_path), list.new(), deadline)
     let keys = sigv4.share_keys(proposed.signer)
-    let request = match signed_request(mut probe, S3Head, server, keys, proposed.credentials.access_key_id, proposed.credentials.session_token, c, 0, None, 0, MAX_U64, empty_tag(), mut wire) {
+    let request = match signed_request(mut probe, S3Head, server, keys, proposed.credentials.access_key_id, proposed.credentials.session_token, c, 0, None, 0, MAX_U64, object_request.empty_tag(), mut wire) {
         Ok(take req) => take req,
         Error(_) => return false,
     }
@@ -1831,7 +1769,7 @@ fn retry(mut lane: Lane, mut job: Job) -> Result[Value, Error] waits {
 fn retry_job(mut lane: Lane, mut job: Job, mut uncertain: Option[Reason]) -> Result[Value, Error] waits {
     let original_entries = list.len(job.entries)
     let initial_tag = if job.op == S3FetchChanged {
-        empty_tag()
+        object_request.empty_tag()
     } else {
         job.tag
     }
@@ -1887,7 +1825,7 @@ fn retry_job(mut lane: Lane, mut job: Job, mut uncertain: Option[Reason]) -> Res
                     let decision = object_request.classify(op, phase, status, code, ambiguous, progress.tag.len != 0)
                     last = take reason
                     match decision {
-                        Accept => return Ok(Object(new_meta())),
+                        Accept => return Ok(Object(object_request.new_meta())),
                         AlreadyExists => return Ok(Existing),
                         Changed => return Error(Precondition),
                         Missing => {
@@ -2346,7 +2284,7 @@ pub fn endpoint_secure(c: Client) -> bool {
 }
 
 fn new_job(op: Operation, take path: String, take data: Bytes, deadline: u64) -> Job {
-    Job(ticket: 0, op, path: take path, query: string.from(""), data: take data, tag: empty_tag(), id: None, lo: 0, hi: MAX_U64, want: Whole, deadline, retry_uncertain: false, resolve_complete: true, prefix: string.new(), entries: list.new())
+    Job(ticket: 0, op, path: take path, query: string.from(""), data: take data, tag: object_request.empty_tag(), id: None, lo: 0, hi: MAX_U64, want: Whole, deadline, retry_uncertain: false, resolve_complete: true, prefix: string.new(), entries: list.new())
 }
 
 fn submit(input: Sender[LaneMessage], index: u64, take request: Job) -> Option[Reply] waits {
@@ -2477,14 +2415,14 @@ pub fn tag_value(tag: ETag) -> Bytes {
 /// RFC 9110 §8.8.3.2 strong comparison: both tags are strong and their
 /// octets are equal. A weak tag (`W/"x"`) or a malformed one never matches.
 pub fn strong_match(tag: ETag, value: Bytes) -> bool {
-    match etag(value) {
-        Ok(other) => strong_tag(tag) && strong_tag(other) && tag == other,
+    match object_request.etag(value) {
+        Ok(other) => object_request.strong_tag(tag) && object_request.strong_tag(other) && tag == other,
         Error(_) => false,
     }
 }
 
 pub fn fetch_if_changed(mut c: Client, key: String, unchanged: ETag, take into: Bytes, deadline_ns: u64) -> (Result[Option[Meta], Error], Bytes) waits {
-    if !strong_tag(unchanged) {
+    if !object_request.strong_tag(unchanged) {
         return (Error(Precondition), take into)
     }
     let mut request = object_job(mut c, S3FetchChanged, key, take into, deadline_ns)
@@ -2567,6 +2505,45 @@ fn finish_read_range(o: Opener, take pending: RangeReply, deadline: u64) -> (Res
 pub fn read_range(o: Opener, take range: GetRange) -> (Result[Meta, Error], Bytes) waits {
     let deadline = range.deadline
     finish_read_range(o, issue_read_range(o, 0, take range), deadline)
+}
+
+/// Number of lanes available for independent range streams.
+pub fn range_lanes(o: Opener) -> u64 {
+    list.len(o.lanes)
+}
+
+resource type JoinedRange {
+    reply: Option[Receiver[LaneEvent]]
+} drop(pending) {
+    if let Some(reply) = view pending.reply {
+        let _ = channel.receive(reply)
+    }
+}
+
+/// Reads on a selected lane and waits for the accepted request to release its
+/// buffer, including when the caller is cancelled. The lane enforces the
+/// request deadline. Cancellation before admission leaves no request queued.
+pub fn read_range_joined(o: Opener, lane: u64, take range: GetRange) -> (Result[Meta, Error], Bytes) waits {
+    if lane >= range_lanes(o) {
+        let GetRange(buffer: take returned, ..) = take range
+        return (Error(Precondition), take returned)
+    }
+    let mut pending = result.unwrap(JoinedRange(reply: None))
+    match issue_read_range(o, lane, take range) {
+        Error((take problem, take data)) => (Error(take problem), take data),
+        Ok(take reply) => {
+            pending.reply = Some(take reply)
+            let response = match view pending.reply {
+                Some(output) => channel.receive(output),
+                None => fail("joined range has no reply"),
+            }
+            pending.reply = None
+            match take response {
+                Ok(Finished(Reply(result: take result, data: take data, ..))) => (as_meta(take result), take data),
+                _ => (Error(Retriable(Cancelled)), list.new()),
+            }
+        },
+    }
 }
 
 pub fn read_ranges(o: Opener, take ranges: List[GetRange], streams: u64) -> List[(Result[Meta, Error], Bytes)] waits {
@@ -2756,9 +2733,9 @@ pub fn store_if_isolated(mut c: Client, mut isolated: IsolatedRequest, pre: Prec
         return (Error(Precondition), take body)
     }
     let tag = match pre {
-        Match(value) if strong_tag(value) => value,
+        Match(value) if object_request.strong_tag(value) => value,
         Match(_) => return (Error(Precondition), take body),
-        Absent => empty_tag(),
+        Absent => object_request.empty_tag(),
     }
     let mut request = new_job(S3PutIf, replace(mut isolated.path, string.new()), take body, deadline)
     request.tag = tag
@@ -2775,9 +2752,9 @@ pub fn store_if_finish(mut c: Client, take pending: PendingStore) -> (Result[Con
 
 fn conditional_job(mut c: Client, key: String, pre: Precondition, take body: Bytes, deadline_ns: u64) -> Result[Job, (Bytes, Error)] {
     let tag = match pre {
-        Match(value) if strong_tag(value) => value,
+        Match(value) if object_request.strong_tag(value) => value,
         Match(_) => return Error((take body, Precondition)),
-        Absent => empty_tag(),
+        Absent => object_request.empty_tag(),
     }
     let mut request = object_job(mut c, S3PutIf, key, take body, deadline_ns)
     request.tag = tag
@@ -3035,7 +3012,7 @@ pub fn parts(mut c: Client, mut u: Upload, take bodies: List[Bytes], deadline_ns
         return (Error(TooLarge), take returned)
     }
     list.truncate(mut u.parts, existing)
-    list.fill(mut u.parts, count, PartReceipt(size: 0, tag: empty_tag()))
+    list.fill(mut u.parts, count, PartReceipt(size: 0, tag: object_request.empty_tag()))
     let status = send_parts(mut c, mut returned, mut u.parts, existing, u.path, u.upload_id, deadline_ns)
     u.committed = if let Ok(()) = status {
         existing + count
@@ -3080,7 +3057,7 @@ fn complete_upload(mut c: Client, u: Upload, take path: String, resolve: bool, d
         string.push(mut xml, "<Part><PartNumber>")
         string.push_u64(mut xml, i + 1)
         string.push(mut xml, "</PartNumber><ETag>")
-        xml_encode(mut xml, tag_bytes(p.tag))
+        xml_encode(mut xml, object_request.tag_bytes(p.tag))
         string.push(mut xml, "</ETag></Part>")
         size += p.size
     }

@@ -42,9 +42,9 @@ pub fn verify_restore_origin(db: Db, receipt: Restored) -> Result[(), Error] {
 
 // Read the graph and release at the approved physical boundary in caller-owned
 // scratch. In particular, a Directory archive has no native activation in its head.
-pub fn verify_restore_point(mut src: RestoreSource, work: Dir, c: Clock, options: Options, selected: RestorePoint, verify: fn(Db) -> Result[RestoreRelease, Error] waits) -> Result[RestorePoint, DeployError] waits {
+pub fn verify_restore_point(tasks: Tasks, mut src: RestoreSource, work: Dir, c: Clock, options: Options, selected: RestorePoint, verify: fn(Db) -> Result[RestoreRelease, Error] waits) -> Result[RestorePoint, DeployError] waits {
     let mut point = selected
-    let stamp = restore_stage(mut src, work, point)?
+    let stamp = restore_stage(tasks, mut src, work, point)?
     let recovered = open_copied(work, c, stamp.attempt, options, false)?
     let release = verified_point_release(recovered.db, point, verify)?
     point.activation = release.activation

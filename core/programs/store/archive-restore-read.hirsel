@@ -65,7 +65,12 @@ fn restore_range(mut sink: std.object.Client, key: String, lo: u64, hi: u64, dea
 
 fn restore_range_read(sink: std.object.Opener, key: String, lo: u64, hi: u64, deadline: u64) -> Result[(std.object.Meta, Bytes), Error] waits {
     let buf = failure_result_from_rep(manifest.disk_read_buffer(hi - lo))?
-    let (take answer, take raw) = std.object.read_range(sink, std.object.GetRange(key: clone(key), lo, hi, buffer: take buf, deadline))
+    let reply = std.object.read_range(sink, std.object.GetRange(key: clone(key), lo, hi, buffer: take buf, deadline))
+    restore_range_result(key, lo, hi, take reply)
+}
+
+fn restore_range_result(key: String, lo: u64, hi: u64, take reply: (Result[std.object.Meta, std.object.Error], Bytes)) -> Result[(std.object.Meta, Bytes), Error] {
+    let (take answer, take raw) = take reply
     let meta = (take answer) ?=> Remote
     if list.len(raw) != hi - lo || meta.size < hi {
         return Error(failure_from_rep(format.disk_fault(key, lo, Truncated)))

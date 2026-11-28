@@ -283,3 +283,65 @@ pub fn content_length(head: http_client.ResponseHead) -> Option[u64] {
         Error(_) => None,
     }
 }
+
+pub fn new_meta() -> object.Meta {
+    object.Meta(size: 0, etag: empty_tag(), crc64: None, put_id: None)
+}
+
+pub fn empty_tag() -> object.ETag {
+    object.ETag(octets: [0; 64], len: 0)
+}
+
+pub fn etag(data: Bytes) -> Result[object.ETag, object.Error] {
+    if list.len(data) > 64 {
+        return Error(Fatal(Malformed))
+    }
+    let mut result = empty_tag()
+    result.len = list.len(data)
+    for i in 0u64 .. result.len {
+        result.octets[i] = data[i]
+    }
+    Ok(result)
+}
+
+pub fn strong_tag(tag: object.ETag) -> bool {
+    if tag.len < 2 || tag.len > 64 || tag.octets[0] != b'"' || tag.octets[tag.len - 1] != b'"' {
+        return false
+    }
+    for i in 1u64 .. tag.len - 1 {
+        let b = tag.octets[i]
+        if b < 33 || b == b'"' || b == 127 {
+            return false
+        }
+    }
+    true
+}
+
+pub fn tag_bytes(tag: object.ETag) -> Bytes {
+    let mut out: Bytes = list.with_capacity(tag.len)
+    let _ = bytebuf.append_inline(mut out, tag.octets, 0, tag.len)
+    take out
+}
+
+pub fn read_meta(head: http_client.ResponseHead, size: u64) -> Result[object.Meta, object.Error] {
+    let mut out = new_meta()
+    out.size = size
+    if let Some(value) = header(head, "etag") {
+        out.etag = etag(value)?
+    }
+    if let Some(value) = header(head, "x-amz-meta-hirsel-put-id") {
+        out.put_id = decode_id(value)
+    }
+    if let Some(value) = header(head, "x-amz-checksum-crc64nvme") {
+        if let Some(raw) = base64.decode(value) {
+            if list.len(raw) == 8 {
+                let mut n = 0u64
+                for b in raw {
+                    n = (n << 8) | int.widen(b)
+                }
+                out.crc64 = Some(n)
+            }
+        }
+    }
+    Ok(take out)
+}

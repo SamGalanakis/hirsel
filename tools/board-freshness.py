@@ -26,8 +26,9 @@ AUXILIARY_STAGES = {
     "cgroup": "Launcher cgroup law", "containment": "Containment generator",
     "ownership": "Ownership soundness",
     "w2": "W2 damage sweep", "n1": "N1 browser_room", "sanitizers": "Sanitizers & Miri",
+    "decoder": "Decoder discovery",
 }
-DEFERRED_STAGES = {"vopr", "w2", "sanitizers"}
+DEFERRED_STAGES = {"vopr", "w2", "sanitizers", "decoder"}
 
 
 def read_report(path):

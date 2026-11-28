@@ -29,9 +29,10 @@ media_status=
 w2_status=
 n1_status=
 sanitizers_status=
+decoder_status=
 record() {
   local auxiliary=() stage field
-  for stage in bootstrap boat toolchain cgroup containment ownership vopr law media w2 n1 sanitizers; do
+  for stage in bootstrap boat toolchain cgroup containment ownership vopr law media w2 n1 sanitizers decoder; do
     field=${stage}_status
     if [[ -n "${!field}" ]]; then auxiliary+=("--${stage}-status" "${!field}"); fi
   done
@@ -63,6 +64,10 @@ finish() {
   if [[ -s "$run/ownership-soundness/alert.txt" ]]; then
     { mkdir -p "$base/alerts" && cat "$run/ownership-soundness/alert.txt" >>"$base/alerts/$(date -u +%F).txt"; } ||
       printf 'Ownership soundness alert could not be copied from %s/ownership-soundness/alert.txt.\n' "$run" >&2
+  fi
+  if [[ -s "$run/decoder-discovery/alert.txt" ]]; then
+    { mkdir -p "$base/alerts" && cat "$run/decoder-discovery/alert.txt" >>"$base/alerts/$(date -u +%F).txt"; } ||
+      printf 'Decoder discovery alert could not be copied from %s/decoder-discovery/alert.txt.\n' "$run" >&2
   fi
   if python3 "$tools/board-history.py" append --base "$base" "$run" >>"$run/run.log" 2>&1; then
     if (( recorded == 0 )); then
@@ -437,6 +442,34 @@ if (( sanitizers_status == 75 )); then
 elif (( sanitizers_status != 0 )); then
   printf 'Sanitizers & Miri exited %s. See %s/sanitizers.log.\n' "$sanitizers_status" "$run" >>"$run/run.log"
 fi
+# Decoder discovery (tools/decoder-fuzz/discover.py): the libFuzzer archive host and the
+# covered HTTP/1 image, one input per fresh child, 60 child CPU-seconds of search and 10 of
+# reduction per target. It runs after the stages above have released 8-11, so their
+# allocations stay whole, and it defers (75) unless one of those CPUs is measured idle.
+# A confirmed red adds one line to the day's alert file.
+run_decoder_discovery() (
+  local output host compiler runtime
+  output=$(taskset -c 8-11 .buck2/bin/buck2 build -j4 --show-json-output //:hirsel-core-driver-decoder-fuzz \
+    //:hirsel-core-driver-bin-hirsel //:core-driver-runtime-pic) || return
+  read -r host compiler runtime < <(python3 -c 'import json, sys; j = json.load(sys.stdin); print(*(j["root//:" + target] for target in ("hirsel-core-driver-decoder-fuzz", "hirsel-core-driver-bin-hirsel", "core-driver-runtime-pic")))' <<<"$output") || return
+  export LLVM_SYS_231_PREFIX="$checkout/tools/buck2/toolchains/llvm-files"
+  export LD_LIBRARY_PATH="$LLVM_SYS_231_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  exec taskset -c 8-11 python3 tools/decoder-fuzz/discover.py nightly --seed "$started" \
+    --search-cpu-seconds 60 --reduction-cpu-seconds 10 --host "$host" --compiler "$compiler" \
+    --runtime "$runtime" --out "$run/decoder-discovery" --alert "$run/decoder-discovery/alert.txt"
+)
+
+if (( toolchain_status == 0 )); then
+  step="Decoder discovery"
+  record
+  decoder_status=0
+  run_decoder_discovery >>"$run/decoder-discovery.log" 2>&1 || decoder_status=$?
+fi
+if (( decoder_status == 75 )); then
+  echo "Decoder discovery deferred: no spare CPU among 8-11." >>"$run/run.log"
+elif (( decoder_status != 0 )); then
+  printf 'Decoder discovery exited %s. See %s/decoder-discovery.log.\n' "$decoder_status" "$run" >>"$run/run.log"
+fi
 if (( status == 3 )) && [[ -n "$baseline_path" ]]; then
   step="Board bisect"
   record
@@ -453,7 +486,7 @@ if (( status == 0 )); then
   if (( bootstrap_status || boat_status || toolchain_status || cgroup_status || containment_status ||
         ownership_status || (vopr_status && vopr_status != 75) || law_status || media_status ||
         (w2_status && w2_status != 75) || n1_status ||
-        (sanitizers_status && sanitizers_status != 75) )); then
+        (sanitizers_status && sanitizers_status != 75) || (decoder_status && decoder_status != 75) )); then
     echo "Nightly board auxiliary checks failed. See $current and $run." >&2
     exit 4
   fi

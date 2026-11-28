@@ -104,6 +104,16 @@ EXECUTABLE_LINK_FLAGS = LLVM_RPATH + [
     "-Clink-arg=-Wl,--build-id=sha1",
 ]
 
+# cargo-fuzz's instrumentation for libFuzzer: an inline 8-bit counter and a PC
+# table entry per edge, and compare tracing for its mutator.
+DECODER_FUZZ_COVERAGE = [
+    "-Cpasses=sancov-module",
+    "-Cllvm-args=-sanitizer-coverage-level=4",
+    "-Cllvm-args=-sanitizer-coverage-inline-8bit-counters",
+    "-Cllvm-args=-sanitizer-coverage-pc-table",
+    "-Cllvm-args=-sanitizer-coverage-trace-compares",
+]
+
 def _env_set(key, value):
     return "--env-set={}={}".format(key, value)
 
@@ -304,6 +314,29 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
             env = _compile_env(package_name, crate, version, build_script),
             rustc_flags = _flags(manifest_dir, ["--test"], target = "hirsel-core-rt-aarch64-harness"),
             exec_compatible_with = _compile_constraints("hirsel-core-rt-aarch64-harness"),
+            labels = ["gate"],
+            visibility = ["PUBLIC"],
+        )
+    if name == "hirsel-core-driver-unittest":
+        # Nightly decoder discovery's libFuzzer host (tools/decoder-fuzz): the
+        # unit harness's sources and dependencies again, under cfg(fuzzing),
+        # with sanitizer coverage in this crate and the pinned libFuzzer
+        # runtime. It is opt-in: no test rule names it, so its different flags
+        # key a separate compile that pre-push selection never builds.
+        native.rust_binary(
+            name = "hirsel-core-driver-decoder-fuzz",
+            incoming_transition = "root//tools/buck2:test_tool_transition",
+            crate = crate,
+            crate_root = crate_root,
+            srcs = srcs,
+            mapped_srcs = {"root//tools/decoder-fuzz:host_target.rs": "tools/decoder-fuzz/host_target.rs"},
+            features = features,
+            deps = deps + ["root//tools/decoder-fuzz:libfuzzer"],
+            edition = edition,
+            env = _compile_env(package_name, crate, version, build_script),
+            # Line tables (after the profile's -Cdebuginfo=0) name each counter's reader line.
+            rustc_flags = _flags(manifest_dir, ["--test", "--cfg=fuzzing", _env_set("CARGO_TARGET_TMPDIR", _from_package(manifest_dir, TEST_TMPDIR))] + exes + DECODER_FUZZ_COVERAGE + EXECUTABLE_LINK_FLAGS, target = harness) + ["-Cdebuginfo=line-tables-only"],
+            exec_compatible_with = _compile_constraints(harness),
             labels = ["gate"],
             visibility = ["PUBLIC"],
         )

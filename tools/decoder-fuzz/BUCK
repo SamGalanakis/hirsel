@@ -5,3 +5,99 @@ genrule(
     out = "http1-projection.json",
     visibility = ["PUBLIC"],
 )
+
+# Nightly discovery's Rust host (tools/decoder-fuzz/discover.py). It is the
+# libFuzzer callback over the package archive reader, compiled into the
+# driver's own test configuration as `//:hirsel-core-driver-decoder-fuzz`
+# (tools/buck2/defs.bzl). No test and no pre-push action depends on it.
+export_file(
+    name = "host_target.rs",
+    visibility = ["PUBLIC"],
+)
+
+# The pinned libFuzzer runtime: compiler-rt's lib/fuzzer as cargo-fuzz ships
+# it in libfuzzer-sys 0.4.13. The driver is built by the pinned rustc
+# with LLVM's sanitizer coverage (inline 8-bit counters and a PC table),
+# the interface this runtime reads.
+LIBFUZZER_SOURCES = [
+    "FuzzerCrossOver.cpp",
+    "FuzzerDataFlowTrace.cpp",
+    "FuzzerDriver.cpp",
+    "FuzzerExtFunctionsWeak.cpp",
+    "FuzzerExtraCounters.cpp",
+    "FuzzerFork.cpp",
+    "FuzzerIO.cpp",
+    "FuzzerIOPosix.cpp",
+    "FuzzerLoop.cpp",
+    "FuzzerMerge.cpp",
+    "FuzzerMutate.cpp",
+    "FuzzerSHA1.cpp",
+    "FuzzerTracePC.cpp",
+    "FuzzerUtil.cpp",
+    "FuzzerUtilLinux.cpp",
+    "FuzzerUtilPosix.cpp",
+]
+
+LIBFUZZER_HEADERS = [
+    "FuzzerBuiltins.h",
+    "FuzzerBuiltinsMsvc.h",
+    "FuzzerCommand.h",
+    "FuzzerCorpus.h",
+    "FuzzerDataFlowTrace.h",
+    "FuzzerDefs.h",
+    "FuzzerDictionary.h",
+    "FuzzerExtFunctions.def",
+    "FuzzerExtFunctions.h",
+    "FuzzerFlags.def",
+    "FuzzerFork.h",
+    "FuzzerIO.h",
+    "FuzzerInterface.h",
+    "FuzzerInternal.h",
+    "FuzzerMerge.h",
+    "FuzzerMutate.h",
+    "FuzzerOptions.h",
+    "FuzzerPlatform.h",
+    "FuzzerRandom.h",
+    "FuzzerSHA1.h",
+    "FuzzerTracePC.h",
+    "FuzzerUtil.h",
+    "FuzzerValueBitMap.h",
+]
+
+http_archive(
+    name = "libfuzzer-source",
+    urls = ["https://static.crates.io/crates/libfuzzer-sys/0.4.13/download"],
+    type = "tar.gz",
+    sha256 = "a9fd2f41a1cba099f79a0b6b6c35656cf7c03351a7bae8ff0f28f25270f929d2",
+    strip_prefix = "libfuzzer-sys-0.4.13/libfuzzer",
+    sub_targets = LIBFUZZER_SOURCES + LIBFUZZER_HEADERS,
+)
+
+# FuzzerMain.cpp stays out: the libtest harness owns `main` and the host
+# enters through LLVMFuzzerRunDriver.
+cxx_library(
+    name = "libfuzzer",
+    srcs = [":libfuzzer-source[{}]".format(source) for source in LIBFUZZER_SOURCES],
+    headers = {header: ":libfuzzer-source[{}]".format(header) for header in LIBFUZZER_HEADERS},
+    header_namespace = "",
+    compiler_flags = [
+        "-std=c++17", "-O2", "-w", "-fno-omit-frame-pointer", "-nostdinc++",
+        "--sysroot=tools/buck2/toolchains/llvm-files/sysroot",
+        "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include/c++/13",
+        "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include/x86_64-linux-gnu/c++/13",
+        "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include",
+        "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include/x86_64-linux-gnu",
+        # The tree's libstdc++ 13 headers name glibc 2.30's clock-taking lock
+        # calls in <mutex>, and its glibc 2.28 headers do not declare them.
+        # libFuzzer takes no timed lock, so these only let the headers parse.
+        "-Dpthread_cond_clockwait(c,m,k,t)=pthread_cond_timedwait(c,m,t)",
+        "-Dpthread_mutex_clocklock(m,k,t)=pthread_mutex_timedlock(m,t)",
+        "-Dpthread_rwlock_clockrdlock(l,k,t)=pthread_rwlock_timedrdlock(l,t)",
+        "-Dpthread_rwlock_clockwrlock(l,k,t)=pthread_rwlock_timedwrlock(l,t)",
+    ],
+    # The pinned tree's hermetic C++ headers; the driver links libLLVM already.
+    deps = ["toolchains//:libllvm"],
+    exported_linker_flags = ["-l:libstdc++.so.6"],
+    preferred_linkage = "static",
+    visibility = ["PUBLIC"],
+)

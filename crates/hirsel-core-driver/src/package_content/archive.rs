@@ -377,6 +377,12 @@ fn reviewed_short_reads() {
     short_reads::matrix();
 }
 
+// tools/decoder-fuzz/BUCK builds this crate's test configuration with the
+// libFuzzer callback for nightly discovery. No other build compiles it.
+#[cfg(all(test, fuzzing))]
+#[path = "../../../../tools/decoder-fuzz/host_target.rs"]
+mod host_target;
+
 #[cfg(test)]
 mod short_reads {
     use super::*;
@@ -429,8 +435,6 @@ mod short_reads {
         }
     }
 
-    type FrameCase = reviewed::Case<Limits, Setup, Expected, Schedule>;
-
     impl<'a> Reads<'a> {
         fn new(bytes: &'a [u8], schedule: &Schedule) -> Self {
             let max = schedule.max_read.unwrap_or(usize::MAX);
@@ -444,8 +448,25 @@ mod short_reads {
         }
     }
 
-    fn check_frame(case: &FrameCase, frame: &[u8], schedule: &Schedule, known: bool) -> usize {
-        let id = &case.id;
+    /// What one read exercised, beyond the answer the predicate checked.
+    struct Exercised {
+        calls: usize,
+        forced_short: bool,
+        /// The output buffer's capacity before the first output and after the last.
+        buffer: Option<(usize, usize)>,
+    }
+
+    /// The owner predicate for one frame read: the output buffer's bounds at
+    /// every step and the stated answer. A refusal's `output` of "any" leaves
+    /// open whether output preceded it, which depends on the read schedule.
+    fn check_frame(
+        id: &str,
+        limits: &Limits,
+        expected: &Expected,
+        frame: &[u8],
+        schedule: &Schedule,
+        known: bool,
+    ) -> Exercised {
         let mut reader = Reads::new(frame, schedule);
         let mut observations = Vec::new();
         let decoded = Library::read_frame_observed(
@@ -455,26 +476,30 @@ mod short_reads {
                 observations.push((buf.len(), buf.capacity(), chunk + decoder.sizeof()));
             },
         );
-        let &(first_len, first_cap, _) = observations.first().expect("reader reached frame buffer");
-        assert_eq!(first_len, 0, "{id}");
-        assert!(
-            first_cap <= case.limits.initial_output_bytes,
-            "{id}: {first_cap}"
-        );
-        for &(len, cap, workspace) in &observations {
+        let first = observations.first().copied();
+        if let Some((first_len, first_cap, _)) = first {
+            assert_eq!(first_len, 0, "{id}");
             assert!(
-                len <= cap && cap <= first_cap.max(2 * len) && cap <= case.limits.max_output_bytes,
+                first_cap <= limits.initial_output_bytes,
+                "{id}: {first_cap}"
+            );
+        }
+        for &(len, cap, workspace) in &observations {
+            let first_cap = first.unwrap().1;
+            assert!(
+                len <= cap && cap <= first_cap.max(2 * len) && cap <= limits.max_output_bytes,
                 "{id}: {len} output bytes, {cap} reserved, {workspace} codec workspace bytes"
             );
             assert!(workspace >= DCtx::out_size(), "{id}");
         }
-        let &(last_len, last_cap, workspace) = observations.last().unwrap();
-        assert_eq!(reader.forced_short > 0, schedule.max_read.is_some(), "{id}");
+        let (last_len, last_cap, workspace) = observations.last().copied().unwrap_or_default();
         eprintln!(
-            "{id} known={known} max_read={:?} reads={} output={last_len} capacity={first_cap}..{last_cap} codec_workspace={workspace}",
-            schedule.max_read, reader.calls
+            "{id} known={known} max_read={:?} reads={} output={last_len} capacity={:?}..{last_cap} codec_workspace={workspace}",
+            schedule.max_read,
+            reader.calls,
+            first.map(|first| first.1)
         );
-        match &case.expected {
+        match expected {
             Expected::Decoded {
                 root,
                 bytes,
@@ -489,7 +514,6 @@ mod short_reads {
                     last_cap <= *bytes,
                     "{id}: {last_cap} reserved for {bytes} decoded bytes"
                 );
-                assert!(last_cap > first_cap, "{id}: growth not exercised");
                 let (canonical_root, canonical) =
                     library.content.inventory().unwrap().encode().unwrap();
                 assert_eq!(canonical_root, actual, "{id}");
@@ -497,15 +521,27 @@ mod short_reads {
             }
             Expected::Refused { reason, output } => {
                 assert_eq!(&decoded.err().expect("frame accepted"), reason, "{id}");
-                assert!(matches!(output.as_str(), "some" | "none"), "{id}");
-                assert_eq!(last_len > 0, output == "some", "{id}");
+                assert!(matches!(output.as_str(), "some" | "none" | "any"), "{id}");
+                if output != "any" {
+                    assert_eq!(last_len > 0, output == "some", "{id}");
+                }
             }
         }
-        reader.calls
+        Exercised {
+            calls: reader.calls,
+            forced_short: reader.forced_short > 0,
+            buffer: first.map(|first| (first.1, last_cap)),
+        }
     }
 
-    fn check_archive(case: &FrameCase, frame: &[u8], schedule: &Schedule) {
-        let id = &case.id;
+    /// The owner predicate for the archive reader over the same frame. It
+    /// returns the archive's refusal for the caller's stated reason.
+    fn check_archive(
+        id: &str,
+        expected: &Expected,
+        frame: &[u8],
+        schedule: &Schedule,
+    ) -> (bool, Option<String>) {
         let mut wrapped = Writer::new(ARCHIVE_LIMIT);
         wrapped.text(ARCHIVE_TAG);
         wrapped.number(1);
@@ -513,35 +549,99 @@ mod short_reads {
         let mut wrapped = wrapped.finish().unwrap();
         let mut reader = Reads::new(&wrapped, schedule);
         let archive = PackageArchive::read(&mut reader, false);
-        match &case.expected {
+        let forced_short = reader.forced_short > 0;
+        match expected {
             Expected::Decoded { root, .. } => {
                 let (archive, consumed) = archive.unwrap_or_else(|e| panic!("{id}: {e}"));
                 assert_eq!(&archive.head.to_string(), root, "{id}");
                 assert_eq!(archive.entries.len(), 1, "{id}");
                 assert_eq!(consumed, wrapped.len(), "{id}");
                 assert!(reader.bytes.is_empty(), "{id}");
-                assert_eq!(reader.forced_short > 0, schedule.max_read.is_some(), "{id}");
                 wrapped.push(0);
                 assert_eq!(
                     PackageArchive::read(&wrapped[..], false).err().unwrap(),
                     format!("trailing bytes at {consumed}"),
                     "{id}"
                 );
+                (forced_short, None)
             }
-            Expected::Refused { reason, .. } => {
-                assert_eq!(
-                    archive.err().unwrap(),
-                    format!("bad compressed entry 0: {reason}"),
-                    "{id}"
+            Expected::Refused { .. } => (
+                forced_short,
+                Some(
+                    archive
+                        .err()
+                        .unwrap_or_else(|| panic!("{id}: archive accepted")),
+                ),
+            ),
+        }
+    }
+
+    const DISCOVERY_LIMITS: Limits = Limits {
+        initial_output_bytes: 64 << 10,
+        max_output_bytes: CONTENT_LIMIT,
+    };
+
+    /// Discovery's entry to the owner predicates. An arbitrary input has no
+    /// reviewed answer, so the contiguous read of the declared length gives
+    /// it and every other cell of the reviewed matrix must agree: a short
+    /// read, an undeclared length and the archive reader. `expect` is a
+    /// declared status that the answer must also meet. Returns the answer.
+    pub(super) fn discovered(frame: &[u8], max_read: usize, expect: Option<&str>) -> String {
+        let id = "discovered";
+        let mut inflated = 0;
+        let answer = Library::read_frame_observed(frame, Some(frame.len() as u64), |buf, _, _| {
+            inflated = buf.len()
+        });
+        let (expected, observation) = match answer {
+            Ok((root, library)) => (
+                Expected::Decoded {
+                    root: root.to_string(),
+                    bytes: inflated,
+                    package: library.content.id.to_string(),
+                },
+                format!("decoded {root} {inflated}"),
+            ),
+            Err(reason) => (
+                Expected::Refused {
+                    output: "any".into(),
+                    reason: reason.clone(),
+                },
+                format!("refused {reason}"),
+            ),
+        };
+        if let Some(expect) = expect {
+            let status = observation.split(' ').next().unwrap();
+            assert_eq!(status, expect, "{id}: declared status");
+        }
+        let schedules = [
+            Schedule { max_read: None },
+            Schedule {
+                max_read: Some(max_read),
+            },
+        ];
+        for schedule in &schedules {
+            for known in [true, false] {
+                check_frame(id, &DISCOVERY_LIMITS, &expected, frame, schedule, known);
+            }
+            let (_, refusal) = check_archive(id, &expected, frame, schedule);
+            if let (Expected::Refused { reason, .. }, Some(refusal)) = (&expected, refusal) {
+                // A frame that inflates and holds no package content is refused
+                // by the content decoder, whose reason the archive does not prefix.
+                assert!(
+                    refusal == format!("bad compressed entry 0: {reason}") || &refusal == reason,
+                    "{id}: archive refused with {refusal:?}, the frame with {reason:?}"
                 );
             }
         }
+        observation
     }
+
+    type FrameCase = reviewed::Case<Limits, Setup, Expected, Schedule>;
 
     pub(super) fn matrix() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../core/tests/decoder-corpus/archive.json");
-        let cases = reviewed::read::<Limits, Setup, Expected, Schedule>(
+        let cases: Vec<(FrameCase, Vec<u8>)> = reviewed::read(
             &std::fs::read(path).unwrap(),
             "archive",
             "reviewed_short_reads",
@@ -565,17 +665,42 @@ mod short_reads {
                 contiguous.max_read.is_none() && short.max_read.is_some(),
                 "{id}"
             );
+            let decoded = matches!(case.expected, Expected::Decoded { .. });
             for length in &case.setup.lengths {
                 let known = length == "known";
-                let whole = check_frame(&case, &frame, contiguous, known);
-                let split = check_frame(&case, &frame, short, known);
+                let read = |schedule: &Schedule| {
+                    let read =
+                        check_frame(id, &case.limits, &case.expected, &frame, schedule, known);
+                    assert_eq!(read.forced_short, schedule.max_read.is_some(), "{id}");
+                    let (first_cap, last_cap) = read.buffer.expect("reader reached frame buffer");
+                    assert!(
+                        !decoded || last_cap > first_cap,
+                        "{id}: growth not exercised"
+                    );
+                    read.calls
+                };
+                let whole = read(contiguous);
+                let split = read(short);
                 assert!(split > whole, "{id}: both paths took {whole} reads");
-                if matches!(case.expected, Expected::Decoded { .. }) {
+                if decoded {
                     success_cells += 2;
                 }
             }
             for schedule in &case.schedules {
-                check_archive(&case, &frame, schedule);
+                let (forced_short, refusal) = check_archive(id, &case.expected, &frame, schedule);
+                match &case.expected {
+                    Expected::Decoded { .. } => {
+                        assert_eq!(forced_short, schedule.max_read.is_some(), "{id}")
+                    }
+                    Expected::Refused { reason, output } => {
+                        assert!(matches!(output.as_str(), "some" | "none"), "{id}");
+                        assert_eq!(
+                            refusal.unwrap(),
+                            format!("bad compressed entry 0: {reason}"),
+                            "{id}"
+                        );
+                    }
+                }
             }
             match case.expected {
                 Expected::Decoded { root, .. } => {

@@ -172,7 +172,9 @@ impl Own<'_> {
             match k {
                 0 => s += &format!(".{x}"),
                 1 => s += &format!(".case{x}.{y}"),
-                _ => s += &format!(".seq{x}"),
+                2 => s += &format!(".seq{x}"),
+                5 => s += &format!(":t{x}"),
+                _ => s += &format!("[{x}..{y}]"),
             }
         }
         if p.cut {
@@ -532,7 +534,7 @@ pub(super) fn check(
         }
     }
     check_moves(m, b, &scratch.scratch())?;
-    let (n, j, joins) = names(b, entry, &scratch)?;
+    let (n, j, joins) = names(m, b, entry, &scratch)?;
     let mut routed = Vec::new();
     scratch.reserve(&mut routed, b.addresses.len())?;
     for a in 0..b.addresses.len() {

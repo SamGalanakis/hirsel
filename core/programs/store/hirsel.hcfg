@@ -360,6 +360,7 @@ pkg_v1.Package(
             ("store_reclaim_laws.hirsel", "store"),
             ("authority_laws.hirsel", "store"),
             ("follower_laws.hirsel", "store"),
+            ("follower_deadline_fixture.hirsel", "store"),
             ("replication_laws.hirsel", "store"),
             ("store_put_laws.hirsel", "store"),
             ("store_inline_meter_law.hirsel", "store"),

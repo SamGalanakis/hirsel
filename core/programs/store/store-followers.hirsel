@@ -60,6 +60,8 @@ fn log_follow_capture(d: Dir, c: Clock, deadline: u64, mut progress: object_writ
         }
         let mut walk = take selected
         failure_result_from_rep(journal.capture_fence(d, c, deadline, mut walk))?
+        let replay_deadline = Some((c, deadline))
+        failure_result_from_rep(format.check_journal_deadline(replay_deadline))?
         let image = replace(mut walk.end_image, None)
         let key = object_writer.LogCaptureKey(manifest: std.sha256.hash(raw), first: page_record.first_live, count: list.len(walk.segments), end_image: take image, torn_tail: walk.torn_tail)
         let old_charge = if let Some(old) = previous {
@@ -83,12 +85,14 @@ fn log_follow_capture(d: Dir, c: Clock, deadline: u64, mut progress: object_writ
         }
         let initial = read_only_checkpoint(d, id, take page_record)?
         let torn_tail = walk.torn_tail
-        let replay = capture_scan(id, take walk, take initial)?
+        let replay = capture_scan(id, replay_deadline, take walk, take initial)?
         let resident = failure_result_from_rep(journal.journal_account(replay))?
         failure_result_from_rep(catalog.over_ceiling(int.saturating_add(old_charge, resident), ceiling))?
         failure_result_from_rep(object_writer.check_read_only_manifest(d, raw))?
+        failure_result_from_rep(format.check_journal_deadline(replay_deadline))?
         if let Some(old) = previous {
             if let Some(regressed_id) = object_writer.behind_branch(replay.state, old.state) {
+                failure_result_from_rep(format.check_journal_deadline(replay_deadline))?
                 if torn_tail {
                     return Error(Diverged(regressed_id))
                 }
@@ -102,6 +106,7 @@ fn log_follow_capture(d: Dir, c: Clock, deadline: u64, mut progress: object_writ
         }
         let pager.JournalReplay(state: take state, next_node: last_stamp, ..) = take replay
         let capture = failure_result_from_rep(object_writer.follow_capture(store_key_to_rep(id), take state, resident, None, serial, failure_result_from_rep(catalog.stamp_after(last_stamp))?))?
+        failure_result_from_rep(format.check_journal_deadline(replay_deadline))?
         progress.next_id = next_serial
         progress.last = Some(object_writer.LogCaptureAttempt(key: take key, capture_id: serial))
         return Ok(Some(take capture))

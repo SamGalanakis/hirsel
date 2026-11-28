@@ -255,7 +255,7 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
             fail("L85: the exactly funded destination did not read its object")
         }
     }
-    let observed = history.HistoryHead(authority_kind: 1, store: types.StoreKey(hi: 0, lo: 1), pair: history.HistoryPair(epoch: 1, holder: types.StoreKey(hi: 2, lo: 3)), activation: 0, entry: pages.HistoryRef(seq: 172, epoch: 1, len: 112, digest: 1), checkpoint: object_ref, floor: 1, binding:[0; 32], origin: None)
+    let observed = history.HistoryHead(authority_kind: 1, store: types.StoreKey(hi: 0, lo: 1), pair: history.HistoryPair(epoch: 1, holder: types.StoreKey(hi: 2, lo: 3)), activation: 0, entry: pages.HistoryRef(seq: 172, epoch: 1, len: 112, digest: 1), checkpoint: object_ref, floor: 1, binding: [0; 32], origin: None)
     // 171 links at three u64 fields each need 4,104 bytes.
     let suffix = option.unwrap(charge.seq(bytes[history.HistoryLink], observed.entry.seq - object_ref.seq))
     let denied = failure_result_from_rep(types.capacity(bound bytes 4096 {
@@ -859,6 +859,16 @@ fn follower_cancelled_publication(c: Clock, tasks: Tasks) -> Result[(), Error] w
         let _ = take retired
     }
     Ok(())
+}
+
+@test
+fn follower_replay_deadline_after_fence(r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    follower_deadline_trial(r, tasks, false)
+}
+
+@test
+fn follower_replay_deadline_with_read_in_flight(r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    follower_deadline_trial(r, tasks, true)
 }
 
 // VP2 epilogue: post-heal bounded convergence. After a law's scripted faults

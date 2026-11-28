@@ -510,7 +510,8 @@ pub opaque type JournalInput {
     base: u64,
     aligned: bool,
     chunk: Bytes,
-    copy_to: Option[HostFile]
+    copy_to: Option[HostFile],
+    deadline: Option[(Clock, u64)]
 }
 
 pub fn journal_decode_fork(file: String, raw: Bytes) -> Result[JournalFork, types.Failure] {
@@ -674,7 +675,7 @@ pub fn stream_xindex_encode(mut raw: Bytes, sid: types.HostStreamIdRep, inc: u64
     Ok(RegIndex(k: idx.k, len, digest, covers_inc: idx.covers_inc, covers_seq: idx.covers_seq))
 }
 
-pub fn open_journal_input(take file: HostFile, flush: bool, make_chunk: scoped fn() -> Result[Bytes, types.Failure]) -> Result[JournalInput, types.Failure] waits {
+pub fn open_journal_input(take file: HostFile, flush: bool, deadline: Option[(Clock, u64)], make_chunk: scoped fn() -> Result[Bytes, types.Failure]) -> Result[JournalInput, types.Failure] waits {
     let mut opened = take file
     if flush {
         host.sync(mut opened) ?=> Io
@@ -684,11 +685,11 @@ pub fn open_journal_input(take file: HostFile, flush: bool, make_chunk: scoped f
     if list.len(chunk) != 0u64 {
         list.clear(mut chunk)
     }
-    Ok(JournalInput(file: take opened, size: file_stat.size, base: 0, aligned: false, chunk: take chunk, copy_to: None))
+    Ok(JournalInput(file: take opened, size: file_stat.size, base: 0, aligned: false, chunk: take chunk, copy_to: None, deadline))
 }
 
 pub fn open_device_input(take file: HostFile, make_chunk: scoped fn() -> Result[Bytes, types.Failure]) -> Result[JournalInput, types.Failure] waits {
-    let mut input = open_journal_input(take file, false, make_chunk)?
+    let mut input = open_journal_input(take file, false, None, make_chunk)?
     input.aligned = true
     Ok(take input)
 }
@@ -719,6 +720,15 @@ pub fn take_journal_copy(take input: JournalInput) -> Option[HostFile] {
     take output
 }
 
+pub fn check_journal_deadline(deadline: Option[(Clock, u64)]) -> Result[(), types.Failure] {
+    if let Some((c, due)) = deadline {
+        if host.mono_ns(c) >= due {
+            return Error(Remote(Retriable(Deadline)))
+        }
+    }
+    Ok(())
+}
+
 pub fn refill_journal_chunk(mut input: JournalInput, path: String, offset: u64) -> Result[u64, types.Failure] waits {
     if offset >= input.base && offset - input.base < list.len(input.chunk) {
         return Ok(offset - input.base)
@@ -729,6 +739,9 @@ pub fn refill_journal_chunk(mut input: JournalInput, path: String, offset: u64) 
     } else {
         offset
     }
+    // A frame may span several chunks. The previous read has already
+    // returned before this refill can submit the next one.
+    check_journal_deadline(input.deadline)?
     if (host.read_at(mut input.file, base, mut input.chunk) ?=> Io) <= offset - base {
         return Error(disk_fault(path, offset, Truncated))
     }

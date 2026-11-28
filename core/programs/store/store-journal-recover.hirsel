@@ -53,7 +53,7 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: page
     }
 }
 
-fn capture_scan(id: StoreId, take walk: journal.CaptureWalk, take initial: pager.JournalReplay) -> Result[pager.JournalReplay, Error] waits {
+fn capture_scan(id: StoreId, deadline: Option[(Clock, u64)], take walk: journal.CaptureWalk, take initial: pager.JournalReplay) -> Result[pager.JournalReplay, Error] waits {
     let journal.CaptureWalk(segments: take selected, torn_tail: torn_tail, ..) = take walk
     let mut segments = take selected
     let segment_count = list.len(segments)
@@ -63,6 +63,7 @@ fn capture_scan(id: StoreId, take walk: journal.CaptureWalk, take initial: pager
     }
     let mut replay = take initial
     while let Some(take segment) = list.pop(mut segments) {
+        failure_result_from_rep(format.check_journal_deadline(deadline))?
         let journal.CaptureSegment(file: take opened, seq: seq, boundary: stored_end) = take segment
         let tail = list.len(segments) == 0
         let torn = tail && torn_tail
@@ -75,18 +76,24 @@ fn capture_scan(id: StoreId, take walk: journal.CaptureWalk, take initial: pager
             stored_end
         }
         let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
-        let mut source = failure_result_from_rep(journal.journal_input(take opened, torn))?
+        let mut source = failure_result_from_rep(journal.journal_input_with_deadline(take opened, torn, deadline))?
         failure_result_from_rep(journal.journal_refresh_size(mut source, boundary))?
-        let _ = journal_scan(mut source, path, id, seq, 72, boundary, torn, mut replay, scoped fn(mut recovered_state: pager.JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
+        let scanned = journal_scan(mut source, path, id, seq, 72, boundary, torn, mut replay, scoped fn(mut recovered_state: pager.JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
             journal_apply(path, mut recovered_state, take event)
-        })?
+        })
         let consumed = format.take_journal_file(take source)
         let mut file = take consumed
-        if torn {
-            failure_result_from_rep(manifest.disk_io(host.unlock(mut file)))?
+        let unlocked = if torn {
+            manifest.disk_io(host.unlock(mut file))
+        } else {
+            Ok(())
         }
-        failure_result_from_rep(manifest.disk_io(host.close(take file)))?
+        let closed = manifest.disk_io(host.close(take file))
+        let _ = scanned?
+        failure_result_from_rep(take unlocked)?
+        failure_result_from_rep(take closed)?
     }
+    failure_result_from_rep(format.check_journal_deadline(deadline))?
     Ok(take replay)
 }
 

@@ -1597,7 +1597,7 @@ pub fn open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Er
         }
         let mut initial = read_only_checkpoint(d, id, take page_record)?
         initial.immutable = true
-        let replay = capture_scan(id, take walk, take initial)?
+        let replay = capture_scan(id, None, take walk, take initial)?
         failure_result_from_rep(catalog.over_ceiling(failure_result_from_rep(journal.journal_account(replay))?, options.resident_limit))?
         let inner = failure_result_from_rep(read.read_only_state(store, replay))?
         return Ok(ReadOnly(inner: take inner))

@@ -1,0 +1,317 @@
+// Observe submissions on the selected segment while delegating file contents,
+// locks and their lifetime to the simulated filesystem.
+type FollowerDeadlinePort: send {
+    directory: Dir,
+    port: core.Served[DirOp],
+    time: Clock,
+    hand: ClockHand,
+    path: String,
+    on_read: bool,
+    reports: Sender[FollowerDeadlineReadCount]
+}
+
+type FollowerDeadlineReadCount: send {
+    issued: u64,
+    late: u64
+}
+
+const FOLLOWER_REPLAY_DUE: u64 = 100
+
+fn follower_deadline_reply[T](take answer: Result[T, IoError], success: fn(take T) -> DirReply) -> DirReply {
+    match take answer {
+        Ok(take value) => success(take value),
+        Error(e) => Failed(e),
+    }
+}
+
+fn follower_deadline_file[T](mut files: List[Option[HostFile]], id: u64, operation: scoped[view] fn(mut HostFile) -> T waits) -> T waits {
+    match files[id] {
+        Some(mut file) => operation(mut file),
+        None => fail("replay law: operation on a closed file"),
+    }
+}
+
+fn follower_deadline_read(mut server: core.Served[DirOp], mut call: core.Call[DirOp], mut files: List[Option[HostFile]], id: u64, room: u64, offset: Option[u64]) -> DirReply waits {
+    let mut buffer: Bytes = list.with_capacity(room)
+    let read = match files[id] {
+        Some(mut file) => match offset {
+            Some(at) => host.read_at(mut file, at, mut buffer),
+            None => host.read(mut file, mut buffer),
+        },
+        None => fail("replay law: read on a closed file"),
+    }
+    match read {
+        Ok(n) => {
+            if provide.fill(mut server, mut call, buffer) != n {
+                fail("replay law: reply did not fit the read")
+            }
+            Count(n)
+        },
+        Error(e) => Failed(e),
+    }
+}
+
+fn follower_deadline_serve(take fixture: FollowerDeadlinePort) waits {
+    let FollowerDeadlinePort(directory, port: take port, time, hand: take hand, path: take path, on_read, reports: take reports) = take fixture
+    let mut server = take port
+    let mut time_hand = take hand
+    let mut files: List[Option[HostFile]] = list.new()
+    list.push(mut files, None)
+    let mut segment: Option[u64] = None
+    let mut fenced: Option[u64] = None
+    let mut armed = true
+    let mut issued = 0u64
+    let mut late = 0u64
+    while let Some(take submitted) = provide.next(mut server) {
+        let mut call = take submitted
+        let reply: DirReply = match provide.dir_op(call) {
+            Open(path: width, mode: mode, ..) => {
+                let mut name_bytes: Bytes = list.with_capacity(width)
+                provide.payload(call, 1, mut name_bytes)
+                let name = result.unwrap(string.from_utf8(take name_bytes))
+                match host.open(directory, name, mode) {
+                    Ok(take file) => {
+                        let id = list.len(files)
+                        list.push(mut files, Some(take file))
+                        if name == path {
+                            segment = Some(id)
+                        }
+                        File(id)
+                    },
+                    Error(e) => Failed(e),
+                }
+            },
+            ReadAt(file: id, at: at, room: room) => {
+                if fenced == Some(id) {
+                    if host.mono_ns(time) >= FOLLOWER_REPLAY_DUE {
+                        late += 1
+                    } else {
+                        issued += 1
+                        // The second refill is inside the large COMMIT.
+                        if on_read && at == journal.JOURNAL_CHUNK_BYTES {
+                            clock.advance_to(mut time_hand, FOLLOWER_REPLAY_DUE)
+                        }
+                    }
+                }
+                follower_deadline_read(mut server, mut call, mut files, id, room, Some(at))
+            },
+            Read(file: id, room: room) => follower_deadline_read(mut server, mut call, mut files, id, room, None),
+            StatFile(file: id) => {
+                follower_deadline_reply(follower_deadline_file(mut files, id, host.stat_file), fn(take s) {
+                    Stat(take s)
+                })
+            },
+            SyncDir(..) => follower_deadline_reply(host.sync_dir(directory), fn(take ignored) {
+                Done
+            }),
+            Sync(file: id) => {
+                follower_deadline_reply(follower_deadline_file(mut files, id, host.sync), fn(take ignored) {
+                    Done
+                })
+            },
+            TryLockShared(file: id) => {
+                let locked = follower_deadline_file(mut files, id, host.try_lock_shared)
+                if let Ok(true) = locked {
+                    if armed && segment == Some(id) {
+                        armed = false
+                        fenced = Some(id)
+                        if !on_read {
+                            clock.advance_to(mut time_hand, FOLLOWER_REPLAY_DUE)
+                        }
+                    }
+                }
+                follower_deadline_reply(locked, fn(take held) {
+                    Locked(held)
+                })
+            },
+            TryLock(file: id) => {
+                let locked = follower_deadline_file(mut files, id, host.try_lock)
+                // The exclusive probe observes the end of the expired attempt.
+                result.unwrap(channel.send(reports, FollowerDeadlineReadCount(issued, late)))
+                follower_deadline_reply(locked, fn(take held) {
+                    Locked(held)
+                })
+            },
+            Unlock(file: id) => {
+                if fenced == Some(id) {
+                    fenced = None
+                }
+                follower_deadline_reply(follower_deadline_file(mut files, id, host.unlock), fn(take ignored) {
+                    Done
+                })
+            },
+            Close(file: id) => {
+                if fenced == Some(id) {
+                    fenced = None
+                }
+                let file = option.unwrap(replace(mut files[id], None))
+                follower_deadline_reply(host.close(take file), fn(take ignored) {
+                    Done
+                })
+            },
+            Released(id: id) => {
+                if fenced == Some(id) {
+                    fenced = None
+                }
+                let _ = replace(mut files[id], None)
+                continue
+            },
+            _ => fail("replay law: unexpected filesystem operation"),
+        }
+        result.unwrap(provide.reply(mut server, take call, provide.dir_reply(reply)))
+    }
+}
+
+type FollowerDeadlineApply: send {
+    commands: Receiver[FollowerCommand],
+    bound_reply: Sender[Arc[object_writer.FollowCapture]],
+    directory: Dir,
+    observed: Dir,
+    time: Clock
+}
+
+fn follower_deadline_apply(take fixture: FollowerDeadlineApply) -> bool waits {
+    let FollowerDeadlineApply(commands: take commands, bound_reply: take bound_reply, directory, observed, time) = take fixture
+    let mut progress = object_writer.LogCaptureProgress(next_id: 1, last: None)
+    let mut source: object_writer.FollowerSource = DirectorySource(directory, time)
+    let previous = option.unwrap(result.unwrap(initial_follow_capture(mut source, mut progress, None, 1048576)))
+    result.unwrap(channel.send(bound_reply, arc.share(previous)))
+    let key: object_writer.LogCaptureKey = {
+        let Some(prior) = view progress.last else {
+            fail("replay law: the initial capture had no progress key")
+        }
+        clone(prior.key)
+    }
+    source = DirectorySource(observed, time)
+    let FollowerCommand(request: take first, reply: take expired) = result.unwrap(channel.receive(commands))
+    let outcome = follower_step(mut source, mut progress, 1048576, box.unbox(take first))
+    let kept_key = if let Some(attempt) = progress.last {
+        progress.next_id == previous.log_id + 1 && attempt.capture_id == previous.log_id && object_writer.same_capture_key(attempt.key, key)
+    } else {
+        false
+    }
+    result.unwrap(channel.send(expired, take outcome))
+    let _ = take expired
+    let FollowerCommand(request: take retry, reply: take retried) = result.unwrap(channel.receive(commands))
+    result.unwrap(channel.send(retried, follower_step(mut source, mut progress, 1048576, box.unbox(take retry))))
+    kept_key
+}
+
+fn follower_deadline_value(width: u64, byte: u8) -> Bytes {
+    let mut value: Bytes = list.with_capacity(width)
+    list.fill(mut value, width, byte)
+    take value
+}
+
+fn follower_deadline_put(mut db: Db, rows: Table[u64, Bytes], row: u64, take value: Bytes) -> Result[(), Error] waits {
+    let outcome: Outcome[(), Error] = run(mut db, None, (copy_env(rows), row, take value), fn(mut tx: Tx, item: (Table[u64, Bytes], u64, Bytes)) -> Result[(), Error] {
+        put(mut tx, item.0, item.1, item.2)
+    })?
+    let Committed(commit) = outcome else {
+        fail("replay law: fixture commit was refused")
+    }
+    durable(mut db, commit.ticket)
+}
+
+fn follower_deadline_trial(r: Random, tasks: Tasks, on_read: bool) -> Result[(), Error] waits {
+    let (time, take hand) = provide.clock(0, 1369353600000)
+    let (directory, take disk_port) = provide.dir(bytes 2097152)
+    let filesystem = task.spawn(tasks, bytes 8388608, SimDiskMount(image: std.sim.fs.new(), plan: std.sim.world.plan(3449), clock: time, port: take disk_port), sim_disk_serve)
+    let mut options = journal_crash_options()
+    options.checkpoint_bytes = 1048576
+    options.journal_limit = FRAME_LIMIT + options.checkpoint_bytes
+    let plan = follower_law_plan(Directory, options)
+    let mut writer = open_directory(tasks, directory, time, r, options, JOURNAL_LAW_NAMED_END_CADENCE)?
+    let _ = law_table(mut writer, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    follower_deadline_put(mut writer, rows, 1u64, follower_deadline_value(1, 7))?
+    journal_law_await_end(writer)?
+    let prior_version = version(snapshot(writer))
+    let seq = file_seq(writer)
+    let id = identity(writer)
+    let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
+    let (proxy, take port) = provide.dir(bytes 1048576)
+    let (reports, read_reports): (Sender[FollowerDeadlineReadCount], Receiver[FollowerDeadlineReadCount]) = channel.new(1)
+    let observer = task.spawn(tasks, bytes 1048576, FollowerDeadlinePort(directory, port: take port, time, hand: take hand, path: string.from(path), on_read, reports: take reports), follower_deadline_serve)
+    let (send, receive): (Sender[FollowerCommand], Receiver[FollowerCommand]) = channel.new(1)
+    let (retiring, retired): (Sender[()], Receiver[()]) = channel.new(1)
+    let (bound_reply, bound_inbox): (Sender[Arc[object_writer.FollowCapture]], Receiver[Arc[object_writer.FollowCapture]]) = channel.new(1)
+    let slot = FollowerSlot(plan: clone(plan), commands: take send, retiring: take retiring)
+    let expiry = task.spawn(tasks, bytes plan.root, FollowerDeadlineApply(commands: take receive, bound_reply: take bound_reply, directory, observed: proxy, time), follower_deadline_apply)
+    let previous = result.unwrap(channel.receive(bound_inbox))
+    let mut replica = Follower(open: history.HISTORY_OPEN_LIMIT | 1, pager: None, slot: take slot, workers: None, on_log: true, op_ms: 0, clock: time, capture: arc.share(previous), stopped: None)
+    let width = 5 * journal.JOURNAL_CHUNK_BYTES
+    let expected = follower_deadline_value(width, 9)
+    follower_deadline_put(mut writer, rows, 2u64, clone(expected))?
+    let wanted = version(snapshot(writer))
+    if file_seq(writer) != seq || file_end(writer) < width {
+        fail("replay law: fixture did not leave a long single segment")
+    }
+    close(take writer)?
+    let trunk = follower_main(replica)
+    let old = applied(replica, trunk)?
+    if old.version != prior_version {
+        fail("replay law: the initial capture missed the published row")
+    }
+    let expired = catch_up(mut replica, FOLLOWER_REPLAY_DUE)
+    let before = snapshot_follower(replica, trunk)?
+    let previous_serial = replica.capture.log_id
+    let Ok(take lock_file) = host.open(proxy, path, Read) else {
+        fail("replay law: the filesystem observer stopped before the fence probe")
+    }
+    let mut lock = take lock_file
+    let fence_released = host.try_lock(mut lock) ?=> Io
+    host.close(take lock) ?=> Io
+    let counts = result.unwrap(channel.receive(read_reports))
+    if counts.late != 0 {
+        let mut message = string.from("replay law: submitted journal reads after expiry: ")
+        string.push_u64(mut message, counts.late)
+        fail(take message)
+    }
+    let expected_issued = if on_read {
+        2u64
+    } else {
+        0u64
+    }
+    if counts.issued != expected_issued || host.mono_ns(time) != FOLLOWER_REPLAY_DUE {
+        fail("replay law: the clock did not hit its expected read boundary")
+    }
+    if !fence_released {
+        fail("replay law: the expired replay retained the terminal fence")
+    }
+    if let Error(Behind(at)) = expired {
+        if at.version != old.version || at.branch != old.branch || !types.same(at.store.hi, at.store.lo, old.store.hi, old.store.lo) {
+            fail("replay law: Behind did not name the published capture")
+        }
+    } else {
+        fail("replay law: the expired caller did not return Behind")
+    }
+    let reading = follower_reader(replica, 0)?
+    if previous_serial != previous.log_id || version(before) != old.version || get(reading, before, rows, 1u64)? != Some(follower_deadline_value(1, 7)) || get(reading, before, rows, 2u64)? != None {
+        fail("replay law: expiry changed the published capture")
+    }
+    let retry = catch_up(mut replica, 1000)?
+    if !result.unwrap(task.join(take expiry)) {
+        fail("replay law: expiry changed the published progress key")
+    }
+    // Compare the retry to an uninterrupted capture and to the written values.
+    let mut clean_progress = object_writer.LogCaptureProgress(next_id: 1, last: None)
+    let clean = option.unwrap(log_follow_capture(directory, time, 1000, mut clean_progress, Some(id), 1048576, None)?)
+    let retried = snapshot_follower(replica, trunk)?
+    let uninterrupted = follower_snapshot(clean, clean.state.tips[0u64], replica.open)
+    if retry.version != wanted || replica.capture.log_id != previous.log_id + 1 || version(retried) != wanted || version(retried) != version(uninterrupted) || retried.watermark != uninterrupted.watermark || get(reading, retried, rows, 1u64)? != get(reading, uninterrupted, rows, 1u64)? || get(reading, retried, rows, 2u64)? != Some(clone(expected)) || get(reading, uninterrupted, rows, 2u64)? != Some(clone(expected)) {
+        fail("replay law: fresh-deadline retry differs from clean replay")
+    }
+    let mut owner = open(tasks, directory, time, r, options)?
+    let owner_rows = table(mut owner, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    if version(snapshot(owner)) != wanted || get(reader(owner, 0)?, snapshot(owner), owner_rows, 2u64)? != Some(take expected) {
+        fail("replay law: owner-open did not recover the whole segment")
+    }
+    close(take owner)?
+    let _ = take replica
+    let _ = take retired
+    drop(take proxy)
+    let _ = sim_disk_unmount(take directory, take filesystem)
+    result.unwrap(task.join(take observer))
+    Ok(())
+}

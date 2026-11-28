@@ -1,5 +1,9 @@
 pub fn journal_input(take file: HostFile, flush: bool) -> Result[format.JournalInput, types.Failure] waits {
-    format.open_journal_input(take file, flush, fn() -> Result[Bytes, types.Failure] {
+    journal_input_with_deadline(take file, flush, None)
+}
+
+pub fn journal_input_with_deadline(take file: HostFile, flush: bool, deadline: Option[(Clock, u64)]) -> Result[format.JournalInput, types.Failure] waits {
+    format.open_journal_input(take file, flush, deadline, fn() -> Result[Bytes, types.Failure] {
         manifest.disk_allocation(fn() -> Result[Bytes, types.Failure] {
             Ok(list.with_capacity(JOURNAL_CHUNK_BYTES))
         })

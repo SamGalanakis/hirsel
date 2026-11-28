@@ -1,0 +1,5 @@
+name = "coreIrOwn"
+defaultTargets = ["OwnSoundness"]
+
+[[lean_lib]]
+name = "OwnSoundness"

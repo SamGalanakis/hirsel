@@ -158,6 +158,7 @@ pub(super) fn paid(
             }
         }
         return Ok(sized
+            && starts_at_zero(b, f, c, alloc, prefix, budget)?
             && f.prepaid(
                 b,
                 alloc,
@@ -168,6 +169,46 @@ pub(super) fn paid(
                 budget,
             )?
             && c.private(b, budget)?);
+    }
+    Ok(false)
+}
+
+// The full initialized allocation still belongs to this drain. A transferred
+// suffix would need separate evidence for the consumed prefix.
+fn starts_at_zero<'b>(
+    b: &'b Body,
+    f: &bulk::Facts<'_>,
+    c: &Cursor,
+    mut block: usize,
+    mut instructions: &'b [Inst],
+    budget: &Debit<'_>,
+) -> Result<bool, Error> {
+    for _ in 0..=b.blocks.len() {
+        budget.check()?;
+        for row in instructions.iter().rev() {
+            budget.check()?;
+            match *row {
+                Inst::Store { address, value } if address == c.address => {
+                    return Ok(f.constant(value) == Some(0));
+                }
+                Inst::StorageLive { slot } | Inst::StorageDead { slot } if slot == c.slot => {
+                    return Ok(false);
+                }
+                Inst::Read {
+                    address,
+                    mode: ReadMode::Take,
+                    ..
+                } if address == c.address => {
+                    return Ok(false);
+                }
+                _ => {}
+            }
+        }
+        let Some(pred) = f.predecessor(block) else {
+            return Ok(false);
+        };
+        block = pred;
+        instructions = rows(b, block);
     }
     Ok(false)
 }

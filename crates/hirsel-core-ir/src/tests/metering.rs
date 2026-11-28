@@ -571,6 +571,7 @@ b7:
         source.replace("addr a3 = v7 index", "addr a3 = v1 index"),
         source.replace(" = mul v0, v5", " = wrapping_mul v0, v5"),
         source.replace("move a1, a2, v6", "move a1, a2, v2"),
+        source.replace("store a0, v2", "store a0, v0"),
         source.replace("branch v9, b1, b7", "branch v9, b7, b1"),
     ] {
         assert!(

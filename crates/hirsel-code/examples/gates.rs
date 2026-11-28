@@ -291,8 +291,7 @@ fn main() {
         prelinked: &[],
         cause_data: None,
     };
-    // SAFETY: direct calls and dispatches run within the executor gate on their invoking thread.
-    let loader = unsafe { Loader::with_gated_executors(config) }.expect("a gated loader");
+    let loader = Loader::new(config).expect("a loader");
     match mode.as_deref() {
         Some("density") => {
             let align = std::env::args().nth(2).expect("a text alignment");

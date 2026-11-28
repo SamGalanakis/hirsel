@@ -22,11 +22,3 @@ pub(crate) enum Access {
     /// A published data run.
     Read,
 }
-
-#[cfg(not(target_os = "macos"))]
-#[inline]
-pub(crate) fn execute<R>(work: impl FnOnce() -> R) -> R {
-    work()
-}
-
-pub(crate) const NEEDS_GATED_EXECUTORS: bool = cfg!(target_os = "macos");

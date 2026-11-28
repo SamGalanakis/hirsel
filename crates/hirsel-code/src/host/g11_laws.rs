@@ -65,30 +65,53 @@ pub(super) fn check(loader: &Loader, replacement: Code<Leaf>) {
 
 #[cfg(target_os = "macos")]
 pub(super) fn check(loader: &Loader, replacement: Code<Leaf>) {
-    assert!(matches!(Loader::new(config()), Err(Refusal::Unsupported)));
-    let (entered, active) = std::sync::mpsc::channel();
-    let (release, hold) = std::sync::mpsc::channel();
-    let (invalidated, waiting) = std::sync::mpsc::channel();
-    std::thread::scope(|scope| {
-        let neighbor = scope.spawn(move || {
-            Loader::on_executor(|| {
-                entered.send(()).unwrap();
-                hold.recv().unwrap();
-            })
-        });
-        active.recv().unwrap();
-        drop(replacement);
-        let reclaim = scope.spawn(move || {
-            host::BEFORE_ACK.set(Some(invalidated));
-            loader.reclaim()
-        });
-        waiting.recv().unwrap();
-        assert!(!reclaim.is_finished());
-        release.send(()).unwrap();
-        neighbor.join().unwrap();
-        assert_eq!(reclaim.join().unwrap(), Ok(()));
+    // A thread publishes while it is inside a call of loaded code: no thread holds
+    // anything a publication waits for.
+    let bytes = image(8).encode();
+    let fresh = replacement.with_entry(|entry| {
+        // SAFETY: `replacement` is live through the call.
+        assert_eq!(unsafe { entry(1) }, 9);
+        load(loader, &bytes)
     });
+    assert_eq!(call(&fresh.unwrap(), 1), 10);
+    drop(replacement);
+    assert_eq!(loader.reclaim(), Ok(()));
     assert_eq!(loader.installed(), 0);
+}
+
+/// PACK-5: a publication stops a thread that is running user code, and one that exits
+/// meanwhile does not refuse it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_publication_stops_running_threads_and_outlasts_exiting_ones() {
+    use std::os::unix::thread::JoinHandleExt;
+    use std::sync::atomic::AtomicBool;
+    let running = Arc::new(AtomicBool::new(true));
+    let spin = running.clone();
+    let spinner = std::thread::spawn(move || {
+        while spin.load(Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
+    });
+    // SAFETY: the handle's thread is live.
+    let port = unsafe { libc::pthread_mach_thread_np(spinner.as_pthread_t()) };
+    assert_eq!(host::stopped(port), 0);
+    let churn: Vec<_> = (0..2)
+        .map(|_| {
+            let churn = running.clone();
+            std::thread::spawn(move || {
+                while churn.load(Ordering::Acquire) {
+                    std::thread::spawn(|| ()).join().unwrap();
+                }
+            })
+        })
+        .collect();
+    for _ in 0..2000 {
+        host::synchronize().unwrap();
+    }
+    running.store(false, Ordering::Release);
+    spinner.join().unwrap();
+    churn.into_iter().for_each(|thread| thread.join().unwrap());
 }
 
 #[cfg(target_os = "ios")]

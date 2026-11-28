@@ -27,7 +27,7 @@ fn retired_text_traps_while_its_shared_page_neighbor_runs() {
     if !host::slab() {
         return;
     }
-    let loader = loader_for_law(Config {
+    let loader = Loader::new(Config {
         installed_bytes: 8 << 20,
         batch: Duration::from_secs(60),
         ..config()
@@ -148,7 +148,7 @@ fn retired_text_traps_while_its_shared_page_neighbor_runs() {
             };
             EXPECTED_SITE.store(site, Ordering::Release);
             // SAFETY: confined to the law child. Its retired RX site must raise the ISA trap.
-            Loader::on_executor(|| unsafe { std::mem::transmute::<usize, Leaf>(site)(1) });
+            unsafe { std::mem::transmute::<usize, Leaf>(site)(1) };
             std::process::exit(1);
         }
     });

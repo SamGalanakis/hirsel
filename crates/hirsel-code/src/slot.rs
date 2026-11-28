@@ -1,4 +1,4 @@
-use super::{Code, Image, Shared, Signature, Stop, host};
+use super::{Code, Image, Shared, Signature, Stop};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -385,9 +385,7 @@ impl Worker {
         };
         // SAFETY: as `Code::entry`; this worker's row is pinned with `borrows > 0`
         // while `with` runs (and released on return or unwind by `_guard`).
-        Some(host::execute(|| {
-            with(unsafe { std::mem::transmute_copy(&entry) })
-        }))
+        Some(with(unsafe { std::mem::transmute_copy(&entry) }))
     }
 
     /// Drop every unborrowed row whose slot has moved on. A worker calls this

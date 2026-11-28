@@ -153,11 +153,6 @@ const OWNERS: CauseDataOps = CauseDataOps {
     release: |_| {},
 };
 
-fn loader_for_law(config: Config) -> Result<Loader, Refusal> {
-    // SAFETY: slab calls in these laws run on the invoking thread inside the executor gate.
-    unsafe { Loader::with_gated_executors(config) }
-}
-
 /// Admit and load `bytes`, publishing at once.
 fn load(loader: &Loader, bytes: &[u8]) -> Result<Code<Leaf>, Refusal> {
     if let Ok(module) = Module::parse(bytes) {
@@ -311,7 +306,7 @@ fn a_loaded_entry_runs_and_a_refused_module_installs_nothing() {
     if !host::slab() {
         return;
     }
-    let loader = loader_for_law(config()).unwrap();
+    let loader = Loader::new(config()).unwrap();
     let bytes = image(1000).encode();
     assert_eq!(
         loader.load::<Leaf>(&bytes, &IDENTITY, true).err(),
@@ -396,13 +391,13 @@ fn a_loaded_entry_runs_and_a_refused_module_installs_nothing() {
     );
 
     let row = hirsel_mod::row("hirsel_core_alloc").unwrap();
-    let pure = loader_for_law(Config {
+    let pure = Loader::new(Config {
         mask: Mask::of(&[Class::Pure]),
         ..config()
     })
     .unwrap();
     assert_eq!(refused(&|_| {}, &pure), Some(Refusal::Import(row)));
-    let full = loader_for_law(Config {
+    let full = Loader::new(Config {
         installed_bytes: size(),
         ..config()
     })
@@ -412,7 +407,7 @@ fn a_loaded_entry_runs_and_a_refused_module_installs_nothing() {
 
     // An image whose data a cause can outlive installs with its owner or not at all
     // (PACK-9.7), and the refused install gives its room back: the next starts the band.
-    let owned = loader_for_law(Config {
+    let owned = Loader::new(Config {
         cause_data: Some(OWNERS),
         ..config()
     })
@@ -460,7 +455,7 @@ fn a_dead_cohort_faults_and_its_range_is_published_again() {
     if !host::slab() {
         return;
     }
-    let loader = loader_for_law(config()).unwrap();
+    let loader = Loader::new(config()).unwrap();
     let first = load(&loader, &image(100).encode()).unwrap();
     let (entry, text) = (first.entry(), first.text());
     assert_eq!(call(&first, 1), 102);
@@ -469,7 +464,7 @@ fn a_dead_cohort_faults_and_its_range_is_published_again() {
     if std::env::var_os(CHILD).is_some() {
         // The child jumps into the dead cohort, which ends it.
         // SAFETY: none; the law is that this call faults.
-        Loader::on_executor(|| unsafe { entry(1) });
+        unsafe { entry(1) };
         std::process::exit(0);
     }
     assert_eq!(loader.installed(), 0);
@@ -501,7 +496,7 @@ fn a_batch_is_one_cohort_that_lives_until_its_last_image_dies() {
     if !host::slab() {
         return;
     }
-    let loader = loader_for_law(Config {
+    let loader = Loader::new(Config {
         batch: Duration::from_secs(60),
         ..config()
     })
@@ -559,7 +554,7 @@ fn activate_swaps_at_the_expected_version_within_the_retired_budget() {
     if !host::slab() {
         return;
     }
-    let loader = loader_for_law(Config {
+    let loader = Loader::new(Config {
         retired_bytes: size(),
         ..config()
     })
@@ -649,7 +644,7 @@ fn a_code_address_resolves_to_its_image_and_a_fault_quarantines_it() {
     if !host::slab() {
         return;
     }
-    let loader = loader_for_law(Config {
+    let loader = Loader::new(Config {
         installed_bytes: 8 << 20,
         ..config()
     })
@@ -753,7 +748,7 @@ fn a_loader_without_a_slab_gives_prelinked_code_and_refuses_every_other_key() {
         text: double as *const () as usize,
         entries: entries.leak(),
     }];
-    let loader = loader_for_law(Config {
+    let loader = Loader::new(Config {
         band_bytes: 0,
         installed_bytes: 0,
         prelinked: prelinked.leak(),
@@ -797,7 +792,7 @@ fn validate_before_publication_refuses_without_changing_installed_bytes_or_image
     if !host::slab() {
         return;
     }
-    let loader = loader_for_law(config()).unwrap();
+    let loader = Loader::new(config()).unwrap();
     let sync_bytes = image(101).encode();
     let (sync_key, _) = loader.admit_module(&sync_bytes).unwrap();
     assert_eq!((loader.installed(), loader.live_images()), (0, 0));
@@ -885,8 +880,8 @@ fn wrong_pool_and_worker_borrow_pinning_across_nested_calls_swap_park_and_promot
     if !host::slab() {
         return;
     }
-    let loader_a = loader_for_law(config()).unwrap();
-    let loader_b = loader_for_law(config()).unwrap();
+    let loader_a = Loader::new(config()).unwrap();
+    let loader_b = Loader::new(config()).unwrap();
     let b_bytes = image(55).encode();
     let b_code = load(&loader_b, &b_bytes).unwrap();
     let slot_a = loader_a.slot::<Leaf>();
@@ -922,7 +917,7 @@ fn wrong_pool_and_worker_borrow_pinning_across_nested_calls_swap_park_and_promot
     // Both borrows keep v1 pinned even after swap + park + reclaim.
     assert_eq!(loader_a.retired(), size());
     let f1: Leaf = unsafe { std::mem::transmute(entry1) };
-    assert_eq!(Loader::on_executor(|| unsafe { f1(1) }), 12);
+    assert_eq!(unsafe { f1(1) }, 12);
 
     // End inner borrow; outer borrow still pins v1.
     worker.end_dispatch(tok_inner);
@@ -938,7 +933,7 @@ fn wrong_pool_and_worker_borrow_pinning_across_nested_calls_swap_park_and_promot
     worker.park();
     loader_a.reclaim().unwrap();
     assert_eq!(loader_a.retired(), size());
-    assert_eq!(Loader::on_executor(|| unsafe { f1(2) }), 14);
+    assert_eq!(unsafe { f1(2) }, 14);
 
     // Ending a promoted token is a no-op; dropping `pin` releases the last owner of v1.
     worker.end_dispatch(tok_outer);

@@ -1,10 +1,10 @@
 //! macOS arm64: a `MAP_JIT` text band that one loader thread writes through its
-//! per-thread write window, so no other thread ever sees the band writable (PACK-5).
+//! per-thread write window, so no other thread ever sees the band writable, and a
+//! publication that takes every other thread through the kernel (PACK-5).
 
 use super::Access;
-use std::cell::Cell;
 use std::io;
-use std::sync::{Arc, Mutex, OnceLock, Weak, mpsc};
+use std::sync::{Mutex, OnceLock, mpsc};
 
 pub(crate) const HOST_TARGET: hirsel_core_layout::Target =
     hirsel_core_layout::Target::Aarch64Darwin;
@@ -164,70 +164,84 @@ pub(crate) fn write(work: &mut dyn FnMut()) {
     ended.recv().expect("the loader thread");
 }
 
-// Registration and the publisher's snapshot share a lock. Each executor writes
-// only its own gate on entry/exit. The gate remains closed through return from JIT.
-#[repr(align(128))]
-struct Gate(Mutex<()>);
-
-static EXECUTORS: Mutex<Vec<Weak<Gate>>> = Mutex::new(Vec::new());
-thread_local! {
-    static GATE: Arc<Gate> = {
-        let gate = Arc::new(Gate(Mutex::new(())));
-        EXECUTORS.lock().unwrap().push(Arc::downgrade(&gate));
-        gate
-    };
-    static ENTERED: Cell<bool> = const { Cell::new(false) };
-}
-
-fn isb() {
-    // SAFETY: ISB synchronizes this executor's instruction stream.
-    unsafe { std::arch::asm!("isb", options(nostack, preserves_flags)) };
-}
-
-struct Exit;
-impl Drop for Exit {
-    fn drop(&mut self) {
-        isb();
-        ENTERED.set(false);
+/// Take every other thread of this task through the kernel. The kernel reads a
+/// thread's state only once the thread is off its core, and the thread comes back to
+/// user code through an exception return: each is a context synchronization event, so
+/// no thread goes on running instructions it fetched before the invalidation.
+pub(crate) fn synchronize() -> io::Result<()> {
+    const KERN_INVALID_ARGUMENT: i32 = 4;
+    const KERN_TERMINATED: i32 = 37;
+    const MACH_SEND_INVALID_DEST: i32 = 0x1000_0003;
+    unsafe extern "C" {
+        static mach_task_self_: u32;
+        fn task_threads(task: u32, threads: *mut *mut u32, count: *mut u32) -> i32;
+        fn mach_port_deallocate(task: u32, name: u32) -> i32;
+        fn vm_deallocate(task: u32, address: usize, bytes: usize) -> i32;
+    }
+    let (mut threads, mut count) = (std::ptr::null_mut::<u32>(), 0u32);
+    // SAFETY: the call fills both locals, and the array and each right in it are this
+    // caller's to give back.
+    unsafe {
+        let task = mach_task_self_;
+        let listed = task_threads(task, &mut threads, &mut count);
+        if listed != 0 {
+            return Err(refused("task_threads", listed));
+        }
+        let me = libc::pthread_mach_thread_np(libc::pthread_self());
+        let mut result = Ok(());
+        for thread in std::slice::from_raw_parts(threads, count as usize) {
+            if *thread != me && result.is_ok() {
+                result = match stopped(*thread) {
+                    // The last three are a thread that is exiting, which runs no more
+                    // user code: inactive, its port disabled (the kernel then names no
+                    // thread), or its port gone.
+                    0 | KERN_TERMINATED | KERN_INVALID_ARGUMENT | MACH_SEND_INVALID_DEST => Ok(()),
+                    code => Err(refused("thread_get_state", code)),
+                };
+            }
+            mach_port_deallocate(task, *thread);
+        }
+        vm_deallocate(task, threads.addr(), count as usize * size_of::<u32>());
+        result
     }
 }
 
-pub(crate) fn execute<R>(work: impl FnOnce() -> R) -> R {
-    if ENTERED.get() {
-        return work();
+/// Have the kernel stop `thread` off its core and let it go on: the kernel's answer.
+pub(crate) fn stopped(thread: u32) -> i32 {
+    /// `ARM_THREAD_STATE64` and the words of its `arm_thread_state64_t`.
+    const FLAVOR: i32 = 6;
+    const WORDS: usize = 68;
+    const KERN_ABORTED: i32 = 14;
+    unsafe extern "C" {
+        fn thread_get_state(thread: u32, flavor: i32, state: *mut u32, count: *mut u32) -> i32;
     }
-    GATE.with(|gate| {
-        let _active = gate.0.lock().unwrap_or_else(|p| p.into_inner());
-        isb();
-        ENTERED.set(true);
-        let _exit = Exit;
-        work()
-    })
+    let mut state = [0u32; WORDS];
+    loop {
+        let mut words = WORDS as u32;
+        // SAFETY: the kernel writes at most `words` words of `state`.
+        let answer = unsafe { thread_get_state(thread, FLAVOR, state.as_mut_ptr(), &mut words) };
+        // A signal to this thread interrupted its wait for the stop.
+        if answer != KERN_ABORTED {
+            return answer;
+        }
+    }
+}
+
+/// A Mach call's refusal, said in the laws' output.
+fn refused(what: &str, code: i32) -> io::Error {
+    #[cfg(test)]
+    eprintln!("hirsel-code: {what}: kern_return {code:#x}");
+    io::Error::other(format!("{what}: kern_return {code:#x}"))
 }
 
 /// After the text run at `at` was written: make every core fetch the new bytes.
 pub(crate) fn publish(_writer: usize, at: usize, bytes: usize) -> io::Result<()> {
-    // SAFETY: the range is mapped.
-    unsafe { sys_icache_invalidate(at as *mut libc::c_void, bytes) };
-    // New registrations synchronize through the registry lock. For old executors,
-    // a running interval must finish its exit ISB. Every subsequent entry takes
-    // its gate and executes ISB before transferring control back to slab code.
-    let active: Vec<_> = {
-        let mut registry = EXECUTORS.lock().unwrap();
-        let active = registry.iter().filter_map(Weak::upgrade).collect();
-        registry.retain(|gate| gate.strong_count() != 0);
-        active
-    };
-    #[cfg(test)]
-    BEFORE_ACK.with(|hook| {
-        if let Some(ready) = hook.take() {
-            ready.send(()).unwrap();
-        }
-    });
-    for gate in active {
-        drop(gate.0.lock().unwrap_or_else(|p| p.into_inner()));
+    // SAFETY: the range is mapped, and ISB synchronizes this thread's own stream.
+    unsafe {
+        sys_icache_invalidate(at as *mut libc::c_void, bytes);
+        std::arch::asm!("isb", options(nostack, preserves_flags));
     }
-    Ok(())
+    synchronize()
 }
 
 /// Whether this process can have a slab; the laws of one run only where it can.
@@ -309,9 +323,4 @@ pub(crate) fn pc(
             .__ss
             .__pc as usize
     }
-}
-
-#[cfg(test)]
-thread_local! {
-    pub(crate) static BEFORE_ACK: Cell<Option<mpsc::Sender<()>>> = const { Cell::new(None) };
 }

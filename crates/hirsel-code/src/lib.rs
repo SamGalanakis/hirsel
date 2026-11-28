@@ -75,8 +75,7 @@ pub enum Stop {
 /// # Safety
 /// `Self` is a function pointer type or a transparent wrapper of one, and every entry
 /// whose signature is `DIGEST` and `waits == WAITS` can be called through it. Invoking
-/// a copied pointer must require unsafe code: it may run only under a live image count
-/// and the host's executor gate.
+/// a copied pointer must require unsafe code: it may run only under a live image count.
 pub unsafe trait Signature: Copy {
     const DIGEST: ContentHash;
     const WAITS: bool = false;
@@ -376,30 +375,6 @@ pub struct Loader(Arc<Shared>);
 impl Loader {
     /// A loader with an empty slab, or `Unsupported` on a host that cannot publish code.
     pub fn new(config: Config) -> Result<Self, Refusal> {
-        if host::NEEDS_GATED_EXECUTORS && config.band_bytes != 0 {
-            return Err(Refusal::Unsupported);
-        }
-        Self::reserve(config)
-    }
-
-    /// Create a slab for a host wired to the executor gate, including Darwin MAP_JIT.
-    ///
-    /// # Safety
-    /// Every OS thread must enter [`Loader::on_executor`] around actual slab execution,
-    /// including every fiber resume, callback and cleanup. It must leave the gate before
-    /// parking or taking loader locks. A parked return address must retain its image.
-    /// New threads have the same obligations. Darwin’s default constructor stays prelinked-only.
-    pub unsafe fn with_gated_executors(config: Config) -> Result<Self, Refusal> {
-        Self::reserve(config)
-    }
-
-    /// Run one uninterrupted execution interval on this OS thread. A scheduler calls
-    /// this around the switch into a fiber, including switches that resume slab code.
-    pub fn on_executor<R>(work: impl FnOnce() -> R) -> R {
-        host::execute(work)
-    }
-
-    fn reserve(config: Config) -> Result<Self, Refusal> {
         let page = host::page();
         assert!(config.band_bytes <= 1 << 30 && config.band_bytes.is_multiple_of(page.max(WINDOW)));
         let (mut base, mut writer) = (0, 0);
@@ -742,14 +717,14 @@ impl<F> Clone for Code<F> {
 }
 
 impl<F: Signature> Code<F> {
-    /// Borrow the image count through the call and synchronize the executing thread.
-    /// A copied raw entry may only be invoked under a live count on a gated executor.
+    /// Borrow the image count through the call. A copied raw entry may only be invoked
+    /// under a live count.
     pub fn with_entry<R>(&self, call: impl FnOnce(F) -> R) -> R {
-        host::execute(|| call(self.entry()))
+        call(self.entry())
     }
 
     /// The host ABI entry. The caller must retain this image through its last use,
-    /// including suspended returns, and invoke it inside `Loader::on_executor`.
+    /// including suspended returns.
     pub fn entry(&self) -> F {
         // SAFETY: `F` is a function pointer type (`Signature`) and the entry has its
         // signature.

@@ -2,20 +2,29 @@ type SimDiskMount: send {
     image: std.sim.fs.Fs,
     plan: std.sim.world.Plan,
     clock: Clock,
-    port: core.Served[DirOp]
+    port: core.Served[DirOp],
+    tap: Option[Sender[std.sim.world.Receipt]]
 }
 
 fn sim_disk_serve(take mount: SimDiskMount) -> std.sim.fs.Fs waits {
-    let SimDiskMount(image: take saved, plan: take decisions, clock, port: take port) = take mount
+    let SimDiskMount(image: take saved, plan: take decisions, clock, port: take port, tap: take tap) = take mount
     let mut image = take saved
     let mut plan = take decisions
-    std.sim.fs.serve(mut image, mut plan, clock, take port)
+    match take tap {
+        Some(take sender) => std.sim.fs.serve_tapped(mut image, mut plan, clock, take port, take sender),
+        None => std.sim.fs.serve(mut image, mut plan, clock, take port),
+    }
     take image
 }
 
 fn sim_disk_mount(tasks: Tasks, c: Clock, take image: std.sim.fs.Fs, take plan: std.sim.world.Plan, room: u64) -> (Dir, Task[std.sim.fs.Fs]) {
+    sim_disk_mount_tapped(tasks, c, take image, take plan, room, None)
+}
+
+// A mount whose server sends its fault and damaged-read receipts on `tap`.
+fn sim_disk_mount_tapped(tasks: Tasks, c: Clock, take image: std.sim.fs.Fs, take plan: std.sim.world.Plan, room: u64, take tap: Option[Sender[std.sim.world.Receipt]]) -> (Dir, Task[std.sim.fs.Fs]) {
     let (d, port) = provide.dir(bytes 65536)
-    let server = task.spawn(tasks, bytes room, SimDiskMount(image: take image, plan: take plan, clock: c, port: take port), sim_disk_serve)
+    let server = task.spawn(tasks, bytes room, SimDiskMount(image: take image, plan: take plan, clock: c, port: take port, tap: take tap), sim_disk_serve)
     (d, take server)
 }
 

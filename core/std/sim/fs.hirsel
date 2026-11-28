@@ -3,7 +3,11 @@
 pub opaque type Fs: send {
     nodes: List[Inode],
     sequence: u64,
-    next_file: u64
+    next_file: u64,
+    // Serves and crashes so far, and receipts a full tap refused.
+    mounts: u64,
+    crashes: u64,
+    dropped: u64
 }
 
 type Inode: send {
@@ -41,7 +45,10 @@ type Session {
     site: u64,
     dirs: Map[u64, u64],
     files: Map[u64, OpenFile],
-    listings: Map[u64, Listing]
+    listings: Map[u64, Listing],
+    tap: Option[Sender[sim.world.Receipt]],
+    // Per inode, the version whose damaged read was last reported.
+    reported: Map[u64, u64]
 }
 
 fn empty() -> Version {
@@ -58,7 +65,51 @@ fn inode(directory: bool) -> Inode {
 pub fn new() -> Fs {
     let mut nodes: List[Inode] = list.with_capacity(1)
     list.push(mut nodes, inode(true))
-    Fs(nodes: take nodes, sequence: 0, next_file: 1)
+    Fs(nodes: take nodes, sequence: 0, next_file: 1, mounts: 0, crashes: 0, dropped: 0)
+}
+
+/// Receipts a tapped server could not send: its tap was full or closed.
+pub fn receipts_dropped(fs: Fs) -> u64 {
+    fs.dropped
+}
+
+fn node_path(fs: Fs, node: u64) -> String {
+    for id in 0u64 .. list.len(fs.nodes) {
+        for (name, child) in current(fs.nodes[id]).names {
+            if child == node {
+                let mut p = node_path(fs, id)
+                string.push(mut p, "/")
+                string.push(mut p, name)
+                return take p
+            }
+        }
+    }
+    string.new()
+}
+
+fn emit(mut fs: Fs, session: Session, op: String, node: u64, range: (u64, u64, u64), fault: Option[sim.world.Fault], outcome: sim.world.Outcome) {
+    let r = sim.world.Receipt(mount: fs.mounts, site: session.site - 1, op: clone(op), node: node, path: node_path(fs, node), at: range.0, len: range.1, landed: range.2, fault: fault, outcome: outcome, sequence: fs.sequence, crashes: fs.crashes)
+    if let Some(tap) = session.tap {
+        if let Error(_) = channel.try_send(tap, take r) {
+            fs.dropped += 1
+        }
+    }
+}
+
+// Reports a read or stat whose answer differs from the written bytes, once per
+// inode version and serve.
+fn damaged_read(mut fs: Fs, mut session: Session, node: u64, op: String, at: u64, len: u64) {
+    let seq = current(fs.nodes[node]).sequence
+    if !map.contains(session.reported, node) || map.get(session.reported, node) != Some(view seq) {
+        map.insert(mut session.reported, node, seq)
+        emit(mut fs, session, op, node, (at, len, at), None, DamagedRead)
+    }
+}
+
+// Withdraws the receipt of the current site: its reply never arrived.
+fn undelivered(mut fs: Fs, mut session: Session, node: u64, op: String) {
+    let _ = map.remove(mut session.reported, node)
+    emit(mut fs, session, op, node, (0, 0, 0), None, Undelivered)
 }
 
 fn current(node: Inode) -> View[Version] in node {
@@ -101,6 +152,7 @@ pub fn crash(mut fs: Fs, mut plan: sim.world.Plan) {
         fs.nodes[i].locks = map.new()
     }
     fs.sequence = 0
+    fs.crashes += 1
 }
 
 fn lookup(node: Inode, name: String) -> Option[u64] {
@@ -166,6 +218,10 @@ fn answer(mut s: Served[DirOp], take c: Call[DirOp], r: DirReply) -> bool {
     }
 }
 
+fn refuse(mut s: Served[DirOp], take c: Call[DirOp], e: IoError) {
+    let _ = answer(mut s, take c, Failed(e))
+}
+
 fn written_error(e: IoError) -> DirReply {
     WriteFailed(WriteError(written: 0, error: e))
 }
@@ -177,6 +233,17 @@ fn stat(node: Inode) -> DirReply {
     } else {
         File
     }, size: list.len(visible(v)), modified_ns: v.modified))
+}
+
+// Answers a stat, reporting a size that differs from the written bytes.
+fn stat_reply(mut fs: Fs, mut session: Session, node: u64, mut s: Served[DirOp], take c: Call[DirOp]) {
+    let damaged = list.len(visible(current(fs.nodes[node]))) != list.len(current(fs.nodes[node]).data)
+    if damaged {
+        damaged_read(mut fs, mut session, node, "stat", 0, 0)
+    }
+    if !answer(mut s, take c, stat(fs.nodes[node])) && damaged {
+        undelivered(mut fs, mut session, node, "stat")
+    }
 }
 
 fn close(mut fs: Fs, mut session: Session, id: u64) {
@@ -241,10 +308,7 @@ fn open(mut fs: Fs, mut session: Session, dir: u64, p: String, mode: OpenMode, s
     let mut c = take call
     let base = match parent(fs, dir, p) {
         Ok(id) => id,
-        Error(e) => {
-            let _ = answer(mut s, take c, Failed(e));
-            return
-        }
+        Error(e) => return refuse(mut s, take c, e)
     }
     let leaf = path.name(p)
     let id = session.next_id
@@ -267,14 +331,14 @@ fn open(mut fs: Fs, mut session: Session, dir: u64, p: String, mode: OpenMode, s
                 } else {
                     Denied
                 }
-                let _ = answer(mut s, take c, Failed(e))
+                refuse(mut s, take c, e)
                 return
             }
             node
         },
         None => {
             if !writable {
-                let _ = answer(mut s, take c, Failed(NotFound))
+                refuse(mut s, take c, NotFound)
                 return
             }
             list.len(fs.nodes)
@@ -322,13 +386,10 @@ fn open(mut fs: Fs, mut session: Session, dir: u64, p: String, mode: OpenMode, s
 fn make_temp(mut fs: Fs, mut session: Session, dir: u64, n: u64, file: bool, modified: i64, mut s: Served[DirOp], take c: Call[DirOp]) {
     let prefix = match read_name(c, 1, n) {
         Ok(take p) => take p,
-        Error(e) => {
-            let _ = answer(mut s, take c, Failed(e))
-            return
-        }
+        Error(e) => return refuse(mut s, take c, e)
     }
     if string.find(prefix, 0, "/") != None || string.find(prefix, 0, "\0") != None {
-        let _ = answer(mut s, take c, Failed(Denied))
+        refuse(mut s, take c, Denied)
         return
     }
     let base = dir_handle(session, dir)
@@ -350,25 +411,35 @@ fn make_temp(mut fs: Fs, mut session: Session, dir: u64, n: u64, file: bool, mod
     }
 }
 
-fn read(fs: Fs, mut session: Session, id: u64, offset: Option[u64], room: u64, mut s: Served[DirOp], take call: Call[DirOp]) {
+fn read(mut fs: Fs, mut session: Session, id: u64, offset: Option[u64], room: u64, mut s: Served[DirOp], take call: Call[DirOp]) {
     let mut c = take call
     let f = file_handle(session, id)
     if !f.readable {
-        let _ = answer(mut s, take c, Failed(Denied))
+        refuse(mut s, take c, Denied)
         return
     }
-    let data = visible(current(fs.nodes[f.node]))
     let at = match offset {
         Some(at) => at,
         None => f.cursor
     }
-    let end = list.len(data)
-    let count: u64 = if at >= end {
-        0
-    } else {
-        provide.fill(mut s, mut c, list.slice(data, at, at + order.min(room, end - at)))
+    let (count, damaged) = {
+        let v = current(fs.nodes[f.node])
+        let data = visible(v)
+        let n = order.min(room, int.saturating_sub(list.len(data), at))
+        let count: u64 = if n == 0 {
+            0
+        } else {
+            provide.fill(mut s, mut c, list.slice(data, at, at + n))
+        }
+        (count, n != order.min(room, int.saturating_sub(list.len(v.data), at)) || (n != 0 && list.slice(data, at, at + n) != list.slice(v.data, at, at + n)))
+    }
+    if damaged {
+        damaged_read(mut fs, mut session, f.node, "read", at, count)
     }
     let committed = answer(mut s, take c, Count(count))
+    if !committed && damaged {
+        undelivered(mut fs, mut session, f.node, "read")
+    }
     if committed && offset == None {
         let _ = map.update(mut session.files, id, scoped fn(mut file: OpenFile) {
             file.cursor += count
@@ -382,7 +453,9 @@ fn place_bytes(mut dst: Bytes, at: u64, data: Bytes) {
     list.copy_from_slice(mut dst, at, data)
 }
 
-fn write_overlay(mut v: Version, at: u64, data: Bytes, fault: Option[sim.world.Fault], mut plan: sim.world.Plan) {
+// Applies one write and returns where its bytes landed.
+fn write_overlay(mut v: Version, at: u64, data: Bytes, fault: Option[sim.world.Fault], mut plan: sim.world.Plan) -> u64 {
+    let mut landed = at
     if let Some(_) = fault {
         if let None = v.overlay {
             v.overlay = Some(clone(v.data))
@@ -402,8 +475,10 @@ fn write_overlay(mut v: Version, at: u64, data: Bytes, fault: Option[sim.world.F
                 // exactly the write length preserves direct I/O alignment.
                 let after = int.checked_add(at + n, n)
                 if at >= n && (after == None || sim.world.pick(mut plan, 2) == 0) {
+                    landed = at - n
                     place_bytes(mut disk, at - n, data)
                 } else if after != None {
+                    landed = at + n
                     place_bytes(mut disk, at + n, data)
                 }
             },
@@ -419,6 +494,7 @@ fn write_overlay(mut v: Version, at: u64, data: Bytes, fault: Option[sim.world.F
     if repaired {
         v.overlay = None
     }
+    landed
 }
 
 fn write(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, fault: Option[sim.world.Fault], id: u64, offset: Option[u64], take data: Bytes, modified: i64, mut s: Served[DirOp], take c: Call[DirOp]) {
@@ -461,9 +537,16 @@ fn write(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, fault: Opti
         Some(scripted) => Some(scripted),
         None => sim.world.write_fault(mut plan),
     }
-    write_overlay(mut v, at, data, effect, mut plan)
+    let landed = write_overlay(mut v, at, data, effect, mut plan)
+    if let Some(_) = effect {
+        emit(mut fs, session, "write", f.node, (at, n, landed), effect, Acknowledged)
+    }
     list.reserve(mut fs.nodes[f.node].history, 1)
-    if answer(mut s, take c, Done) {
+    if !answer(mut s, take c, Done) {
+        if let Some(_) = effect {
+            undelivered(mut fs, mut session, f.node, "write")
+        }
+    } else {
         edit(mut fs, f.node, take v)
         if f.durable {
             let latest = list.len(fs.nodes[f.node].history) - 1
@@ -482,14 +565,11 @@ fn make_dir(mut fs: Fs, mut session: Session, dir: u64, p: String, suffix: Optio
     let mut c = take call
     let base = match parent(fs, dir, p) {
         Ok(id) => id,
-        Error(e) => {
-            let _ = answer(mut s, take c, Failed(e));
-            return
-        }
+        Error(e) => return refuse(mut s, take c, e)
     }
     let leaf = path.name(p)
     if lookup(fs.nodes[base], leaf) != None {
-        let _ = answer(mut s, take c, Failed(Exists))
+        refuse(mut s, take c, Exists)
         return
     }
     let node = list.len(fs.nodes)
@@ -524,25 +604,22 @@ fn make_dir(mut fs: Fs, mut session: Session, dir: u64, p: String, suffix: Optio
 fn remove(mut fs: Fs, dir: u64, p: String, tree: bool, modified: i64, mut s: Served[DirOp], take c: Call[DirOp]) {
     let base = match parent(fs, dir, p) {
         Ok(id) => id,
-        Error(e) => {
-            let _ = answer(mut s, take c, Failed(e));
-            return
-        }
+        Error(e) => return refuse(mut s, take c, e)
     }
     let leaf = path.name(p)
     let node = match lookup(fs.nodes[base], leaf) {
         Some(id) => id,
         None => {
-            let _ = answer(mut s, take c, Failed(NotFound));
+            refuse(mut s, take c, NotFound)
             return
         }
     }
     if tree && !fs.nodes[node].directory {
-        let _ = answer(mut s, take c, Failed(Denied))
+        refuse(mut s, take c, Denied)
         return
     }
     if !tree && map.len(current(fs.nodes[node]).names) != 0 {
-        let _ = answer(mut s, take c, Failed(Other(39)))
+        refuse(mut s, take c, Other(39))
         return
     }
     let mut v = revised(current(fs.nodes[base]), fs.sequence + 1, modified)
@@ -558,21 +635,15 @@ fn rename(mut fs: Fs, dir: u64, from: String, to: String, modified: i64, mut s: 
     let bases = (parent(fs, dir, from), parent(fs, dir, to))
     let (old_base, new_base) = match bases {
         (Ok(old), Ok(dest)) => (old, dest),
-        (Error(e), _) => {
-            let _ = answer(mut s, take c, Failed(e));
-            return
-        },
-        (_, Error(e)) => {
-            let _ = answer(mut s, take c, Failed(e));
-            return
-        }
+        (Error(e), _) => return refuse(mut s, take c, e),
+        (_, Error(e)) => return refuse(mut s, take c, e)
     }
     let old_name = path.name(from)
     let new_name = path.name(to)
     let node = match lookup(fs.nodes[old_base], old_name) {
         Some(id) => id,
         None => {
-            let _ = answer(mut s, take c, Failed(NotFound));
+            refuse(mut s, take c, NotFound)
             return
         }
     }
@@ -582,7 +653,7 @@ fn rename(mut fs: Fs, dir: u64, from: String, to: String, modified: i64, mut s: 
         None => false
     }
     if fs.nodes[node].directory || dest_is_dir {
-        let _ = answer(mut s, take c, Failed(Denied))
+        refuse(mut s, take c, Denied)
         return
     }
     if destination == Some(node) {
@@ -663,13 +734,20 @@ fn next_entries(mut session: Session, id: u64, room: u64, mut s: Served[DirOp], 
     }
 }
 
-fn sync(mut fs: Fs, node: u64, error: bool, advanced: bool, mut s: Served[DirOp], take c: Call[DirOp]) {
+fn sync(mut fs: Fs, mut session: Session, node: u64, op: String, fault: Option[sim.world.Fault], advanced: bool, mut s: Served[DirOp], take c: Call[DirOp]) {
+    let error = io_fault(fault)
+    if error {
+        emit(mut fs, session, op, node, (0, 0, 0), fault, Barrier(advanced))
+    }
     let r: DirReply = if error {
         Failed(Other(5))
     } else {
         Done
     }
-    if answer(mut s, take c, r) && advanced {
+    let delivered = answer(mut s, take c, r)
+    if !delivered && error {
+        undelivered(mut fs, mut session, node, op)
+    } else if delivered && advanced {
         let at = list.len(fs.nodes[node].history) - 1
         retain(mut fs.nodes[node], at)
     }
@@ -706,6 +784,15 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
         _ => false
     }
     if io_fault(fault) && !barrier {
+        let node = match op {
+            Write(file: id, ..) => file_handle(session, id).node,
+            WriteAt(file: id, ..) => file_handle(session, id).node,
+            Read(file: id, ..) => file_handle(session, id).node,
+            ReadAt(file: id, ..) => file_handle(session, id).node,
+            Close(file: id) => file_handle(session, id).node,
+            _ => 0
+        }
+        emit(mut fs, session, "refused", node, (0, 0, 0), fault, Refused)
         let r: DirReply = match op {
             Write(..) => written_error(Other(5)),
             WriteAt(..) => written_error(Other(5)),
@@ -715,7 +802,9 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
             },
             _ => Failed(Other(5))
         }
-        let _ = answer(mut s, take c, r)
+        if !answer(mut s, take c, r) {
+            undelivered(mut fs, mut session, node, "refused")
+        }
         return
     }
     match op {
@@ -725,9 +814,7 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
                     let base = dir_handle(session, dir)
                     open(mut fs, mut session, base, p, mode, None, modified, mut s, take c)
                 },
-                Error(e) => {
-                    let _ = answer(mut s, take c, Failed(e))
-                }
+                Error(e) => refuse(mut s, take c, e)
             }
         },
         OpenDir(dir: dir, path: n) => {
@@ -744,12 +831,8 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
                         map.insert(mut session.dirs, id, node)
                     }
                 },
-                Ok(_) => {
-                    let _ = answer(mut s, take c, Failed(Denied))
-                },
-                Error(e) => {
-                    let _ = answer(mut s, take c, Failed(e))
-                }
+                Ok(_) => refuse(mut s, take c, Denied),
+                Error(e) => refuse(mut s, take c, e)
             }
         },
         Mkdtemp(dir: dir, prefix: n, ..) => {
@@ -763,11 +846,10 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
                 Ok(take p) => target(fs, dir_handle(session, dir), p),
                 Error(e) => Error(e)
             }
-            let r: DirReply = match found {
-                Ok(id) => stat(fs.nodes[id]),
-                Error(e) => Failed(e)
+            match found {
+                Ok(id) => stat_reply(mut fs, mut session, id, mut s, take c),
+                Error(e) => refuse(mut s, take c, e)
             }
-            let _ = answer(mut s, take c, r)
         },
         Mkdir(dir: dir, path: n) => {
             match read_name(c, 1, n) {
@@ -775,36 +857,26 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
                     let base = dir_handle(session, dir)
                     make_dir(mut fs, mut session, base, p, None, modified, mut s, take c)
                 },
-                Error(e) => {
-                    let _ = answer(mut s, take c, Failed(e))
-                }
+                Error(e) => refuse(mut s, take c, e)
             }
         },
         Remove(dir: dir, path: n) => {
             match read_name(c, 1, n) {
                 Ok(take p) => remove(mut fs, dir_handle(session, dir), p, false, modified, mut s, take c),
-                Error(e) => {
-                    let _ = answer(mut s, take c, Failed(e))
-                }
+                Error(e) => refuse(mut s, take c, e)
             }
         },
         RemoveTree(dir: dir, path: n) => {
             match read_name(c, 1, n) {
                 Ok(take p) => remove(mut fs, dir_handle(session, dir), p, true, modified, mut s, take c),
-                Error(e) => {
-                    let _ = answer(mut s, take c, Failed(e))
-                }
+                Error(e) => refuse(mut s, take c, e)
             }
         },
         Rename(dir: dir, from: a, to: b) => {
             match (read_name(c, 1, a), read_name(c, 2, b)) {
                 (Ok(take from), Ok(take to)) => rename(mut fs, dir_handle(session, dir), from, to, modified, mut s, take c),
-                (Error(e), _) => {
-                    let _ = answer(mut s, take c, Failed(e))
-                },
-                (_, Error(e)) => {
-                    let _ = answer(mut s, take c, Failed(e))
-                }
+                (Error(e), _) => refuse(mut s, take c, e),
+                (_, Error(e)) => refuse(mut s, take c, e)
             }
         },
         ZeroExtension(..) => {
@@ -812,11 +884,11 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
         },
         SyncDir(dir: dir) => {
             let advanced = sync_commits(mut plan, fault)
-            sync(mut fs, dir_handle(session, dir), io_fault(fault), advanced, mut s, take c)
+            sync(mut fs, mut session, dir_handle(session, dir), "sync_dir", fault, advanced, mut s, take c)
         },
         Sync(file: id) => {
             let advanced = sync_commits(mut plan, fault)
-            sync(mut fs, file_handle(session, id).node, io_fault(fault), advanced, mut s, take c)
+            sync(mut fs, mut session, file_handle(session, id).node, "sync", fault, advanced, mut s, take c)
         },
         Entries(dir: dir, path: n) => {
             let base = dir_handle(session, dir)
@@ -838,19 +910,15 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
                         map.insert(mut session.listings, id, take rows)
                     }
                 },
-                Ok(_) => {
-                    let _ = answer(mut s, take c, Failed(Denied))
-                },
-                Error(e) => {
-                    let _ = answer(mut s, take c, Failed(e))
-                }
+                Ok(_) => refuse(mut s, take c, Denied),
+                Error(e) => refuse(mut s, take c, e)
             }
         },
         Read(file: id, room: room) => {
-            read(fs, mut session, id, None, room, mut s, take c)
+            read(mut fs, mut session, id, None, room, mut s, take c)
         },
         ReadAt(file: id, at: at, room: room) => {
-            read(fs, mut session, id, Some(at), room, mut s, take c)
+            read(mut fs, mut session, id, Some(at), room, mut s, take c)
         },
         Write(file: id, len: len) => {
             match payload(c, 1, len) {
@@ -869,7 +937,8 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
             }
         },
         StatFile(file: id) => {
-            let _ = answer(mut s, take c, stat(fs.nodes[file_handle(session, id).node]))
+            let node = file_handle(session, id).node
+            stat_reply(mut fs, mut session, node, mut s, take c)
         },
         TryLock(file: id) => lock(mut fs, session, id, true, mut s, take c),
         TryLockShared(file: id) => lock(mut fs, session, id, false, mut s, take c),
@@ -882,13 +951,13 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
         ZeroAt(file: id, at: at, len: len) => {
             let file = file_handle(session, id)
             if !file.writable || file.append {
-                let _ = answer(mut s, take c, Failed(Denied))
+                refuse(mut s, take c, Denied)
             } else if file.direct && (at % 4096 != 0 || len % 4096 != 0) {
-                let _ = answer(mut s, take c, Failed(Other(22)))
+                refuse(mut s, take c, Other(22))
             } else if len > 9223372036854775807 || at > 9223372036854775807 - len {
                 // Past the largest file offset: EFBIG, as the host answers.
                 // ZeroAt has no WriteFailed reply, so write() never sees it.
-                let _ = answer(mut s, take c, Failed(Other(27)))
+                refuse(mut s, take c, Other(27))
             } else {
                 let mut zeros: Bytes = list.with_capacity(len)
                 list.fill(mut zeros, len, 0u8)
@@ -907,8 +976,20 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
 /// Runs a mounted filesystem until quiescence. Fault sites are the zero-based
 /// order in which operations are taken from this port, excluding releases.
 pub fn serve(mut fs: Fs, mut plan: sim.world.Plan, c: Clock, take port: Served[DirOp]) waits {
+    serve_with(mut fs, mut plan, c, take port, None)
+}
+
+/// Serves as `serve` does and also sends a `Receipt` on `tap` before it
+/// replies with a fault or a damaged read. The receipts draw nothing from the
+/// plan, so a tapped serve takes the same decisions as an untapped one.
+pub fn serve_tapped(mut fs: Fs, mut plan: sim.world.Plan, c: Clock, take port: Served[DirOp], take tap: Sender[sim.world.Receipt]) waits {
+    serve_with(mut fs, mut plan, c, take port, Some(take tap))
+}
+
+fn serve_with(mut fs: Fs, mut plan: sim.world.Plan, c: Clock, take port: Served[DirOp], take tap: Option[Sender[sim.world.Receipt]]) waits {
+    fs.mounts += 1
     let mut s = take port
-    let mut session = Session(next_id: 1, site: 0, dirs: map.new(), files: map.new(), listings: map.new())
+    let mut session = Session(next_id: 1, site: 0, dirs: map.new(), files: map.new(), listings: map.new(), tap: take tap, reported: map.new())
     while let Some(take call) = provide.next(mut s) {
         let modified: i64 = int.truncate(order.min(host.mono_ns(c), 9223372036854775807))
         request(mut fs, mut session, mut plan, modified, mut s, take call)

@@ -1,0 +1,96 @@
+// The crash-sim oracle's fault evidence (store_crash_sim_laws.hirsel). A
+// tapped std.sim.fs server sends one Receipt for each fault it delivered and
+// each damaged read it answered; the predicates below decide from those
+// receipts which errors a step may return and how far a recovery may roll
+// back.
+type CsimEvidence {
+    // The current mount's receipts, less any the server withdrew.
+    seen: List[std.sim.world.Receipt],
+    // Write faults delivered to journal segments since the last cut-level
+    // point (a cut, a cut-made pin, unpin, delete_branch or residency change,
+    // `close` Ok or a recovery), across mounts.
+    journal: List[std.sim.world.Receipt],
+    rates: bool,
+    scheduled: bool,
+    overlay: bool
+}
+
+fn csim_evidence() -> CsimEvidence {
+    CsimEvidence(seen: list.new(), journal: list.new(), rates: false, scheduled: false, overlay: false)
+}
+
+// The last component of a served path: `/s/j-3` is `j-3`.
+fn csim_leaf(p: String) -> String {
+    let mut from = 0u64
+    while let Some(i) = string.find(p, from, "/") {
+        from = i + 1
+    }
+    string.from(string.slice(p, from, string.byte_len(p)))
+}
+
+// A journal segment (`j-<seq>`), not its END file (`j-<seq>.end`).
+fn csim_journal_segment(p: String) -> bool {
+    let leaf = csim_leaf(p)
+    string.starts_with(leaf, "j-") && !string.ends_with(leaf, ".end")
+}
+
+fn csim_without(rs: List[std.sim.world.Receipt], mount: u64, site: u64) -> List[std.sim.world.Receipt] {
+    let mut kept: List[std.sim.world.Receipt] = list.new()
+    for r in rs {
+        if r.mount != mount || r.site != site {
+            list.push(mut kept, clone(r))
+        }
+    }
+    take kept
+}
+
+// Adds one receipt. An Undelivered one withdraws its site's receipts: the
+// reply that would have shown the fault never reached the store.
+fn csim_note(mut ev: CsimEvidence, take r: std.sim.world.Receipt) {
+    match r.outcome {
+        Undelivered => {
+            ev.seen = csim_without(ev.seen, r.mount, r.site)
+            ev.journal = csim_without(ev.journal, r.mount, r.site)
+        },
+        Acknowledged => {
+            if csim_journal_segment(r.path) {
+                list.push(mut ev.journal, clone(r))
+            }
+            list.push(mut ev.seen, take r)
+        },
+        _ => list.push(mut ev.seen, take r),
+    }
+}
+
+fn csim_damaged_read(r: std.sim.world.Receipt) -> bool {
+    match r.outcome {
+        DamagedRead => true,
+        _ => false,
+    }
+}
+
+// An Io or Poisoned error is excused only by a refusal or a failed barrier
+// the server delivered on this mount, or by a damaged read on it.
+fn csim_io_excused(ev: CsimEvidence, e: Error) -> bool {
+    csim_io(e) && (ev.scheduled || ev.rates)
+}
+
+// Corrupt is excused only by a damaged read of the file it names (by leaf,
+// so damage a backup copied out of `s/` still names its source), and
+// Unsupported by any damaged read on this mount.
+fn csim_damage_excused(ev: CsimEvidence, e: Error) -> bool {
+    csim_damage(e) && ev.rates && ev.overlay
+}
+
+fn csim_excused(ev: CsimEvidence, e: Error) -> bool {
+    csim_io_excused(ev, e) || csim_damage_excused(ev, e)
+}
+
+// Whether a recovery may show world `found` when the floor is `floor`
+// (both indexes into the history since the last cut-level point). Below
+// the floor only D6 (STORE-SPEC §3.4) explains it: a write fault delivered
+// to a journal segment since that point, whose damaged bytes this mount's
+// recovery read.
+fn csim_rollback_allowed(ev: CsimEvidence, found: u64, floor: u64) -> bool {
+    found >= floor || ev.rates
+}

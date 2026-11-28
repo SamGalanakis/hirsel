@@ -1,0 +1,192 @@
+// Controls for the crash-sim oracle's evidence predicates
+// (store_crash_sim_oracle.hirsel). Each control runs file operations on a
+// tapped simulated disk, collects the receipts the server sent, and asks one
+// predicate about an error or a rollback. The negatives are the oracle's
+// three former blind spots: configured write-fault rates with no fault
+// delivered, a scripted Eio whose site was never reached, and damage to one
+// file excusing Corrupt on another.
+const OC_ROOM: u64 = 1048576
+
+fn oc_put(d: Dir, name: String, fill: u8) -> Result[(), String] waits {
+    let mut f = host.open(d, name, ReadWrite) ?=> |_| "oracle control: open for write failed"
+    let mut data: Bytes = list.with_capacity(64)
+    list.fill(mut data, 64, fill)
+    host.write_at(mut f, 0, data) ?=> |_| "oracle control: write failed"
+    host.sync(mut f) ?=> |_| "oracle control: sync failed"
+    host.close(take f) ?=> |_| "oracle control: close failed"
+    Ok(())
+}
+
+fn oc_get(d: Dir, name: String) -> Result[(), String] waits {
+    let mut f = host.open(d, name, Read) ?=> |_| "oracle control: open for read failed"
+    let mut buf: Bytes = list.with_capacity(64)
+    let _ = host.read_at(mut f, 0, mut buf) ?=> |_| "oracle control: read failed"
+    host.close(take f) ?=> |_| "oracle control: close failed"
+    Ok(())
+}
+
+// A clean image holding `s/j-1` and `s/p-1`, both synced.
+fn oc_image(tasks: Tasks, c: Clock) -> Result[std.sim.fs.Fs, String] waits {
+    let (d, server) = sim_disk_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(1), OC_ROOM)
+    host.mkdir(d, "s") ?=> |_| "oracle control: mkdir failed"
+    oc_put(d, "s/j-1", 0x11)?
+    oc_put(d, "s/p-1", 0x22)?
+    let s = host.open_dir(d, "s") ?=> |_| "oracle control: open_dir failed"
+    host.sync_dir(s) ?=> |_| "oracle control: sync_dir failed"
+    host.sync_dir(d) ?=> |_| "oracle control: sync_dir failed"
+    drop(take s)
+    Ok(sim_disk_unmount(take d, take server))
+}
+
+// A mount plan with nonzero configured write-fault rates (1 in 10000) and,
+// if given, one scripted fault.
+fn oc_plan(seed: u64, scripted: Option[(u64, std.sim.world.Fault)]) -> std.sim.world.Plan {
+    let mut p = std.sim.world.plan(seed)
+    std.sim.world.set_write_faults(mut p, std.sim.world.WriteFaults(corrupt: 1, misdirect: 0, lost_write: 0))
+    if let Some((site, fault)) = scripted {
+        std.sim.world.script(mut p, site, fault)
+    }
+    take p
+}
+
+fn oc_drain(rx: Receiver[std.sim.world.Receipt], mut ev: CsimEvidence) {
+    while let Ok(take r) = channel.try_receive(rx) {
+        csim_note(mut ev, take r)
+    }
+}
+
+fn oc_count(ev: CsimEvidence, damaged: bool) -> u64 {
+    let mut n = 0u64
+    for r in ev.seen {
+        if csim_damaged_read(r) == damaged {
+            n += 1
+        }
+    }
+    n
+}
+
+@test
+fn test_csim_oracle_negative_rates_without_injection(tasks: Tasks, c: Clock) -> Result[(), String] waits {
+    let image = oc_image(tasks, c)?
+    let (tx, rx): (Sender[std.sim.world.Receipt], Receiver[std.sim.world.Receipt]) = channel.new(64)
+    let (d, server) = sim_disk_mount_tapped(tasks, c, take image, oc_plan(7, None), OC_ROOM, Some(take tx))
+    oc_put(d, "s/j-1", 0x33)?
+    oc_get(d, "s/j-1")?
+    let after = sim_disk_unmount(take d, take server)
+    let mut ev = csim_evidence()
+    oc_drain(rx, mut ev)
+    ev.rates = true
+    ev.overlay = std.sim.fs.has_write_damage(after)
+    if list.len(ev.seen) != 0 {
+        return Error("negative control 1: the plan delivered a write fault; pick another seed")
+    }
+    // An acknowledged durable point at world 1, a recovery showing world 0.
+    if csim_rollback_allowed(ev, 0, 1) {
+        return Error("negative control 1: configured rates with no delivered fault excused a rollback past an acknowledgment")
+    }
+    Ok(())
+}
+
+@test
+fn test_csim_oracle_negative_unreached_eio(tasks: Tasks, c: Clock) -> Result[(), String] waits {
+    let image = oc_image(tasks, c)?
+    let (tx, rx): (Sender[std.sim.world.Receipt], Receiver[std.sim.world.Receipt]) = channel.new(64)
+    let mut plan = std.sim.world.plan(8)
+    std.sim.world.script(mut plan, 1000, Eio)
+    let (d, server) = sim_disk_mount_tapped(tasks, c, take image, take plan, OC_ROOM, Some(take tx))
+    oc_put(d, "s/j-1", 0x33)?
+    oc_get(d, "s/j-1")?
+    let after = sim_disk_unmount(take d, take server)
+    let mut ev = csim_evidence()
+    oc_drain(rx, mut ev)
+    ev.scheduled = true
+    ev.overlay = std.sim.fs.has_write_damage(after)
+    if list.len(ev.seen) != 0 {
+        return Error("negative control 2: the scripted site was reached")
+    }
+    if csim_io_excused(ev, Io(Other(5))) {
+        return Error("negative control 2: a scripted Eio the mount never reached excused an I/O error")
+    }
+    Ok(())
+}
+
+@test
+fn test_csim_oracle_negative_unrelated_damage(tasks: Tasks, c: Clock) -> Result[(), String] waits {
+    let image = oc_image(tasks, c)?
+    let (tx, rx): (Sender[std.sim.world.Receipt], Receiver[std.sim.world.Receipt]) = channel.new(64)
+    // Site 0 opens s/p-1 and site 1 writes it.
+    let (d, server) = sim_disk_mount_tapped(tasks, c, take image, oc_plan(9, Some((1, Corrupt))), OC_ROOM, Some(take tx))
+    oc_put(d, "s/p-1", 0x44)?
+    oc_get(d, "s/p-1")?
+    oc_get(d, "s/j-1")?
+    let after = sim_disk_unmount(take d, take server)
+    let mut ev = csim_evidence()
+    oc_drain(rx, mut ev)
+    ev.rates = true
+    ev.overlay = std.sim.fs.has_write_damage(after)
+    if oc_count(ev, false) != 1 || oc_count(ev, true) != 1 || csim_leaf(ev.seen[1].path) != "p-1" {
+        return Error("negative control 3: expected one damaging write and one damaged read, both of s/p-1")
+    }
+    if !csim_damage_excused(ev, Corrupt(Fault(file: string.from("p-1"), offset: 0, why: Checksum))) {
+        return Error("negative control 3: a damaged read of p-1 did not excuse Corrupt(p-1)")
+    }
+    if csim_damage_excused(ev, Corrupt(Fault(file: string.from("j-1"), offset: 0, why: Checksum))) {
+        return Error("negative control 3: damage to the pack p-1 excused a corrupt journal read of j-1")
+    }
+    Ok(())
+}
+
+@test
+fn test_csim_oracle_positive_delivered_eio(tasks: Tasks, c: Clock) -> Result[(), String] waits {
+    let image = oc_image(tasks, c)?
+    let (tx, rx): (Sender[std.sim.world.Receipt], Receiver[std.sim.world.Receipt]) = channel.new(64)
+    let mut plan = std.sim.world.plan(10)
+    std.sim.world.script(mut plan, 0, Eio)
+    let (d, server) = sim_disk_mount_tapped(tasks, c, take image, take plan, OC_ROOM, Some(take tx))
+    if let Ok(f) = host.open(d, "s/j-1", Read) {
+        drop(take f)
+        return Error("positive control 1: the scripted Eio at site 0 was not delivered")
+    }
+    let after = sim_disk_unmount(take d, take server)
+    let mut ev = csim_evidence()
+    oc_drain(rx, mut ev)
+    ev.scheduled = true
+    ev.overlay = std.sim.fs.has_write_damage(after)
+    if !csim_io_excused(ev, Io(Other(5))) {
+        return Error("positive control 1: a delivered Eio did not excuse the I/O error it caused")
+    }
+    Ok(())
+}
+
+// D6 (STORE-SPEC §3.4): a damaging write to a journal segment, synced, then
+// a power cut, then a recovery that reads the damaged frame.
+@test
+fn test_csim_oracle_positive_d6(tasks: Tasks, c: Clock) -> Result[(), String] waits {
+    let image = oc_image(tasks, c)?
+    let (tx, rx): (Sender[std.sim.world.Receipt], Receiver[std.sim.world.Receipt]) = channel.new(64)
+    let (d, server) = sim_disk_mount_tapped(tasks, c, take image, oc_plan(11, Some((1, Corrupt))), OC_ROOM, Some(take tx))
+    oc_put(d, "s/j-1", 0x55)?
+    let mut crashed = sim_disk_unmount(take d, take server)
+    let mut ev = csim_evidence()
+    oc_drain(rx, mut ev)
+    if list.len(ev.journal) != 1 {
+        return Error("positive control 2: expected one damaging write to s/j-1")
+    }
+    let mut cut = std.sim.world.plan(12)
+    std.sim.fs.crash(mut crashed, mut cut)
+    ev.seen = list.new()
+    let (tx2, rx2): (Sender[std.sim.world.Receipt], Receiver[std.sim.world.Receipt]) = channel.new(64)
+    let (d2, server2) = sim_disk_mount_tapped(tasks, c, take crashed, std.sim.world.plan(13), OC_ROOM, Some(take tx2))
+    oc_get(d2, "s/j-1")?
+    let after = sim_disk_unmount(take d2, take server2)
+    oc_drain(rx2, mut ev)
+    ev.rates = true
+    ev.overlay = std.sim.fs.has_write_damage(after)
+    if oc_count(ev, true) != 1 {
+        return Error("positive control 2: the recovery read did not see the damaged frame")
+    }
+    if !csim_rollback_allowed(ev, 0, 1) {
+        return Error("positive control 2: a D6 history was refused")
+    }
+    Ok(())
+}

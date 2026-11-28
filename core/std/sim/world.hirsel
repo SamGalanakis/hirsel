@@ -32,6 +32,34 @@ pub type Script: send {
 /// faults acknowledge the write while changing the bytes the disk presents.
 pub type Fault = Eio | SyncUnknown | Corrupt | Misdirect | LostWrite
 
+/// What a tapped std.sim.fs server did at one fault or one damaged read, for
+/// test oracles; nothing in the provider reads it back. `mount` counts the
+/// image's serves and `site` is the request's fault site in that serve. `node`
+/// is the stable inode and `path` its name when served (`/s/j-1`), `[at, at +
+/// len)` the requested range and `landed` where a write's bytes went.
+/// `sequence` (the image's operation count) and `crashes` order it against
+/// barriers and power cuts.
+pub type Receipt: send {
+    mount: u64,
+    site: u64,
+    op: String,
+    node: u64,
+    path: String,
+    at: u64,
+    len: u64,
+    landed: u64,
+    fault: Option[Fault],
+    outcome: Outcome,
+    sequence: u64,
+    crashes: u64
+}
+
+/// `Refused`: the reply was EIO. `Barrier`: a failed sync, true if it took
+/// effect. `Acknowledged`: a write reported Done but changed other bytes.
+/// `DamagedRead`: a read or stat answered differently from the written bytes.
+/// `Undelivered`: the reply for that site never reached the caller.
+pub type Outcome = Refused | Barrier(bool) | Acknowledged | DamagedRead | Undelivered
+
 /// Mutually exclusive chances per 10,000 nonempty filesystem writes.
 pub type WriteFaults: send {
     corrupt: u64,

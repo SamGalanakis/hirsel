@@ -216,7 +216,7 @@ fn follower_deadline_put(mut db: Db, rows: Table[u64, Bytes], row: u64, take val
 fn follower_deadline_trial(r: Random, tasks: Tasks, on_read: bool) -> Result[(), Error] waits {
     let (time, take hand) = provide.clock(0, 1369353600000)
     let (directory, take disk_port) = provide.dir(bytes 2097152)
-    let filesystem = task.spawn(tasks, bytes 8388608, SimDiskMount(image: std.sim.fs.new(), plan: std.sim.world.plan(3449), clock: time, port: take disk_port), sim_disk_serve)
+    let filesystem = task.spawn(tasks, bytes 8388608, SimDiskMount(image: std.sim.fs.new(), plan: std.sim.world.plan(3449), clock: time, port: take disk_port, tap: None), sim_disk_serve)
     let mut options = journal_crash_options()
     options.checkpoint_bytes = 1048576
     options.journal_limit = FRAME_LIMIT + options.checkpoint_bytes

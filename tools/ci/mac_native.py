@@ -146,6 +146,7 @@ def seed_dev_cache(compiler, cache, env):
                  "--grant", "Net=Listen 127.0.0.1/32 0-65535", "--output", work / "place"],
                 check=True, cwd=work, env=dict(env, XDG_CACHE_HOME=str(cache)),
             )
+        shutil.move(dev / "compiler", Path(cache) / "compiler")
 
 
 def driver_inventory(harness, env, *flags):

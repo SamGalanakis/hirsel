@@ -194,7 +194,7 @@ pub(super) fn glue_emitter<'a>(
         caller_site_owner: int(0),
         debug_location: None,
         anchor: None,
-        relocatable_sites: items.track_site_owner,
+        relocatable_sites: false,
         fixed_sites: &[],
         test_hooks: cfg!(test),
         value_slots: Vec::new(),

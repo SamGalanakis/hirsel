@@ -50,6 +50,7 @@ impl Function<'_, '_, '_> {
         outputs: &mut [Value],
     ) -> Result<Option<usize>, Error> {
         let count = match op {
+            RtOp::ResourceOrigin { .. } if !self.input.track_pack_owners => 0,
             RtOp::ResourceOrigin { item } => {
                 let recipe = self.calls.reference(
                     self.object,

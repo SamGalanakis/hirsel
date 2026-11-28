@@ -287,8 +287,6 @@ struct Items {
     release_sites: Option<ReleaseSites>,
     /// The types ordinary glue cleans with `core_direct_T` (cleanup::direct_types).
     direct: BTreeSet<usize>,
-    /// Whether this compilation tracks `context.site_owner` (`PACK-9.7`).
-    track_site_owner: bool,
 }
 #[derive(Default)]
 struct ReleaseSites {
@@ -316,7 +314,6 @@ impl Items {
             pending: Default::default(),
             release_sites: None,
             direct: BTreeSet::new(),
-            track_site_owner: false,
         }
     }
     fn is_versioned(&self, function: FuncId) -> bool {
@@ -486,7 +483,6 @@ fn emit_prepared(
         });
     }
     items.release_sites = release_sites.take();
-    items.track_site_owner = source.relocatable_sites;
     let batch_steps = source.batch_steps;
     // Shared nodes: !0 weights a likely branch, !1 is the invariant.load list.
     sink.metadata(

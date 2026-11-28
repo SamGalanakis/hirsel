@@ -158,13 +158,20 @@ pub(super) fn store_site_owner(b: &mut FunctionBuilder<'_>, context: Value, owne
     );
 }
 
-pub(super) fn worklist_site(b: &mut FunctionBuilder<'_>, list: Value) -> (Value, Value) {
+pub(super) fn worklist_site(
+    b: &mut FunctionBuilder<'_>,
+    list: Value,
+    track_owner: bool,
+) -> (Value, Value) {
     let site = b.ins().load(
         types::I64,
         MemFlagsData::trusted(),
         list,
         memory_layout::WORKLIST_SITE as i32,
     );
+    if !track_owner {
+        return (site, b.ins().iconst(types::I64, 0));
+    }
     let owner = b.ins().load(
         types::I64,
         MemFlagsData::trusted(),
@@ -189,41 +196,30 @@ impl Function<'_, '_, '_> {
             .anchor
             .filter(|a| !self.input.items[a.item.index()].package_is("core", "1"))
         else {
-            if c::source::inherits_site(self.instance) {
-                self.b.ins().store(
-                    MemFlagsData::trusted(),
-                    self.caller_site_owner,
-                    self.context,
-                    memory_layout::CONTEXT_SITE_OWNER as i32,
-                );
-                return Ok(self.caller_site);
+            let site = if c::source::inherits_site(self.instance) {
+                self.caller_site
+            } else {
+                self.b.ins().iconst(types::I64, 0)
+            };
+            if self.input.track_pack_owners {
+                store_site_owner(&mut self.b, self.context, self.caller_site_owner);
             }
-            let zero = self.b.ins().iconst(types::I64, 0);
-            self.b.ins().store(
-                MemFlagsData::trusted(),
-                zero,
-                self.context,
-                memory_layout::CONTEXT_SITE_OWNER as i32,
-            );
-            return Ok(zero);
+            return Ok(site);
         };
-        let owner_data = self.site_constants.borrow_mut().cause_owner(self.object)?;
-        let owner_global = *self
-            .cause_owner_reference
-            .get_or_insert_with(|| self.object.declare_data_in_func(owner_data, self.b.func));
-        let owner_slot = self.b.ins().symbol_value(types::I64, owner_global);
-        let owner = self.b.ins().load(
-            types::I64,
-            MemFlagsData::trusted().with_readonly(),
-            owner_slot,
-            0,
-        );
-        self.b.ins().store(
-            MemFlagsData::trusted(),
-            owner,
-            self.context,
-            memory_layout::CONTEXT_SITE_OWNER as i32,
-        );
+        if self.input.track_pack_owners {
+            let owner_data = self.site_constants.borrow_mut().cause_owner(self.object)?;
+            let owner_global = *self
+                .cause_owner_reference
+                .get_or_insert_with(|| self.object.declare_data_in_func(owner_data, self.b.func));
+            let owner_slot = self.b.ins().symbol_value(types::I64, owner_global);
+            let owner = self.b.ins().load(
+                types::I64,
+                MemFlagsData::trusted().with_readonly(),
+                owner_slot,
+                0,
+            );
+            store_site_owner(&mut self.b, self.context, owner);
+        }
         let mut symbols = self.site_symbols.borrow_mut();
         let data = if let Some(&data) = symbols.get(&anchor.item) {
             data

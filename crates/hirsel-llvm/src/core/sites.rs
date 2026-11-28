@@ -14,7 +14,7 @@ impl FunctionEmitter<'_> {
     /// Record the site owner (`*const CauseData`, or null for host/immortal) into
     /// `context.site_owner` before a call or raise that supplies a site ordinal.
     pub(super) fn store_site_owner(&mut self, own: bool) {
-        if !self.relocatable_sites {
+        if !self.module.track_pack_owners {
             return;
         }
         let owner = if own {
@@ -45,7 +45,7 @@ impl FunctionEmitter<'_> {
     /// Capture the caller's site owner at entry to a function or glue that inherits
     /// its caller's site (`PACK-9.7`).
     pub(super) fn capture_caller_site_owner(&mut self) {
-        if !self.relocatable_sites {
+        if !self.module.track_pack_owners {
             return;
         }
         let slot = self.offset(&CONTEXT, memory_layout::CONTEXT_SITE_OWNER as u64);
@@ -57,7 +57,7 @@ impl FunctionEmitter<'_> {
         let list = Value::Local(Local::WORKLIST);
         let at = self.offset(&list, memory_layout::WORKLIST_SITE as u64);
         self.caller_site = self.load(&Type::I64, &at, 8);
-        if self.relocatable_sites {
+        if self.module.track_pack_owners {
             let owner_at = self.offset(&list, memory_layout::WORKLIST_SITE_OWNER as u64);
             self.caller_site_owner = self.load(&Type::I64, &owner_at, 8);
         }

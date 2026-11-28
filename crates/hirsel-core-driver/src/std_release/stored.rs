@@ -105,3 +105,12 @@ pub(super) fn code_name(key: ContentHash, i: usize) -> io::Result<ContentHash> {
 pub(super) fn lent_name(key: ContentHash) -> io::Result<ContentHash> {
     crate::native::key("hirsel.core-std-lent.v1", &key)
 }
+
+/// Where `std-product` publishes its image's prebuilt release std, inside
+/// the image's store.
+pub(crate) const PREBUILT: &str = "release-std";
+
+/// The name the key of the side prebuilt for `kin` is stored under.
+pub(super) fn prebuilt_name(kin: ContentHash) -> io::Result<ContentHash> {
+    crate::native::key("hirsel.core-std-prebuilt.v1", &kin)
+}

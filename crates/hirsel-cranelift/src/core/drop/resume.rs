@@ -729,3 +729,14 @@ impl Glue<'_, '_, '_> {
         Ok(())
     }
 }
+
+impl Glue<'_, '_, '_> {
+    pub(super) fn store_caller_site_owner(&mut self) {
+        if self.tables.input.track_pack_owners {
+            sites::store_site_owner(&mut self.b, self.ctx, self.caller_site_owner);
+        }
+    }
+    pub(super) fn icon(&mut self, n: u64) -> Value {
+        self.b.ins().iconst(types::I64, n as i64)
+    }
+}

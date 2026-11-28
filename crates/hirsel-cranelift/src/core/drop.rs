@@ -466,7 +466,7 @@ impl Glues {
         let args = b.block_params(entry).to_vec();
         let failed = b.ins().iconst(types::I8, 0);
         let (caller_site, caller_site_owner) = if resource {
-            sites::worklist_site(&mut b, args[3])
+            sites::worklist_site(&mut b, args[3], tables.input.track_pack_owners)
         } else {
             (b.ins().iconst(types::I64, 0), b.ins().iconst(types::I64, 0))
         };
@@ -520,7 +520,8 @@ impl Glues {
         b.switch_to_block(entry);
         let args = b.block_params(entry).to_vec();
         let failed = b.ins().iconst(types::I8, 0);
-        let (caller_site, caller_site_owner) = sites::worklist_site(&mut b, args[3]);
+        let (caller_site, caller_site_owner) =
+            sites::worklist_site(&mut b, args[3], tables.input.track_pack_owners);
         let mut g = Glue {
             b,
             object,
@@ -569,9 +570,12 @@ impl Glues {
         let args = b.block_params(entry).to_vec();
         let failed = b.ins().iconst(types::I8, 0);
         let (caller_site, caller_site_owner) = if resume {
-            sites::worklist_site(&mut b, args[3])
+            sites::worklist_site(&mut b, args[3], tables.input.track_pack_owners)
         } else {
-            (args[2], sites::context_site_owner(&mut b, args[0]))
+            (
+                args[2],
+                sites::caller_site_owner(&mut b, tables.input.track_pack_owners, args[0]),
+            )
         };
         let mut g = Glue {
             b,
@@ -665,12 +669,6 @@ pub(super) struct Glue<'a, 'b, 'c> {
     list: Option<Value>,
 }
 impl Glue<'_, '_, '_> {
-    fn store_caller_site_owner(&mut self) {
-        sites::store_site_owner(&mut self.b, self.ctx, self.caller_site_owner);
-    }
-    fn icon(&mut self, n: u64) -> Value {
-        self.b.ins().iconst(types::I64, n as i64)
-    }
     fn at(&mut self, base: Value, off: u64) -> Value {
         self.b.ins().iadd_imm_s(base, off as i64)
     }

@@ -739,24 +739,7 @@ pub enum Inst {
     },
 }
 
-/// The largest frame, in bytes of slots, a body may have and still leave out its
-/// `stack_check` (FAIL-17): a leaf of at most this much fits in the engine reserve.
-pub const STACK_LEAF_SLOT_BYTES: u64 = 4096;
-
-/// A body whose `stack_check` an engine may skip: it makes no call of user code
-/// or a callable value, so its frame is the last one on the stack, and that frame
-/// is small enough for the engine reserve. The answer depends on the body alone,
-/// so every engine and every run of a build agree on it.
-pub fn stack_check_elided(body: &Body, slot_bytes: impl Fn(PlaceTy) -> u64) -> bool {
-    body.calls
-        .iter()
-        .all(|c| matches!(c.callee, Callee::Runtime(_)))
-        && body
-            .slots
-            .iter()
-            .try_fold(0u64, |sum, &s| sum.checked_add(slot_bytes(s)))
-            .is_some_and(|bytes| bytes <= STACK_LEAF_SLOT_BYTES)
-}
+pub use flow::{STACK_LEAF_SLOT_BYTES, stack_check_elided};
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum LayoutQuery {
@@ -1156,6 +1139,10 @@ pub struct Module {
     /// True when emitting a loadable PACK-2 `.hirsel-mod` unit rather than a linked executable.
     #[serde(skip)]
     pub pack_module: bool,
+    /// Native code that can exchange resources and failure sites with a loaded
+    /// image (loadable modules and embeddable static libraries).
+    #[serde(skip)]
+    pub track_pack_owners: bool,
     /// Flag body sites from these packages in a coverage build ([`crate::coverage`]).
     #[serde(skip)]
     pub coverage: Option<crate::coverage::Scope>,

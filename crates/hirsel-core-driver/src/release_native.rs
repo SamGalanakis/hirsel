@@ -394,6 +394,7 @@ pub(super) fn emit_release_image(
 ) -> Result<Emitted, NativeStop> {
     joined.external_call_sites = !options.foreign_grants.is_empty();
     joined.law_observation = options.recording;
+    joined.track_pack_owners = options.output_kind != hirsel_core_layout::OutputKind::Executable;
     joined.store_teardown = options.store_teardown;
     joined.coverage = options.coverage.clone();
     let _context = hirsel_guard::process_memory_context(format!(
@@ -503,6 +504,7 @@ pub(super) fn emit_release_image(
         runtime,
         instance,
         closed_executable,
+        options.output_kind,
         std_key,
         lent_key,
         &refs,

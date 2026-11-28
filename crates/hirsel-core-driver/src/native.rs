@@ -174,6 +174,7 @@ fn emit_unit(
     let mut shared = module.clone();
     shared.law_observation = options.recording;
     shared.store_teardown = options.store_teardown;
+    shared.track_pack_owners = options.output_kind != OutputKind::Executable;
     shared.pack_module = options.output_kind == OutputKind::Module;
     shared.coverage = options.coverage.clone();
     shared.external_call_sites = !options.foreign_grants.is_empty();
@@ -242,35 +243,7 @@ fn emit_unit(
     }
 }
 
-/// The environment every development object key starts with, encoded: the
-/// object schema, the compiler, the runtime ABI, the engine library, the
-/// target, the backend and the emission settings.
-pub(crate) fn environment(options: &NativeOptions, runtime: ContentHash) -> io::Result<Vec<u8>> {
-    let mut environment = encode(&(
-        crate::native_object::SCHEMA,
-        compiler_identity(),
-        runtime,
-        engine_library(options.backend)?,
-        &options.target,
-        options.backend,
-        options.optimize,
-        options.recording,
-        options.logical_charge_report.is_some(),
-        !options.foreign_grants.is_empty(),
-        matches!(options.backend, Backend::Llvm) && !hirsel_llvm_lazy::core::facts_enabled(),
-    ))?;
-    // Coverage and store-teardown switches append their tags only when set.
-    if let Some(scope) = &options.coverage {
-        environment.extend(encode(&(hirsel_core_ir::coverage::KEY_TAG, scope))?);
-    }
-    if options.store_teardown {
-        environment.extend(encode(&"hirsel.store-teardown.v1")?);
-    }
-    if options.output_kind == OutputKind::Module {
-        environment.extend(encode(&"hirsel.pack-module.v1")?);
-    }
-    Ok(environment)
-}
+pub(crate) use options::environment;
 /// `domain` over the encoded `(environment, rest)`: a tuple encodes as its
 /// fields in order.
 fn environment_key(

@@ -238,7 +238,8 @@ pub(super) fn emit(
     };
     let caller_site_owner = sites::caller_site_owner(
         &mut b,
-        c::source::inherits_site(&input.instances[function.instance.index()]),
+        input.track_pack_owners
+            && c::source::inherits_site(&input.instances[function.instance.index()]),
         context,
     );
     let record_dest = signature

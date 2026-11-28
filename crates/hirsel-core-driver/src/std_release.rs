@@ -241,14 +241,8 @@ fn prebuilt_side(
     side(&store, key, record, 0).map(Some)
 }
 
-/// Where `std-product` publishes its image's prebuilt release std, inside
-/// the image's store.
-pub(crate) const PREBUILT: &str = "release-std";
-
-/// The name the key of the side prebuilt for `kin` is stored under.
-fn prebuilt_name(kin: ContentHash) -> io::Result<ContentHash> {
-    crate::native::key("hirsel.core-std-prebuilt.v1", &kin)
-}
+pub(crate) use stored::PREBUILT;
+use stored::prebuilt_name;
 
 impl CheckProduct {
     /// The library image's plain roots: a plain identity of each non-generic
@@ -418,6 +412,7 @@ impl PrebuiltStd {
             target: &self.target,
             observe_charge: false,
             recording: false,
+            track_pack_owners: false,
         };
         let kin = generator.kin()?;
         let (_, key, _, _) = lower(&generator, kin, self.units, &self.store, self.modules, None)?;
@@ -579,6 +574,7 @@ fn lower_module(
         .cloned()
         .ok_or_else(|| NativeStop::Entry("the release std has no root".into()))?;
     let (mut module, _) = release::join_modules(&first, &reached, modules, |_| FuncId(0))?;
+    module.track_pack_owners = options.track_pack_owners;
     module.law_observation = options.recording;
     // The joined module holds every body LLVM lowers; the per-unit modules
     // are not read again, so they leave before the optimiser runs.
@@ -709,6 +705,7 @@ struct Generator<'a> {
     target: &'a str,
     observe_charge: bool,
     recording: bool,
+    track_pack_owners: bool,
 }
 
 /// The instance limit every release std is walked and lowered under: the
@@ -721,6 +718,7 @@ impl<'a> Generator<'a> {
             target: &options.target,
             observe_charge: options.logical_charge_report.is_some(),
             recording: options.recording,
+            track_pack_owners: options.output_kind != hirsel_core_layout::OutputKind::Executable,
         }
     }
 
@@ -739,6 +737,7 @@ impl<'a> Generator<'a> {
                 self.target,
                 self.observe_charge,
                 self.recording,
+                self.track_pack_owners,
                 !hirsel_llvm_lazy::core::facts_enabled(),
             ),
         )

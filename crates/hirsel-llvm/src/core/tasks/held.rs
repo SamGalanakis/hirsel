@@ -21,6 +21,7 @@ impl FunctionEmitter<'_> {
         args: &[Value],
     ) -> Option<Vec<Value>> {
         let out = match op {
+            RtOp::ResourceOrigin { .. } if !self.module.track_pack_owners => vec![],
             RtOp::ResourceOrigin { item } => self.native_call(
                 "hirsel_core_resource_origin",
                 &[],

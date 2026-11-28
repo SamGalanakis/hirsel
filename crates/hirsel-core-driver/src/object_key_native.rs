@@ -24,13 +24,16 @@ fn objects_of(
         .into_iter()
         .map(|o| {
             let debug = match (&o.debug, &o.debug_record) {
-                (None, Some((store, address))) => {
-                    crate::native_object::load_debug(store, *address).unwrap().unwrap()
-                }
+                (None, Some((store, address))) => crate::native_object::load_debug(store, *address)
+                    .unwrap()
+                    .unwrap(),
                 (debug, _) => (**debug.as_ref().unwrap()).clone(),
             };
             let debug = encode(&debug).unwrap();
-            (format!("{:?}", o.instance), (o.compiled, std::fs::read(&o.path).unwrap(), debug))
+            (
+                format!("{:?}", o.instance),
+                (o.compiled, std::fs::read(&o.path).unwrap(), debug),
+            )
         })
         .collect()
 }
@@ -120,12 +123,22 @@ fn dev_objects_served_from_the_store_are_fresh_emissions() {
             }
             let fresh = fresh_objects(SHAPE, dir.path(), &options(debug_lines), n);
             assert_eq!(without_compiled(&objects), fresh, "{case}");
-            generic = objects.keys().find(|i| i.contains("name: \"id\"")).unwrap().clone();
-            assert!(objects.keys().any(|i| i.contains("name: \"get\"")), "{case}");
+            generic = objects
+                .keys()
+                .find(|i| i.contains("name: \"id\""))
+                .unwrap()
+                .clone();
+            assert!(
+                objects.keys().any(|i| i.contains("name: \"get\"")),
+                "{case}"
+            );
         }
         let edited = objects_of(&check(&shaped), &options(false));
         let reshaped = edited.keys().find(|i| i.contains("name: \"id\"")).unwrap();
-        assert_ne!(reshaped, &generic, "{backend:?}: the reshaped generic keeps its identity");
+        assert_ne!(
+            reshaped, &generic,
+            "{backend:?}: the reshaped generic keeps its identity"
+        );
         assert!(
             compiled_names(&edited).contains(&reshaped.as_str()),
             "{backend:?}: the reshaped generic misses"
@@ -244,7 +257,11 @@ fn llvm_facts_setting_misses_and_hits_across_processes() {
             child.env("HIRSEL_LLVM_NO_FACTS", "1");
         }
         let output = child.output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
         let objects: BTreeMap<String, (bool, Vec<u8>, Vec<u8>)> =
             decode(&std::fs::read(dir.path().join(format!("objects-{n}"))).unwrap()).unwrap();
         runs.push(objects);
@@ -287,7 +304,12 @@ fn a_body_record_with_another_module_part_misses_its_object() {
             .unwrap()
             .live(&path)
             .unwrap();
-        let head = store.get_body_head(record).unwrap().unwrap().head().to_vec();
+        let head = store
+            .get_body_head(record)
+            .unwrap()
+            .unwrap()
+            .head()
+            .to_vec();
         let (forged, part, bytes) = Store::frame_body(&head, &other);
         assert_ne!(part, check(SHAPE, "store").definitions[&path].ir_hash());
         store.write_framed(forged, &bytes).unwrap();
@@ -337,35 +359,79 @@ fn a_new_caller_of_shared_glue_leaves_every_existing_object_a_hit() {
         "fn a() -> u64 {{\n  let m: Map[String, u64] = map.new()\n  match map.get(m, \"k\") {{ Some(v) => v, None => 0 }}\n}}\n{b}pub fn main() -> Result[(), Exit] {{ if b() + a() == 1 {{ Ok(()) }} else {{ Error(Exit(status: 3)) }} }}\n"
     );
     for backend in [Backend::Cranelift, Backend::Llvm] {
-    let dir = tempfile::tempdir().unwrap();
-    let options = native_options(backend, dir.path());
-    let entry = DefPath::from_full("app@1/main/main").unwrap();
-    let check = |source: &str| {
-        let product = Driver::default()
-            .check(
-                object_request(source, dir.path(), "store"),
-                &mut Meter::new(false),
-            )
-            .unwrap();
-        assert!(product.accepted(), "{:?}", product.diagnostics);
-        product
-    };
-    let cold = check(&base);
-    run_clean(&cold.build(&entry, &options).unwrap().executable, 0);
-    let first = objects_of(&cold, &options);
-    assert!(first.keys().any(|i| i.contains("name: \"$key_equal\"")), "{backend:?}: {first:?}");
-    let product = check(&both);
-    let edited = objects_of(&product, &options);
-    // `b`'s source is unchanged, but `main`, which calls `a`, is edited.
-    for (instance, (compiled, _, _)) in &edited {
-        if first.contains_key(instance) && !instance.contains("name: \"main\"") {
-            assert!(!compiled, "{backend:?}: {instance} misses");
+        let dir = tempfile::tempdir().unwrap();
+        let options = native_options(backend, dir.path());
+        let entry = DefPath::from_full("app@1/main/main").unwrap();
+        let check = |source: &str| {
+            let product = Driver::default()
+                .check(
+                    object_request(source, dir.path(), "store"),
+                    &mut Meter::new(false),
+                )
+                .unwrap();
+            assert!(product.accepted(), "{:?}", product.diagnostics);
+            product
+        };
+        let cold = check(&base);
+        run_clean(&cold.build(&entry, &options).unwrap().executable, 0);
+        let first = objects_of(&cold, &options);
+        assert!(
+            first.keys().any(|i| i.contains("name: \"$key_equal\"")),
+            "{backend:?}: {first:?}"
+        );
+        let product = check(&both);
+        let edited = objects_of(&product, &options);
+        // `b`'s source is unchanged, but `main`, which calls `a`, is edited.
+        for (instance, (compiled, _, _)) in &edited {
+            if first.contains_key(instance) && !instance.contains("name: \"main\"") {
+                assert!(!compiled, "{backend:?}: {instance} misses");
+            }
         }
+        assert_eq!(
+            without_compiled(&edited),
+            fresh_objects(&both, dir.path(), &options, 0)
+        );
+        run_clean(&product.build(&entry, &options).unwrap().executable, 0);
     }
-    assert_eq!(
-        without_compiled(&edited),
-        fresh_objects(&both, dir.path(), &options, 0)
-    );
-    run_clean(&product.build(&entry, &options).unwrap().executable, 0);
+}
+
+#[test]
+fn standalone_resource_construction_omits_pack_owner_relocations() {
+    use object::{Object as _, ObjectSymbol as _};
+    let source = r#"
+resource type Guard { n: u64 } drop(g) { if g.n == 0 { fail("empty") } }
+pub fn main() -> Result[(), Exit] {
+    let g = result.unwrap(Guard(n: 9))
+    Ok(())
+}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let product = Driver::default()
+        .check(
+            object_request(source, dir.path(), "store"),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    assert!(product.accepted(), "{:?}", product.diagnostics);
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let objects = objects_of(&product, &native_options(backend, dir.path()));
+        assert!(!objects.is_empty());
+        let mut forbidden = std::collections::BTreeSet::new();
+        for (_, bytes, _) in objects.values() {
+            let obj = object::File::parse(bytes.as_slice()).unwrap();
+            for symbol in obj.symbols().filter(|s| s.is_undefined()) {
+                let name = symbol.name().unwrap().trim_start_matches('_');
+                if matches!(
+                    name,
+                    "hirsel_core_cause_owner" | "hirsel_core_resource_origin"
+                ) {
+                    forbidden.insert(name);
+                }
+            }
+        }
+        assert!(
+            forbidden.is_empty(),
+            "{backend:?} standalone imports {forbidden:?}"
+        );
     }
 }

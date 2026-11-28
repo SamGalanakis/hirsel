@@ -107,3 +107,37 @@ jobs:
         run: |
           target/release/hirsel new "$RUNNER_TEMP/cargo-smoke"
           target/release/hirsel check "$RUNNER_TEMP/cargo-smoke" --libraries core
+
+  proofs:
+    name: CoreIR ownership proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      ELAN_VERSION: 4.2.4
+      ELAN_SHA256: 42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Cache the Lean toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: linux-ci-lean-v1-${{ runner.arch }}-elan-${{ env.ELAN_VERSION }}-${{ hashFiles('proofs/core-ir/lean-toolchain') }}
+      - name: Install elan
+        run: |
+          if [[ ! -x "$HOME/.elan/bin/elan" ]]; then
+            curl --proto '=https' --tlsv1.2 -sSfL -o "$RUNNER_TEMP/elan.tar.gz" \
+              "https://github.com/leanprover/elan/releases/download/v$ELAN_VERSION/elan-x86_64-unknown-linux-gnu.tar.gz"
+            echo "$ELAN_SHA256  $RUNNER_TEMP/elan.tar.gz" | sha256sum --check
+            tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP"
+            "$RUNNER_TEMP/elan-init" -y --default-toolchain none --no-modify-path
+          fi
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      # elan installs the toolchain `proofs/core-ir/lean-toolchain` names on first use.
+      - name: Check the ownership soundness proof
+        working-directory: proofs/core-ir
+        run: lake build

@@ -1,4 +1,5 @@
-use super::own::{Act, F, Own, T, Z};
+use super::own::{Act, D, F, Own, T, Z, begun, dropped, halves};
+use super::own_names::{Pl, overlap, ptr_args};
 use super::*;
 use crate::decode::Debit;
 
@@ -35,7 +36,16 @@ impl Own<'_> {
             work.push(0usize);
             queued[0] = true;
         }
+        let mut seen = Vec::new();
+        scratch.reserve(&mut seen, self.tracked.len())?;
         let mut acts = Vec::new();
+        let max_args = b
+            .calls
+            .iter()
+            .map(|site| site.args.len as usize)
+            .max()
+            .unwrap_or(0);
+        scratch.reserve(&mut acts, (max_args + 1).max(3))?;
         let mut now = Vec::new();
         scratch.reserve(&mut now, width)?;
         now.resize(width, 0);
@@ -86,7 +96,7 @@ impl Own<'_> {
                     send(start, queued, work, f.index(), &now)?;
                 }
                 for a in &acts {
-                    self.apply(m, &mut now, a, check)
+                    self.apply(m, &mut now, a, check, &mut seen)
                         .map_err(|e| Error::Invalid(format!("b{bi}: {e}")))?;
                 }
                 if !check && let (Some(f), true) = (fail, matches!(i, Inst::Drop { .. })) {
@@ -115,7 +125,7 @@ impl Own<'_> {
                     ..
                 } = b.terminators[bi]
                 {
-                    self.apply(m, &mut now, &Act::Use(a), check)
+                    self.apply(m, &mut now, &Act::Use(a), check, &mut seen)
                         .map_err(|e| Error::Invalid(format!("b{bi}: {e}")))?;
                 }
                 if check && let Terminator::Return(r) = b.terminators[bi] {
@@ -180,5 +190,135 @@ impl Own<'_> {
             }
         }
         Ok(())
+    }
+    /// Drop place `q` through the joins `via`: in each of its pairings, only in the
+    /// halves where one of them may be bound to it.
+    pub(super) fn drop_bound(
+        &self,
+        now: &mut [u8],
+        q: usize,
+        via: &[usize],
+        seen: &mut Vec<usize>,
+    ) {
+        let mut any = false;
+        for &p in &self.pairs[q] {
+            let d = self.bound_drop(now, q, p, via);
+            any |= d != 0;
+            now[p] |= d;
+        }
+        if any {
+            self.invalidate(now, &self.lent[q], seen);
+        }
+    }
+    /// What a drop through the joins `via` drops of place `q` in its pairing `p`: the
+    /// halves where one of them may be bound to it. Applying it changes no half's
+    /// presence, so it reads the same after [`Self::drop_bound`] as before.
+    fn bound_drop(&self, now: &[u8], q: usize, p: usize, via: &[usize]) -> u8 {
+        let bound = self.binds[q]
+            .iter()
+            .filter(|&&(t, pp, _)| pp == p && via.contains(&t))
+            .fold(0, |m, &(_, _, bp)| m | now[bp]);
+        dropped(now[p], true) & bound & D
+    }
+    /// Join place `t` may be place `q`, which a drop through the joins `via` dropped
+    /// ([`Self::drop_bound`]): under a flag that guards both, `t` may be dropped only
+    /// in the halves where `q` was; under any other, wherever it is.
+    pub(super) fn drop_shadow(&self, now: &mut [u8], q: usize, t: usize, via: &[usize]) {
+        for &pt in &self.pairs[t] {
+            let same = self
+                .guards
+                .values()
+                .find(|g| g.contains(&pt))
+                .and_then(|g| self.pairs[q].iter().find(|p| g.contains(p)));
+            let d = dropped(now[pt], true);
+            now[pt] |= match same {
+                Some(&p) => {
+                    let (yes, no) = halves(self.bound_drop(now, q, p, via));
+                    d & ((if yes { T } else { 0 }) | (if no { F } else { 0 }))
+                }
+                None => d,
+            };
+        }
+    }
+    /// Edge `e` binds each join parameter's places to what its argument names on
+    /// this path: each tracked join place takes the state of the places it is now.
+    pub(super) fn transfer(&self, now: &mut [u8], e: EdgeId) {
+        let mut set = vec![];
+        let mut bind = vec![];
+        for (a, p) in ptr_args(self.b, &self.b.edges[e.index()]) {
+            let Some(k) = self.joins.iter().position(|&j| j == p.index()) else {
+                continue;
+            };
+            let srcs = match self.joins.iter().position(|&j| j == a.index()) {
+                Some(i) => vec![Pl {
+                    root: self.roots + i,
+                    steps: vec![],
+                    cut: false,
+                }],
+                None => self.n.vals[a.index()].clone(),
+            };
+            for (t, tp) in self.tracked.iter().enumerate() {
+                if tp.root != self.roots + k {
+                    continue;
+                }
+                let mut v = 0;
+                for src in &srcs {
+                    let mut x = src.clone();
+                    x.steps.extend(tp.steps.iter().copied());
+                    x.cut |= tp.cut;
+                    for q in (0..self.tracked.len()).filter(|&q| overlap(&x, &self.tracked[q])) {
+                        let z = self.pairs[q].iter().any(|&p| now[p] & Z != 0);
+                        v |= if self.may_drop(now, q) { D } else { 0 } | if z { Z } else { 0 };
+                    }
+                }
+                set.push((t, if v & D == 0 { Z } else { v | D }));
+                // Bind the join to what its argument names here: a joined
+                // argument's binding, or each place it names.
+                for q in 0..self.tracked.len() {
+                    for &(_, p, bp) in self.binds[q].iter().filter(|b| b.0 == t) {
+                        let mut v = 0;
+                        for src in &srcs {
+                            let mut x = src.clone();
+                            x.steps.extend(tp.steps.iter().copied());
+                            x.cut |= tp.cut;
+                            let joined = (x.root >= self.roots).then(|| {
+                                let at = self.tracked.iter().position(|y| *y == x);
+                                (at, &self.n.vals[self.joins[x.root - self.roots]])
+                            });
+                            let under = match joined {
+                                None => overlap(&x, &self.tracked[q]),
+                                Some((at, under)) => {
+                                    if let Some(&(_, _, fp)) = at.and_then(|f| {
+                                        self.binds[q].iter().find(|b| b.0 == f && b.1 == p)
+                                    }) {
+                                        v |= now[fp];
+                                        continue;
+                                    }
+                                    under.iter().any(|u| {
+                                        let mut y = u.clone();
+                                        y.steps.extend(x.steps.iter().copied());
+                                        overlap(&y, &self.tracked[q])
+                                    })
+                                }
+                            };
+                            v |= if under {
+                                dropped(now[bp], true)
+                            } else {
+                                begun(now[bp])
+                            };
+                        }
+                        bind.push((bp, if v == 0 { begun(now[bp]) } else { v }));
+                    }
+                }
+            }
+        }
+        for (t, v) in set {
+            for &p in &self.pairs[t] {
+                now[p] = v;
+            }
+        }
+        for (bp, v) in bind {
+            now[bp] = v;
+        }
     }
 }

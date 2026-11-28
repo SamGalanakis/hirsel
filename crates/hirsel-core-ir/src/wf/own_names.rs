@@ -185,9 +185,12 @@ fn spread(
 }
 
 /// The places of `entry`'s values and of the body's slots, and the joins: each
-/// pointer block parameter whose edges carry more than one place gets a root of
+/// pointer block parameter whose edges carry more than one place, or one place and
+/// a pointer that names none, gets a root of
 /// its own (after the slots and entry values), what it points at on the path
 /// taken, so that a drop through it is strong and its state follows its edge.
+/// An entry pointer parameter is never a join: an edge into the entry block must
+/// give it back itself.
 pub(super) fn names(
     b: &Body,
     entry: &[ValueId],
@@ -208,19 +211,69 @@ pub(super) fn names(
     let mut edges: Vec<(usize, usize)> = Vec::new();
     for e in &b.edges {
         for (a, p) in ptr_args(b, e) {
+            // The entry block's pointer parameters are the caller's places: the
+            // join rule below does not visit it, so no edge may rebind one.
+            need(e.target.index() != 0 || a == p, || {
+                format!("an edge into b0 gives pointer parameter v{} v{}", p.0, a.0)
+            })
+            .map_err(Error::Invalid)?;
             scratch.reserve(&mut edges, 1)?;
             edges.push((a.index(), p.index()));
         }
     }
     let under = spread(b, vals, true, &edges, scratch)?;
+    // A parameter that names one place is still a join when an edge may carry it a
+    // pointer naming none (a heap element, a call's result) or one made from a join:
+    // it is that place only on some paths, so no write or drop through it is the
+    // place's.
     let mut joins: Vec<usize> = Vec::new();
-    for k in b.blocks.iter().skip(1) {
-        for p in k.params.get(&b.pools.values).unwrap_or_default() {
-            let idx = p.index();
-            if b.values[idx] == Ty::Ptr && under.vals[idx].len() > 1 {
-                scratch.reserve(&mut joins, 1)?;
-                joins.push(idx);
+    // Whether a value is a join's parameter or a `pointer` of an address based on one.
+    let mut joined = Vec::new();
+    scratch.reserve(&mut joined, b.values.len())?;
+    joined.resize(b.values.len(), false);
+    let based = |a: AddressId| {
+        let mut at = a;
+        loop {
+            match b.addresses[at.index()].base {
+                AddressBase::Address(x) => at = x,
+                AddressBase::Value(v) => return Some(v.index()),
+                AddressBase::Slot(_) => return None,
             }
+        }
+    };
+    loop {
+        scratch.check()?;
+        let mut grew = false;
+        for i in &b.insts {
+            if let Inst::Pointer { result, address } = *i
+                && !joined[result.index()]
+                && based(address).is_some_and(|v| joined[v])
+            {
+                joined[result.index()] = true;
+                grew = true;
+            }
+        }
+        for k in b.blocks.iter().skip(1) {
+            for p in k.params.get(&b.pools.values).unwrap_or_default() {
+                let idx = p.index();
+                if joined[idx] || b.values[idx] != Ty::Ptr || under.vals[idx].is_empty() {
+                    continue;
+                }
+                let mixed = || {
+                    edges
+                        .iter()
+                        .any(|&(a, to)| to == idx && (under.vals[a].is_empty() || joined[a]))
+                };
+                if under.vals[idx].len() > 1 || mixed() {
+                    scratch.reserve(&mut joins, 1)?;
+                    joins.push(idx);
+                    joined[idx] = true;
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
         }
     }
     let mut seed: Vec<Vec<Pl>> = Vec::new();
@@ -280,6 +333,96 @@ pub(super) fn local_owned_slots(
         }
     }
     Ok(owned)
+}
+
+/// Compare call arguments after spreading pointer names through incoming edges.
+pub(super) fn check_call(
+    m: &Module,
+    b: &Body,
+    site: &CallSite,
+    n: &Names,
+    scratch: &Debit<'_>,
+) -> Result<(), Error> {
+    let sig = &m.signatures[site.signature.index()];
+    let args = site.args.get(&b.pools.args).unwrap_or_default();
+    let dest = usize::from(sig.dest.is_some());
+    for (i, arg) in args.iter().enumerate() {
+        let Arg::Address(a) = *arg else { continue };
+        if i >= dest
+            && !matches!(
+                sig.params[i - dest],
+                Param::Address {
+                    loan: Loan::Mut,
+                    ..
+                }
+            )
+        {
+            continue;
+        }
+        for (j, other) in args.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let places = match *other {
+                Arg::Address(b) => &n.addrs[b.index()],
+                Arg::Value(v) => &n.vals[v.index()],
+            };
+            for p in &n.addrs[a.index()] {
+                scratch.check()?;
+                if places.iter().any(|q| overlap(p, q)) {
+                    return Err(Error::Invalid(format!(
+                        "a{}: a mut place overlaps argument {j}",
+                        a.0
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// FORM #112 is memmove of plain bytes, including overlapping ranges.
+pub(super) fn check_moves(m: &Module, b: &Body, scratch: &Debit<'_>) -> Result<(), Error> {
+    let mut recipes = None;
+    for inst in &b.insts {
+        let Inst::Move { from, to, .. } = *inst else {
+            continue;
+        };
+        for a in [from, to] {
+            let t = match b.addresses[a.index()].ty {
+                PlaceTy::Declared(t) => t,
+                // A scalar's bytes own nothing; a pointer may be an owner.
+                PlaceTy::Value(Ty::Ptr) => {
+                    return Err(Error::Invalid(format!(
+                        "a{}: move requires plain operands",
+                        a.0
+                    )));
+                }
+                PlaceTy::Value(_) => continue,
+            };
+            let layouts = match &recipes {
+                Some(layouts) => layouts,
+                None => recipes.insert(
+                    hirsel_core_layout::compute_budgeted(&m.types, |bytes| {
+                        scratch.charge_bytes(bytes)
+                    })
+                    .map_err(|err| match err {
+                        hirsel_core_layout::ComputeError::Budget(e) => Error::from(e),
+                        hirsel_core_layout::ComputeError::Layout(e) => {
+                            Error::Invalid(format!("layout: {e:?}"))
+                        }
+                    })?,
+                ),
+            };
+            if !layouts.get(t.index()).is_some_and(|recipe| recipe.plain) {
+                return Err(Error::Invalid(format!(
+                    "a{}: move requires plain operands",
+                    a.0
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// An edge's pointer arguments and the target's parameters they bind.

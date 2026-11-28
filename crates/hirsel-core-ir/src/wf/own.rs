@@ -15,9 +15,8 @@
 //!
 //! A call whose signature marks its `dest` a view anchored on parameters (OWN-20)
 //! makes the destination's places borrow the anchor arguments' places, from the
-//! call until a new value is written or begun in the destination. A drop of an
-//! anchor while the borrow holds drops the destination too, so a later use of the
-//! view is a use after drop.
+//! call until the destination is overwritten. Dropping or rewriting an anchor
+//! invalidates the view, including views borrowed from it.
 //!
 //! For each place a join may stand for, and each of the place's pairings (below),
 //! the state also holds where the join may be bound to it: an edge binds the join to
@@ -27,9 +26,11 @@
 //!
 //! A forward may-analysis then tracks, for each place some `drop` may reach,
 //! whether it may be dropped. A `drop` through one place drops it; through several,
-//! it may drop each. Any write overlapping the place, and its slot's `live` or
-//! `dead`, begin it anew. A move leaves its source's state alone: the producer clears
-//! the source's drop flag, which is what the next paragraph reads.
+//! it may drop each. A covering write, and its slot's `live`, begin a place anew
+//! ([`written`] requires the bytes a drop reads after a `live`); its slot's `dead`
+//! leaves it dropped, so nothing but the next `live` revives it. `move` (FORM #112)
+//! is a memmove of plain bytes: an operand that may own is refused, so no value
+//! changes owner through one.
 //!
 //! A drop flag (a whole `bool` slot, as [`written`] reads one) guards the drops on
 //! the `yes` edge of a branch on a read of it. For each place and each flag guarding
@@ -41,7 +42,9 @@
 //! A drop or use of a place overlapping (one's steps a prefix of the other's) a
 //! place that may be dropped is an error naming both.
 
-use super::own_names::{Names, Pl, covers, local_owned_slots, names, overlap, ptr_args};
+use super::own_names::{
+    Names, Pl, check_call, check_moves, covers, local_owned_slots, names, overlap, ptr_args,
+};
 pub(super) use super::own_names::{anchors, is_flag_slot};
 use super::*;
 use crate::decode::Debit;
@@ -52,18 +55,18 @@ const DT: u8 = 4;
 const DF: u8 = 8;
 pub(super) const T: u8 = ZT | DT;
 pub(super) const F: u8 = ZF | DF;
-const D: u8 = DT | DF;
+pub(super) const D: u8 = DT | DF;
 pub(super) const Z: u8 = ZT | ZF;
 
-fn halves(s: u8) -> (bool, bool) {
+pub(super) fn halves(s: u8) -> (bool, bool) {
     (s & T != 0, s & F != 0)
 }
-fn dropped(s: u8, strong: bool) -> u8 {
+pub(super) fn dropped(s: u8, strong: bool) -> u8 {
     let (t, f) = halves(s);
     let d = (if t { DT } else { 0 }) | (if f { DF } else { 0 });
     if strong { d } else { s | d }
 }
-fn begun(s: u8) -> u8 {
+pub(super) fn begun(s: u8) -> u8 {
     let (t, f) = halves(s);
     (if t { ZT } else { 0 }) | (if f { ZF } else { 0 })
 }
@@ -82,9 +85,12 @@ pub(super) enum Act {
     Use(AddressId),
     Drop(AddressId),
     Write(AddressId),
+    Invalidate(AddressId),
     /// A copy/move into `dest` from `from`: propagates an active local borrow.
     CopyToDest(AddressId),
+    /// `StorageLive`: the slot's places begin anew ([`written`] requires their bytes).
     Begin(usize),
+    /// `StorageDead`: the slot's places are gone until its next `StorageLive`.
     Dead(usize),
     Flag(usize, Option<bool>),
     /// A branch-used read of a drop flag is fresh right after this `Read`.
@@ -102,26 +108,26 @@ pub(super) struct Own<'a> {
     routed: Vec<bool>,
     pub(super) slots: usize,
     /// The first join root: the slots, then the entry values.
-    roots: usize,
+    pub(super) roots: usize,
     /// Whether this function's signature has a `dest` (entry parameter 0, root `slots`).
     pub(super) has_dest: bool,
     /// Per join: its parameter's value index.
-    joins: Vec<usize>,
+    pub(super) joins: Vec<usize>,
     /// Entry values that are `view` parameters' pointers, by entry index.
     views: Vec<bool>,
-    tracked: Vec<Pl>,
+    pub(super) tracked: Vec<Pl>,
     /// Per address: the tracked places it overlaps.
     hits: Vec<Vec<usize>>,
     /// Per address: the tracked places its deref steps read through.
     deref_hits: Vec<Vec<usize>>,
     /// Per tracked place: its pairings (indices into the state).
-    pairs: Vec<Vec<usize>>,
+    pub(super) pairs: Vec<Vec<usize>>,
     /// Per tracked place: the tracked join places that may be it, in part.
     shadow: Vec<Vec<usize>>,
     /// Per tracked place: (join place, pairing, state index) for each join in its
     /// shadow and each of its pairings, the state saying where the join may be bound
     /// to it (`D`) or not (`Z`), in that pairing's flag halves.
-    binds: Vec<Vec<(usize, usize, usize)>>,
+    pub(super) binds: Vec<Vec<(usize, usize, usize)>>,
     /// Per borrow (a call with a dest view): its dest's tracked places.
     borrows: Vec<Vec<usize>>,
     /// Per borrow: whether its anchors include a local slot, and whether its dest includes `dest`.
@@ -129,10 +135,12 @@ pub(super) struct Own<'a> {
     borrow_to_dest: Vec<bool>,
     /// Per local slot: borrows anchored on it (invalidated on `StorageLive` / `StorageDead`).
     anchor_slots: Vec<Vec<usize>>,
+    /// Per address: the borrows a write through it rewrites an anchor of.
+    rewrites: Vec<Vec<usize>>,
     /// Per call: its borrow.
     lends: std::collections::HashMap<usize, usize>,
     /// Per tracked place: the borrows anchored on it, and those whose dest it is.
-    lent: Vec<Vec<usize>>,
+    pub(super) lent: Vec<Vec<usize>>,
     held: Vec<Vec<usize>>,
     /// The state index of borrow 0's bit: whether it may be in force.
     pub(super) base: usize,
@@ -198,13 +206,15 @@ impl Own<'_> {
             }
             Inst::Case { address, .. } => out.push(Act::Use(address)),
             Inst::Drop { address, .. } => out.push(Act::Drop(address)),
-            Inst::Store { address, value } => match self.whole_flag(address) {
-                Some(f) => out.push(Act::Flag(
-                    f,
-                    self.consts.get(&value.index()).map(|&c| c != 0),
-                )),
-                None => out.push(Act::Write(address)),
-            },
+            Inst::Store { address, value } => {
+                out.push(Act::Write(address));
+                if let Some(f) = self.whole_flag(address) {
+                    out.push(Act::Flag(
+                        f,
+                        self.consts.get(&value.index()).map(|&c| c != 0),
+                    ));
+                }
+            }
             Inst::SetCase { address, .. } | Inst::PutLanes { to: address, .. } => {
                 out.push(Act::Write(address))
             }
@@ -219,17 +229,16 @@ impl Own<'_> {
                     out.push(Act::CopyToDest(from));
                 }
             }
-            Inst::Grow { carrier, .. } => out.push(Act::Use(carrier)),
-            Inst::StorageLive { slot } => {
-                out.push(Act::Begin(slot.index()));
-                if self.guards.contains_key(&slot.index())
-                    || self.reads_of_flag.contains_key(&slot.index())
-                {
-                    out.push(Act::Flag(slot.index(), None));
-                }
+            Inst::Grow { carrier, .. } | Inst::PromoteFrame { carrier } => {
+                out.push(Act::Use(carrier));
+                out.push(Act::Invalidate(carrier));
             }
-            Inst::StorageDead { slot } => {
-                out.push(Act::Dead(slot.index()));
+            Inst::StorageLive { slot } | Inst::StorageDead { slot } => {
+                out.push(if matches!(i, Inst::StorageLive { .. }) {
+                    Act::Begin(slot.index())
+                } else {
+                    Act::Dead(slot.index())
+                });
                 if self.guards.contains_key(&slot.index())
                     || self.reads_of_flag.contains_key(&slot.index())
                 {
@@ -258,7 +267,7 @@ impl Own<'_> {
             _ => {}
         }
     }
-    fn may_drop(&self, now: &[u8], q: usize) -> bool {
+    pub(super) fn may_drop(&self, now: &[u8], q: usize) -> bool {
         self.pairs[q].iter().all(|&p| now[p] & D != 0)
     }
     pub(super) fn dest_may_be_dropped(&self, now: &[u8]) -> bool {
@@ -268,7 +277,14 @@ impl Own<'_> {
             .any(|(q, t)| t.root == self.slots && self.may_drop(now, q))
     }
     /// Apply `act`, checking it first when `check`.
-    pub(super) fn apply(&self, m: &Module, now: &mut [u8], act: &Act, check: bool) -> R {
+    pub(super) fn apply(
+        &self,
+        m: &Module,
+        now: &mut [u8],
+        act: &Act,
+        check: bool,
+        seen: &mut Vec<usize>,
+    ) -> R {
         match *act {
             Act::Use(a) => {
                 if check {
@@ -313,16 +329,17 @@ impl Own<'_> {
                         own.extend(self.tracked.iter().position(|t| t == r));
                     }
                     for &q in &own {
-                        self.drop(now, q, joined.len() == 1, &mut vec![]);
+                        self.drop(now, q, joined.len() == 1, seen);
                     }
                 }
                 let strong = !routed && roots.len() == 1;
                 for r in roots.iter().filter(|r| !r.cut) {
                     if let Some(q) = self.tracked.iter().position(|t| t == r) {
-                        if routed && self.binds[q].iter().any(|(t, _, _)| own.contains(t)) {
-                            self.drop_bound(now, q, &own);
+                        let bound = routed && self.binds[q].iter().any(|(t, _, _)| own.contains(t));
+                        if bound {
+                            self.drop_bound(now, q, &own, seen);
                         } else {
-                            self.drop(now, q, strong, &mut vec![]);
+                            self.drop(now, q, strong, seen);
                         }
                         // A join place overlapping one dropped through the join is that drop's:
                         // `Two(..)` dropping `*v.case1.0` leaves `*v` and `*v.case1.1` undropped.
@@ -331,12 +348,18 @@ impl Own<'_> {
                                 .any(|&o| overlap(&self.tracked[o], &self.tracked[*t]))
                         };
                         for &t in self.shadow[q].iter().filter(|t| !held(t)) {
-                            self.drop(now, t, false, &mut vec![]);
+                            if bound {
+                                self.drop_shadow(now, q, t, &own);
+                            } else {
+                                self.drop(now, t, false, seen);
+                            }
                         }
                     }
                 }
             }
+            Act::Invalidate(a) => self.invalidate(now, &self.rewrites[a.index()], seen),
             Act::Write(a) => {
+                self.invalidate(now, &self.rewrites[a.index()], seen);
                 // Any non-`store` write (copy/move/set_case/mut-arg/partial store) that may
                 // touch a drop-flag slot invalidates its tracked value and marks its reads stale.
                 for r in &self.n.addrs[a.index()] {
@@ -386,26 +409,20 @@ impl Own<'_> {
                     }
                 }
             }
-            Act::Begin(s) => {
-                self.invalidate_slot_borrows(now, s);
+            Act::Begin(s) | Act::Dead(s) => {
+                // `dead` never revives a dropped place: only the next `live` begins it.
+                let f: fn(u8) -> u8 = if matches!(act, Act::Begin(_)) {
+                    begun
+                } else {
+                    |v| dropped(v, true)
+                };
+                self.invalidate(now, &self.anchor_slots[s], seen);
                 for (q, t) in self.tracked.iter().enumerate() {
                     if t.root == s {
                         self.end(now, q);
-                        self.mark(now, q, begun, true);
+                        self.mark(now, q, f, true);
                         for &t in &self.shadow[q] {
-                            self.mark(now, t, begun, false);
-                        }
-                    }
-                }
-            }
-            Act::Dead(s) => {
-                self.invalidate_slot_borrows(now, s);
-                for (q, t) in self.tracked.iter().enumerate() {
-                    if t.root == s {
-                        self.end(now, q);
-                        self.mark(now, q, begun, true);
-                        for &t in &self.shadow[q] {
-                            self.mark(now, t, begun, false);
+                            self.mark(now, t, f, false);
                         }
                     }
                 }
@@ -432,60 +449,44 @@ impl Own<'_> {
         }
         Ok(())
     }
-    /// Any view anchored on local slot `s` dangles once `s`'s storage ends or restarts.
-    fn invalidate_slot_borrows(&self, now: &mut [u8], s: usize) {
-        for &k in &self.anchor_slots[s] {
-            if now[self.base + k] != 0 {
-                for &d in &self.borrows[k] {
-                    self.drop(now, d, false, &mut vec![]);
-                }
+    /// Walk active borrow edges with one budgeted work vector. A cycle can add
+    /// each tracked destination at most once.
+    pub(super) fn invalidate(&self, now: &mut [u8], loans: &[usize], seen: &mut Vec<usize>) {
+        seen.clear();
+        self.enqueue(now, loans, seen);
+        let mut next = 0;
+        while let Some(&q) = seen.get(next) {
+            self.mark(now, q, |s| dropped(s, true), false);
+            // A join that may be the view dangles with it.
+            for &t in &self.shadow[q] {
+                self.mark(now, t, |s| dropped(s, true), false);
             }
+            self.enqueue(now, &self.lent[q], seen);
+            next += 1;
         }
     }
-    /// Drop place `q`, and so the dest of every borrow of it in force (OWN-20): a
-    /// view dangles once its anchor is dropped.
-    fn drop(&self, now: &mut [u8], q: usize, strong: bool, seen: &mut Vec<usize>) {
-        if seen.contains(&q) {
-            return;
-        }
-        seen.push(q);
-        self.mark(now, q, |s| dropped(s, true), strong);
-        for &k in &self.lent[q] {
+    fn enqueue(&self, now: &[u8], loans: &[usize], seen: &mut Vec<usize>) {
+        for &k in loans {
             if now[self.base + k] != 0 {
                 for &d in &self.borrows[k] {
-                    self.drop(now, d, strong, seen);
-                }
-            }
-        }
-    }
-    /// Drop place `q` through the joins `via`: in each of its pairings, only in the
-    /// halves where one of them may be bound to it.
-    fn drop_bound(&self, now: &mut [u8], q: usize, via: &[usize]) {
-        let mut any = false;
-        for &p in &self.pairs[q] {
-            let bound = self.binds[q]
-                .iter()
-                .filter(|&&(t, pp, _)| pp == p && via.contains(&t))
-                .fold(0, |m, &(_, _, bp)| m | now[bp]);
-            let d = dropped(now[p], true) & bound & D;
-            any |= d != 0;
-            now[p] |= d;
-        }
-        if any {
-            for &k in &self.lent[q] {
-                if now[self.base + k] != 0 {
-                    for &d in &self.borrows[k] {
-                        self.drop(now, d, false, &mut vec![q]);
+                    if !seen.contains(&d) {
+                        seen.push(d);
                     }
                 }
             }
         }
     }
+    fn drop(&self, now: &mut [u8], q: usize, strong: bool, seen: &mut Vec<usize>) {
+        self.mark(now, q, |s| dropped(s, true), strong);
+        self.invalidate(now, &self.lent[q], seen);
+    }
     /// A new value in place `q` ends the borrows whose dest it is: a slot reused
     /// for another value no longer views the old anchor.
     fn end(&self, now: &mut [u8], q: usize) {
         for &k in &self.held[q] {
-            now[self.base + k] = 0;
+            if self.borrows[k].len() == 1 {
+                now[self.base + k] = 0;
+            }
         }
     }
     /// Set place `q`'s pairings to `f` of themselves, or, when not `strong`, add
@@ -497,87 +498,6 @@ impl Own<'_> {
             } else {
                 now[p] | f(now[p])
             };
-        }
-    }
-    /// Edge `e` binds each join parameter's places to what its argument names on
-    /// this path: each tracked join place takes the state of the places it is now.
-    pub(super) fn transfer(&self, now: &mut [u8], e: EdgeId) {
-        let mut set = vec![];
-        let mut bind = vec![];
-        for (a, p) in ptr_args(self.b, &self.b.edges[e.index()]) {
-            let Some(k) = self.joins.iter().position(|&j| j == p.index()) else {
-                continue;
-            };
-            let srcs = match self.joins.iter().position(|&j| j == a.index()) {
-                Some(i) => vec![Pl {
-                    root: self.roots + i,
-                    steps: vec![],
-                    cut: false,
-                }],
-                None => self.n.vals[a.index()].clone(),
-            };
-            for (t, tp) in self.tracked.iter().enumerate() {
-                if tp.root != self.roots + k {
-                    continue;
-                }
-                let mut v = 0;
-                for src in &srcs {
-                    let mut x = src.clone();
-                    x.steps.extend(tp.steps.iter().copied());
-                    x.cut |= tp.cut;
-                    for q in (0..self.tracked.len()).filter(|&q| overlap(&x, &self.tracked[q])) {
-                        let z = self.pairs[q].iter().any(|&p| now[p] & Z != 0);
-                        v |= if self.may_drop(now, q) { D } else { 0 } | if z { Z } else { 0 };
-                    }
-                }
-                set.push((t, if v & D == 0 { Z } else { v | D }));
-                // Bind the join to what its argument names here: a joined
-                // argument's binding, or each place it names.
-                for q in 0..self.tracked.len() {
-                    for &(_, p, bp) in self.binds[q].iter().filter(|b| b.0 == t) {
-                        let mut v = 0;
-                        for src in &srcs {
-                            let mut x = src.clone();
-                            x.steps.extend(tp.steps.iter().copied());
-                            x.cut |= tp.cut;
-                            let joined = (x.root >= self.roots).then(|| {
-                                let at = self.tracked.iter().position(|y| *y == x);
-                                (at, &self.n.vals[self.joins[x.root - self.roots]])
-                            });
-                            let under = match joined {
-                                None => overlap(&x, &self.tracked[q]),
-                                Some((at, under)) => {
-                                    if let Some(&(_, _, fp)) = at.and_then(|f| {
-                                        self.binds[q].iter().find(|b| b.0 == f && b.1 == p)
-                                    }) {
-                                        v |= now[fp];
-                                        continue;
-                                    }
-                                    under.iter().any(|u| {
-                                        let mut y = u.clone();
-                                        y.steps.extend(x.steps.iter().copied());
-                                        overlap(&y, &self.tracked[q])
-                                    })
-                                }
-                            };
-                            v |= if under {
-                                dropped(now[bp], true)
-                            } else {
-                                begun(now[bp])
-                            };
-                        }
-                        bind.push((bp, if v == 0 { begun(now[bp]) } else { v }));
-                    }
-                }
-            }
-        }
-        for (t, v) in set {
-            for &p in &self.pairs[t] {
-                now[p] = v;
-            }
-        }
-        for (bp, v) in bind {
-            now[bp] = v;
         }
     }
 }
@@ -611,6 +531,7 @@ pub(super) fn check(
             *v = true;
         }
     }
+    check_moves(m, b, &scratch.scratch())?;
     let (n, j, joins) = names(b, entry, &scratch)?;
     let mut routed = Vec::new();
     scratch.reserve(&mut routed, b.addresses.len())?;
@@ -639,41 +560,28 @@ pub(super) fn check(
     let dropping = !tracked.is_empty();
     // A call whose signature marks its dest a view (OWN-20) makes the dest's places
     // borrow its anchor arguments' places.
-    let places = |a: AddressId| {
-        let a = a.index();
-        if !j.addrs[a].is_empty() {
-            &j.addrs[a]
-        } else {
-            &n.addrs[a]
-        }
-    };
-    let mut borrows: Vec<(usize, Vec<Pl>, Vec<Pl>)> = Vec::new();
+    let mut borrows = Vec::new();
     for i in &b.insts {
         let Inst::Call { call } = *i else { continue };
         let site = &b.calls[call.index()];
+        check_call(m, b, site, &n, &scratch)?;
         let csig = &m.signatures[site.signature.index()];
         let args = site.args.get(&b.pools.args).unwrap_or_default();
-        let (Some(_), Some(Arg::Address(d))) = (csig.dest, args.first()) else {
+        if csig.anchors.is_empty() {
+            continue;
+        }
+        let Some(&Arg::Address(d)) = args.first() else {
             continue;
         };
-        let mut from = vec![];
-        for &k in &csig.anchors {
-            if let Some(&Arg::Address(a)) = args.get(1 + k as usize) {
-                from.extend(places(a).iter().cloned());
-            }
-        }
-        if from.is_empty() {
-            continue;
-        }
-        let to: Vec<Pl> = places(*d).iter().filter(|p| !p.cut).cloned().collect();
-        for p in &to {
+        for p in n.addrs[d.index()].iter().chain(&j.addrs[d.index()]) {
             if !tracked.contains(p) {
                 scratch.reserve(&mut tracked, 1)?;
+                scratch.allocation::<(u8, u32, u32)>(p.steps.len())?;
                 tracked.push(p.clone());
             }
         }
         scratch.reserve(&mut borrows, 1)?;
-        borrows.push((call.index(), to, from));
+        borrows.push((call.index(), d.index()));
     }
     // A join place stands for each place its parameter's edges carry; one that an
     // address reaches is tracked when one of those is, so a use through the join
@@ -701,6 +609,40 @@ pub(super) fn check(
                 scratch.reserve(&mut tracked, 1)?;
                 tracked.push(r);
             }
+        }
+    }
+    // An edge that gives one join's pointer to another reads the first join's state,
+    // so the first tracks every place the second does, used there or not.
+    loop {
+        scratch.check()?;
+        let mut grew = false;
+        for e in &b.edges {
+            for (a, p) in ptr_args(b, e) {
+                let (Some(i), Some(k)) = (
+                    joins.iter().position(|&x| x == a.index()),
+                    joins.iter().position(|&x| x == p.index()),
+                ) else {
+                    continue;
+                };
+                for t in 0..tracked.len() {
+                    if tracked[t].root != roots + k {
+                        continue;
+                    }
+                    let from = Pl {
+                        root: roots + i,
+                        ..tracked[t].clone()
+                    };
+                    if !tracked.contains(&from) {
+                        scratch.reserve(&mut tracked, 1)?;
+                        scratch.allocation::<(u8, u32, u32)>(from.steps.len())?;
+                        tracked.push(from);
+                        grew = true;
+                    }
+                }
+            }
+        }
+        if !grew {
+            break;
         }
     }
     let has_slot_return = b.terminators.iter().any(|t| {
@@ -770,36 +712,50 @@ pub(super) fn check(
     let mut lends = std::collections::HashMap::new();
     let mut dests = Vec::new();
     scratch.reserve(&mut dests, borrows.len())?;
-    for (k, (call, to, from)) in borrows.iter().enumerate() {
-        let to_ids: Vec<usize> = to
-            .iter()
-            .filter_map(|d| tracked.iter().position(|t| t == d))
-            .collect();
-        let mut from_local = false;
-        for f in from {
-            if f.root < b.slots.len() {
-                from_local |= local_owned[f.root];
-                if !anchor_slots[f.root].contains(&k) {
-                    scratch.reserve(&mut anchor_slots[f.root], 1)?;
-                    anchor_slots[f.root].push(k);
-                }
-            } else if f.root >= roots {
-                for x in expand(f) {
-                    if x.root < b.slots.len() {
-                        from_local |= local_owned[x.root];
-                        if !anchor_slots[x.root].contains(&k) {
-                            scratch.reserve(&mut anchor_slots[x.root], 1)?;
-                            anchor_slots[x.root].push(k);
-                        }
-                    }
-                }
+    let mut rewrites = Vec::new();
+    scratch.reserve(&mut rewrites, b.addresses.len())?;
+    rewrites.resize_with(b.addresses.len(), Vec::new);
+    for (k, &(call, dest)) in borrows.iter().enumerate() {
+        let mut to_ids = Vec::new();
+        for d in n.addrs[dest].iter().chain(&j.addrs[dest]) {
+            if let Some(q) = tracked.iter().position(|t| t == d)
+                && !to_ids.contains(&q)
+            {
+                scratch.reserve(&mut to_ids, 1)?;
+                to_ids.push(q);
             }
         }
-        let to_dest = has_dest && to.iter().any(|p| p.root == b.slots.len());
+        let site = &b.calls[call];
+        let sig = &m.signatures[site.signature.index()];
+        let args = site.args.get(&b.pools.args).unwrap_or_default();
+        let from = || {
+            sig.anchors
+                .iter()
+                .flat_map(|&k| match args[1 + k as usize] {
+                    Arg::Address(a) => n.addrs[a.index()].as_slice(),
+                    Arg::Value(_) => &[],
+                })
+        };
+        let mut from_local = false;
+        for f in from().filter(|f| f.root < b.slots.len()) {
+            from_local |= local_owned[f.root];
+            if !anchor_slots[f.root].contains(&k) {
+                scratch.reserve(&mut anchor_slots[f.root], 1)?;
+                anchor_slots[f.root].push(k);
+            }
+        }
         borrow_from_local.push(from_local);
-        borrow_to_dest.push(to_dest);
+        borrow_to_dest.push(has_dest && n.addrs[dest].iter().any(|p| p.root == b.slots.len()));
+        for (a, places) in n.addrs.iter().enumerate() {
+            scratch.check()?;
+            if places.iter().any(|p| from().any(|f| overlap(f, p))) {
+                scratch.reserve(&mut rewrites[a], 1)?;
+                rewrites[a].push(k);
+            }
+        }
         for (q, tq) in tracked.iter().enumerate() {
-            if from.iter().any(|f| overlap(f, tq)) && !to_ids.contains(&q) {
+            scratch.check()?;
+            if tq.root < roots && from().any(|f| overlap(f, tq)) {
                 scratch.reserve(&mut lent[q], 1)?;
                 lent[q].push(k);
             }
@@ -808,8 +764,8 @@ pub(super) fn check(
             scratch.reserve(&mut held[d], 1)?;
             held[d].push(k);
         }
-        lends.insert(*call, k);
-        scratch.allocation::<usize>(to_ids.len())?;
+        scratch.allocation::<(usize, usize)>(2)?;
+        lends.insert(call, k);
         dests.push(to_ids);
     }
     // A flag slot whose pointer escapes into memory or an untyped call argument
@@ -859,6 +815,7 @@ pub(super) fn check(
         borrow_from_local,
         borrow_to_dest,
         anchor_slots,
+        rewrites,
         lends,
         lent,
         held,
@@ -938,7 +895,20 @@ pub(super) fn check(
                 let Inst::Drop { address, .. } = *i else {
                     continue;
                 };
-                for &q in &own.hits[address.index()].clone() {
+                // The places a guarded drop through a join may reach take the flag too:
+                // which of them the join is, and so which it drops, follows the flag.
+                let mut reach = own.hits[address.index()].clone();
+                if own.routed[address.index()] {
+                    for r in &own.n.addrs[address.index()] {
+                        if let Some(q) = own.tracked.iter().position(|t| t == r)
+                            && !reach.contains(&q)
+                        {
+                            reach.push(q);
+                        }
+                    }
+                }
+                scratch.allocation::<usize>(reach.len())?;
+                for &q in &reach {
                     let paired = own
                         .guards
                         .get(&f)

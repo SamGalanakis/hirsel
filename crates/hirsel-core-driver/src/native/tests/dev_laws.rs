@@ -716,12 +716,18 @@ fn package_dev_releases_held_runs() {
 fn package_dev_takes_grants_from_program() {
     let fixture = Fixture::new();
     let manifest = fs::read_to_string(fixture.law.path("runner/hirsel.hcfg")).unwrap();
+    let entry = r#"Program(module: Some("runner"), function: Some("dev_fixture"))"#;
+    assert!(manifest.contains(entry));
     fixture.law.write(
         "runner/hirsel.hcfg",
-        manifest
-            + "limit = 1610612736\n\
-               grants = [\"Clock\", \"Random\", \"Tasks\", \"Process\", \"Stderr\", \"Net=Listen 127.0.0.1/32 0-65535\"]\n\
-               dirs = [\".\"]\n",
+        manifest.replacen(
+            entry,
+            r#"Program(module: Some("runner"), function: Some("dev_fixture"),
+                limit: Some(1610612736),
+                grants: Some([Dir("."), Clock, Random, Tasks, Process, Stderr,
+                    Net(Listen(cidr: "127.0.0.1/32", first_port: 0, last_port: 65535))]))"#,
+            1,
+        ),
     );
     let mut dev = fixture.dev("program", &[]);
     dev.wait_for("hirsel dev listening on ");

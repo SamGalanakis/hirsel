@@ -1874,19 +1874,7 @@ const UNEQUAL_ROOTS: &[&str] = &[];
 include!("request_sequence_gates.rs");
 include!("request_sequence_comptime.rs");
 
-#[test]
-fn request_sequences_answer_as_an_empty_store() {
-    let seqs = sequences();
-    let names: BTreeSet<&str> = seqs.iter().map(|s| s.name).collect();
-    assert_eq!(names.len(), seqs.len(), "sequence names are distinct");
-    let stale: Vec<&str> = GATES
-        .iter()
-        .map(|g| g.0)
-        .filter(|n| !names.contains(n))
-        .collect();
-    assert!(stale.is_empty(), "gate classes of no sequence: {stale:?}");
-    run_sequences(seqs, None, UNEQUAL_ROOTS);
-}
+include!("request_sequence_laws.rs");
 
 enum Edit {
     /// Whitespace inside an item rechecks it: its record's sites and its IR

@@ -421,10 +421,11 @@ export and authorizes invoking none, and the Card's per-export facts describe a 
 
 Named add accepts `HOST[/TENANT]/NAME`, optionally followed by `@MAJOR` or `@VERSION`.
 An unqualified new name takes the highest eligible stable version. Update of an existing
-identity stays within its major and the §5 floor/0.minor rules. Explicit local directory paths
+identity stays within its major and the [resolution floors and 0.minor rules](packages.md#5-resolution). Explicit local directory paths
 use `./` or `../` when they resemble a scoped name. For every involved registry obtain
 accepted release/status heads, verify release inclusion, replay all status events, filter
-retired/taken-down roots and apply floors, exact pins, compatibility and the §11 ceilings.
+retired/taken-down roots and apply floors, exact pins, compatibility and the
+[dependency authority ceilings](packages.md#11-dependency-authority).
 Report advisories with OSV IDs. Audit checks the effective graph and reports current statuses
 and advisories for affected roots, exiting nonzero on a retired, taken-down or affected
 unwithdrawn advisory pin (exit 2). A frozen audit can use an already complete, fresh verified replay

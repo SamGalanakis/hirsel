@@ -608,15 +608,11 @@ Every decode, whatever its bytes:
 
 ```hirsel
 pub type Row: codec { id: u64, name: String, pinned: bool = false }
-```
-```hirsel
-fn rows() -> codec.Codec[Row] { codec.of() }   // bytes written before `pinned` decode with false
+fn rows() -> std.codec.Codec[Row] { std.codec.of() }   // bytes written before `pinned` decode with false
 ```
 ```hirsel
 type Pair[T]: codec { a: T, b: T }
-```
-```hirsel
-fn files() -> codec.Codec[Pair[HostFile]] { codec.of() }   // refused: LANG-12, HostFile is not codec
+fn files() -> std.codec.Codec[Pair[HostFile]] { std.codec.of() }   // refused: LANG-12, HostFile is not codec
 ```
 ```hirsel
 type Note { pinned: bool = false }                    // refused: SEM-10, Note does not declare codec

@@ -123,7 +123,11 @@ fn left() -> i64 { ORIGIN.x }
 ```
 ```hirsel
 // in a package that depends on package store, whose root module is store/store.hirsel
-fn latest(db: store.Db) -> store.Snapshot { store.snapshot(db) }
+fn lookup(tx: store.Tx, t: store.Table[u64, u64]) -> Result[Option[u64], store.Error] {
+  store.fetch(tx, t, 1u64)
+}
+```
+```hirsel
 fn stutter(db: store.store.Db) -> u64 { 0 }               // refused: LANG-7, at the second store
 ```
 ```hirsel

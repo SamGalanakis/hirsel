@@ -60,7 +60,7 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Ownership](ownership.md) | OWN-1 to OWN-26 |
 | [Memory](memory.md) | MEM-1 to MEM-18, MEM-29; performance targets MEM-31 to MEM-32 |
 | [Budgets](budgets.md) | MEM-19 to MEM-28, MEM-30, MEM-33, MEM-34 |
-| [Failure](failure.md) | FAIL-1 to FAIL-16 |
+| [Failure](failure.md) | FAIL-1 to FAIL-17 |
 | [Tasks](tasks.md) | CONC-1 to CONC-15, CONC-17 |
 | [Capabilities](capabilities.md) | CAP-1 to CAP-10 |
 | [Semantics](semantics.md) | SEM-1 to SEM-11 |
@@ -72,7 +72,12 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Launch](launch.md) | |
 | [Foreign calls](foreign.md) | FFI-1 to FFI-16 |
 | [Process creation](exec.md) | EXEC-1 to EXEC-8 |
-| [In-process code loading](packing.md) | PACK-1 to PACK-13 |
+| [In-process code loading](packing.md) | PACK-1 to PACK-17 |
+| [SDK](sdk.md) | |
+| [Registry](registry.md) | |
+| [Fleet](fleet.md) | FLT-1 to FLT-8 |
+| [Compute](compute.md) | COMP-1 to COMP-9 |
+| [Embedding](embed.md) | EMB-1 to EMB-9 |
 | [Core library](core.md) | |
 | [Reserved](reserved.md) | |
 | [Examples](examples.md) | |
@@ -83,7 +88,7 @@ Each rule is a `### ID: Title` heading followed by one normative statement and, 
 refuses programs, the smallest accepted and refused programs. MEM-31 and MEM-32 keep rule
 headings but are non-normative performance targets
 ([performance targets](memory.md#performance-targets)). Rule IDs are numbered from
-1 within each family without gaps, and each term is defined once, in bold, where it is
+1 within each rule family, and each term is defined once, in bold, where it is
 introduced. A refusal comment `// refused: ID` names the rule a refusal cites. The
 [transition table](ownership.md#own-26-the-transition-table) is the single authority for
 what every operation does to ownership, charges and failures. Examples are informative.
@@ -118,7 +123,7 @@ The [MoQ specification](moq.md) defines the Media over QUIC endpoint and relay o
 The [SFU cascade specification](sfu_cascade.md) defines rooms that span SFU nodes over QUIC links, with a cross-node revocation fence that fails closed under partition (specified, not built; its room directory is a contract with an in-memory fake, and the Store adapter comes later).
 The [Fleet specification](fleet.md) defines single-binary multi-machine orchestration over `objects@1`: the three workload archetypes, `ClaimAuth` + `ORIGIN` move fencing, controller takeover and scoped barriers, dedicated `Directory[K]` Places, proof-ready kernel rules K1–K13, and verification tiers T0–T3.
 The [Embedding specification](embed.md) defines the static-library output kind, the embedded launch and its versioned C embed ABI over runner entries, generated Swift bindings and a static XCFramework, the Apple target records (one per platform variant, from which every floor and triple is derived), and the `aarch64-apple-ios` and `aarch64-apple-ios-sim` targets with their capability refusals (EMB-1 to EMB-9; specified, not built).
-The [in-process code loading specification](packing.md) defines how a pack host installs compiled Hirsel code while it runs: the `.hirsel-mod` v1 artifact, the out-of-process capped `Compiler` service, the write-xor-execute code slab, the counted `Code[F]` handle with `activate`, the closed import mask, the PC table, the hot context line and fused scope rows (PACK-1 to PACK-12; each rule states what is built).
+The [in-process code loading specification](packing.md) defines how a pack host installs compiled Hirsel code while it runs: the `.hirsel-mod` v1 artifact, the out-of-process capped `Compiler` service, the write-xor-execute code slab, the counted `Code[F]` handle with `activate`, the closed import mask, the PC table, the hot context line and fused scope rows (PACK-1 to PACK-17).
 The [Compute specification](compute.md) defines the reusable core scheduler for Archetype C elastic remote compute (`compute@1`) outside `fleet@1`: worker-only admission, hard per-principal concurrency limits, placement (`COMP-3`, credit desk), three retry classes, `AccountBeforeMint` restart custody by `ReapBeforeMint`, opaque versioned handles, contained Wasm pricing, multi-cell federation, and the formal/statistical verification split. See [dependencies](compute.md#dependencies) for integration status.
 The [TURN specification](turn.md) defines the sans-IO TURN client and relay, long-term credentials and the TCP fallback (built; `turn@1`).
 The [SFrame specification](sframe.md) defines the `sframe` package: RFC 9605 end-to-end media encryption with AES-128-GCM, the sender-key ratchet, a replay window, and a ranged framing that keeps codec headers clear and authenticated (built; `sframe@1`, v4; v5 TLS-8 schedule slice E1 planned).

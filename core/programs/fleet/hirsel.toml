@@ -22,6 +22,8 @@ runner = { package = "runner", major = 1, path = "../runner", authority = ["Dir"
 "peer_rpc.hirsel" = "roster"
 "directory.hirsel" = "directory"
 "directory_place.hirsel" = "directory"
+"live_move.hirsel" = "live"
+"live_control.hirsel" = "live"
 "scale_sim.hirsel" = "scale_sim"
 "placement_sim.hirsel" = "placement_sim"
 "fleet_sim_main.hirsel" = "fleet_sim"
@@ -37,6 +39,7 @@ grants = ["Clock", "Random", "Tasks"]
 "directory_laws.hirsel" = "laws"
 "roster_laws.hirsel" = "laws"
 "cluster_laws.hirsel" = "laws"
+"move_laws.hirsel" = "laws"
 "scale_sim_laws.hirsel" = "laws"
 
 [tests.runs."hirsel.ai/fleet@1/laws/sim_fleet_scale_1000_hosts"]
@@ -46,4 +49,13 @@ limit = 536870912
 grants = ["Stdout"]
 
 [tests.runs."hirsel.ai/fleet@1/laws/fleet_three_host_quic"]
+grants = ["Clock", "Random", "Stdout", "Net=UdpBind 127.0.0.0/8 0-65535;UdpSend 127.0.0.0/8 0-65535"]
+
+[tests.runs."hirsel.ai/fleet@1/laws/fleet_live_move_keeps_committed_keys"]
+grants = ["Clock", "Random", "Stdout", "Net=UdpBind 127.0.0.0/8 0-65535;UdpSend 127.0.0.0/8 0-65535"]
+
+[tests.runs."hirsel.ai/fleet@1/laws/fleet_stale_move_claims_change_nothing"]
+grants = ["Clock", "Random", "Stdout", "Net=UdpBind 127.0.0.0/8 0-65535;UdpSend 127.0.0.0/8 0-65535"]
+
+[tests.runs."hirsel.ai/fleet@1/laws/fleet_drain_moves_every_place"]
 grants = ["Clock", "Random", "Stdout", "Net=UdpBind 127.0.0.0/8 0-65535;UdpSend 127.0.0.0/8 0-65535"]

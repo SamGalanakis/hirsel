@@ -1,0 +1,483 @@
+// Cooperative live move of a `Directory[u64]` partition between Fleet hosts
+// (docs/spec/fleet.md FLT-8). Every verb is one authenticated roster datagram.
+// Datagrams may be lost, repeated or reordered, so each handler is idempotent
+// by `(place, attempt)` and each sender repeats until it sees the next state.
+//
+// Order of one move: the source seals and stops serving, the controller records
+// the seal, the destination stages the sealed rows and proves the seal, the
+// controller installs the successor head, the destination serves, the source
+// erases its copy. A host serves only while its durable tenure is `Holding`.
+pub const PLACES: u64 = 2
+
+const RESEND_NS: u64 = 2000000
+
+pub type MoveError: codec + key + send = Storage | UnknownPlace | TargetNotServing | TargetUnhealthy | Busy
+
+/// Row count, content digest and partition metadata of a sealed partition.
+pub type Seal: codec + key + send {
+    rows: u64,
+    digest: roster.Pin,
+    meta: directory.PartitionMeta
+}
+
+pub type Stage: codec + key + send {
+    auth: move_kernel.ClaimAuth,
+    source: u64,
+    seal: Seal,
+    holder: move_kernel.Id16
+}
+
+pub type SealedPlace: codec + key + send {
+    pair: move_kernel.HeadPair,
+    attempt: move_kernel.Id16,
+    target: u64,
+    seal: Seal
+}
+
+/// Durable per-partition role of one host.
+pub type Tenure: codec + key + send = Vacant | Staging(Stage) | Holding(move_kernel.HeadPair) | Sealed(SealedPlace)
+
+pub type ClientOp: codec + key + send = OpClaim(directory.ClaimReq[u64]) | OpRenew(directory.RenewReq[u64]) | OpRead(u64)
+
+pub type OpResult: codec + key + send = Granted(directory.LeaseGrant) | Found(directory.LeaseRow) | Denied(directory.DirError) | NotHolder
+
+/// `MoveFreeze(place, attempt, target)`, `MoveFrozen(place, attempt, seal)`,
+/// `MoveClaim(place, auth, source, seal)`, `MovePull(place, attempt, seq)`,
+/// `MoveRow(place, attempt, seq, key, row)`, `MoveCas(place, auth, holder)`,
+/// `MoveWon(place, attempt, head)`, `MoveSuperseded(place, attempt, actual)`,
+/// `MoveRelease(place, attempt)`, `MoveReleased(place, attempt)`,
+/// `PlaceOp(place, epoch, op)`, `PlaceReply(place, epoch, result)`.
+pub type Wire: codec + key + send = MoveFreeze(u64, move_kernel.Id16, u64) | MoveFrozen(u64, move_kernel.Id16, Seal) | MoveClaim(u64, move_kernel.ClaimAuth, u64, Seal) | MovePull(u64, move_kernel.Id16, u64) | MoveRow(u64, move_kernel.Id16, u64, u64, directory.LeaseRow) | MoveCas(u64, move_kernel.ClaimAuth, move_kernel.Id16) | MoveWon(u64, move_kernel.Id16, move_kernel.HeadView) | MoveSuperseded(u64, move_kernel.Id16, move_kernel.HeadPair) | MoveRelease(u64, move_kernel.Id16) | MoveReleased(u64, move_kernel.Id16) | PlaceOp(u64, u64, ClientOp) | PlaceReply(u64, u64, OpResult)
+
+pub type Worker {
+    controller: u64,
+    parts: List[directory.DirectoryHandles[u64]],
+    cells: List[store.Cell[Tenure]],
+    tenure: List[Tenure],
+    sessions: List[directory.DirSession],
+    staged: List[u64],
+    sent_at: List[u64]
+}
+
+pub fn slot(place: u64) -> Option[u64] {
+    if place == 0 || place > PLACES {
+        return None
+    }
+    Some(place - 1)
+}
+
+/// Best-effort send. The transport is lossy, so a failed send is one more loss.
+pub fn send(mut hub: roster.HostLinks, dst: u64, nonce: u64, msg: Wire) {
+    let co: std.codec.Codec[Wire] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    if let Ok(()) = std.codec.encode(co, msg, mut raw) {
+        let _ = roster.rpc(mut hub, dst, nonce, take raw)
+    }
+}
+
+pub fn decode(data: Bytes) -> Option[Wire] {
+    let co: std.codec.Codec[Wire] = std.codec.of()
+    match std.codec.decode(co, data) {
+        Ok(take msg) => Some(take msg),
+        Error(_) => None,
+    }
+}
+
+/// Declare the partition slots in a fresh host database and seal its schema.
+pub fn open_worker(mut db: store.Db, controller: u64) -> Result[Worker, MoveError] waits {
+    let mut decl = store.declare(db, Migrate) ?=> |_| Storage
+    let mut parts: List[directory.DirectoryHandles[u64]] = list.new()
+    let mut cells: List[store.Cell[Tenure]] = list.new()
+    let mut tenure: List[Tenure] = list.new()
+    let mut sessions: List[directory.DirSession] = list.new()
+    let mut staged: List[u64] = list.new()
+    let mut sent_at: List[u64] = list.new()
+    for i in 0u64 .. PLACES {
+        let mut name = string.from("part")
+        string.push_u64(mut name, i)
+        let handles = directory.declare_directory(mut decl, name, std.codec.key_u64()) ?=> |_| Storage
+        list.push(mut parts, take handles)
+        string.push(mut name, ".tenure")
+        let co: std.codec.Codec[Tenure] = std.codec.of()
+        let cell = store.declare_cell(mut decl, name, take co) ?=> |_| Storage
+        list.push(mut cells, take cell)
+        list.push(mut tenure, Vacant)
+        list.push(mut sessions, directory.DirSession(dir_epoch: 0, takeover_boot_ns: 0, quarantine_until_boot_ns: 0))
+        list.push(mut staged, 0)
+        list.push(mut sent_at, 0)
+    }
+    let _ = store.seal(mut db, take decl) ?=> |_| Storage
+    Ok(Worker(controller, parts: take parts, cells: take cells, tenure: take tenure, sessions: take sessions, staged: take staged, sent_at: take sent_at))
+}
+
+pub fn holding(w: Worker, place: u64) -> Option[move_kernel.HeadPair] {
+    let i = slot(place)?
+    match w.tenure[i] {
+        Holding(pair) => Some(pair),
+        _ => None,
+    }
+}
+
+/// Seal of the durable partition content: metadata, then every row in key order.
+pub fn place_seal(db: store.Db, w: Worker, place: u64) -> Result[Seal, MoveError] waits {
+    let Some(i) = slot(place) else {
+        return Error(UnknownPlace)
+    }
+    let reader = store.reader(db, 1048576) ?=> |_| Storage
+    let snap = store.snapshot(db)
+    let found = store.cell_get(reader, snap, w.parts[i].meta) ?=> |_| Storage
+    let Some(take meta) = take found else {
+        return Error(UnknownPlace)
+    }
+    let meta_codec: std.codec.Codec[directory.PartitionMeta] = std.codec.of()
+    let row_codec: std.codec.Codec[directory.LeaseRow] = std.codec.of()
+    let mut sha = std.sha256.start()
+    let mut buf: Bytes = list.new()
+    std.codec.encode(meta_codec, meta, mut buf) ?=> |_| Storage
+    std.sha256.add(mut sha, buf, 0, list.len(buf))
+    let mut rows = store.scan(reader, snap, w.parts[i].leases, Unbounded, Unbounded) ?=> |_| Storage
+    let mut count: u64 = 0
+    while true {
+        let got = store.next(reader, mut rows) ?=> |_| Storage
+        let Some((key, take row)) = take got else {
+            break
+        }
+        list.clear(mut buf)
+        for shift in 0u64 .. 8 {
+            list.push(mut buf, int.truncate(key >> (8 * shift)))
+        }
+        std.codec.encode(row_codec, row, mut buf) ?=> |_| Storage
+        std.sha256.add(mut sha, buf, 0, list.len(buf))
+        count += 1
+    }
+    Ok(Seal(rows: count, digest: roster.spki(std.sha256.finish(sha)), meta: take meta))
+}
+
+/// Durable tenure and seal of every slot, for byte comparison in refusal laws.
+pub fn worker_bytes(db: store.Db, w: Worker) -> Result[Bytes, MoveError] waits {
+    let reader = store.reader(db, 1048576) ?=> |_| Storage
+    let snap = store.snapshot(db)
+    let tenure_codec: std.codec.Codec[Option[Tenure]] = std.codec.of()
+    let seal_codec: std.codec.Codec[Seal] = std.codec.of()
+    let mut out: Bytes = list.new()
+    for i in 0u64 .. PLACES {
+        let tenure = store.cell_get(reader, snap, w.cells[i]) ?=> |_| Storage
+        std.codec.encode(tenure_codec, tenure, mut out) ?=> |_| Storage
+        if let Ok(take seal) = place_seal(db, w, i + 1) {
+            std.codec.encode(seal_codec, seal, mut out) ?=> |_| Storage
+        }
+    }
+    Ok(take out)
+}
+
+fn nth_row(db: store.Db, h: directory.DirectoryHandles[u64], seq: u64) -> Result[Option[(u64, directory.LeaseRow)], MoveError] waits {
+    let reader = store.reader(db, 1048576) ?=> |_| Storage
+    let mut rows = store.scan(reader, store.snapshot(db), h.leases, Unbounded, Unbounded) ?=> |_| Storage
+    let mut at: u64 = 0
+    while true {
+        let got = store.next(reader, mut rows) ?=> |_| Storage
+        let Some((key, take row)) = take got else {
+            break
+        }
+        if at == seq {
+            return Ok(Some((key, take row)))
+        }
+        at += 1
+    }
+    Ok(None)
+}
+
+// Commit a tenure change, optionally erasing the rows or installing metadata,
+// and update the volatile mirror only after Store reports the commit durable.
+fn commit_tenure(mut w: Worker, mut db: store.Db, i: u64, take next: Tenure, wipe: bool, meta: Option[directory.PartitionMeta]) -> Result[(), MoveError] waits {
+    let ran = store.run(mut db, None, (store.copy_env(w.parts[i]), store.copy_env(w.cells[i]), store.copy_env(next), wipe, store.copy_env(meta)), fn(mut tx, input) -> Result[(), store.Error] {
+        if input.3 {
+            let mut keys: List[u64] = list.new()
+            {
+                let mut rows = store.range(tx, input.0 .leases, Unbounded, Unbounded)?
+                while let Some((key, _)) = store.next_in(tx, mut rows)? {
+                    list.push(mut keys, key)
+                }
+            }
+            for key in keys {
+                let _ = store.delete(mut tx, input.0 .leases, key)?
+            }
+        }
+        if let Some(m) = input.4 {
+            store.cell_set(mut tx, input.0 .meta, clone(m))?
+        }
+        store.cell_set(mut tx, input.1, clone(input.2))?
+        Ok(())
+    }) ?=> |_| Storage
+    let Committed(take done) = take ran else {
+        return Error(Storage)
+    }
+    let _ = store.durable(mut db, done.ticket) ?=> |_| Storage
+    w.tenure[i] = take next
+    Ok(())
+}
+
+/// Create a partition on this host as its first holder.
+pub fn worker_genesis(mut w: Worker, mut db: store.Db, clock: Clock, place: u64, cfg: directory.DirectoryConfig, min_key: u64, max_key: u64, pair: move_kernel.HeadPair) -> Result[(), MoveError] waits {
+    let Some(i) = slot(place) else {
+        return Error(UnknownPlace)
+    }
+    let ran = store.run(mut db, None, (store.copy_env(w.parts[i]), cfg, min_key, max_key), fn(mut tx, input) -> Result[Result[directory.PartitionMeta, directory.DirError], store.Error] {
+        Ok(directory.init_partition_tx(mut tx, input.0, input.1, input.2, input.3))
+    }) ?=> |_| Storage
+    let Committed(take done) = take ran else {
+        return Error(Storage)
+    }
+    let made: Result[directory.PartitionMeta, directory.DirError] = clone(done.value)
+    if let Error(_) = made {
+        return Error(Storage)
+    }
+    commit_tenure(mut w, mut db, i, Holding(pair), false, None)?
+    let now = std.clock.boot_ns(clock)
+    w.sessions[i] = directory.DirSession(dir_epoch: 1, takeover_boot_ns: now, quarantine_until_boot_ns: now)
+    Ok(())
+}
+
+fn fresh_holder(random: Random) -> move_kernel.Id16 {
+    let mut raw: Bytes = list.new()
+    list.fill(mut raw, 16, 0u8)
+    host.random(random, mut raw)
+    let mut lo: u64 = 0
+    let mut hi: u64 = 0
+    for i in 0u64 .. 8 {
+        lo = (lo << 8) | int.widen(raw[i])
+        hi = (hi << 8) | int.widen(raw[8 + i])
+    }
+    move_kernel.Id16(lo, hi)
+}
+
+fn stage_row(mut db: store.Db, h: directory.DirectoryHandles[u64], key: u64, row: directory.LeaseRow) -> Result[(), MoveError] waits {
+    let ran = store.run(mut db, None, (store.copy_env(h), key, store.copy_env(row)), fn(mut tx, input) -> Result[(), store.Error] {
+        store.put(mut tx, input.0 .leases, input.1, clone(input.2))
+    }) ?=> |_| Storage
+    let Committed(take done) = take ran else {
+        return Error(Storage)
+    }
+    let _ = store.durable(mut db, done.ticket) ?=> |_| Storage
+    Ok(())
+}
+
+// The destination becomes holder: one transaction bumps the directory epoch,
+// which starts the D4 quarantine, and records the won head pair.
+fn promote(mut w: Worker, mut db: store.Db, clock: Clock, i: u64, pair: move_kernel.HeadPair) -> Result[(), MoveError] waits {
+    let now = std.clock.boot_ns(clock)
+    let ran = store.run(mut db, None, (store.copy_env(w.parts[i]), store.copy_env(w.cells[i]), pair, now), fn(mut tx, input) -> Result[Result[directory.DirSession, directory.DirError], store.Error] {
+        let session = directory.takeover_partition_tx(mut tx, input.0, input.3)
+        if let Ok(_) = session {
+            store.cell_set(mut tx, input.1, Holding(input.2))?
+        }
+        Ok(session)
+    }) ?=> |_| Storage
+    let Committed(take done) = take ran else {
+        return Error(Storage)
+    }
+    let _ = store.durable(mut db, done.ticket) ?=> |_| Storage
+    let opened: Result[directory.DirSession, directory.DirError] = clone(done.value)
+    let Ok(session) = opened else {
+        return Error(Storage)
+    }
+    w.sessions[i] = session
+    w.tenure[i] = Holding(pair)
+    Ok(())
+}
+
+fn lookup(db: store.Db, h: directory.DirectoryHandles[u64], key: u64) -> Result[Option[directory.LeaseRow], MoveError] waits {
+    let reader = store.reader(db, 1048576) ?=> |_| Storage
+    let row = store.get(reader, store.snapshot(db), h.leases, key) ?=> |_| Storage
+    Ok(take row)
+}
+
+// A repeated claim that already committed reads back its own grant.
+fn run_op(mut db: store.Db, h: directory.DirectoryHandles[u64], session: directory.DirSession, clock: Clock, op: ClientOp) -> Result[OpResult, MoveError] waits {
+    match op {
+        OpClaim(req) => {
+            if let Some(row) = lookup(db, h, req.key)? {
+                if row.term == req.expect_term + 1 && row.holder_node == req.holder_node && row.holder_incarnation == req.holder_incarnation && list.compare_bytes(row.payload, req.payload) == Equal {
+                    return Ok(Granted(directory.LeaseGrant(term: row.term, lease_ns: row.lease_ns, wait_ns: 0, dir_boot_ns: row.last_dir_boot_ns, dir_epoch: row.dir_epoch, seq: row.seq)))
+                }
+            }
+            match directory.durable_claim(mut db, h, session, clock, req) {
+                Ok(grant) => Ok(Granted(grant)),
+                Error(StoreErr) => Error(Storage),
+                Error(e) => Ok(Denied(e)),
+            }
+        },
+        OpRenew(req) => match directory.durable_renew(mut db, h, session, clock, req) {
+            Ok(grant) => Ok(Granted(grant)),
+            Error(StoreErr) => Error(Storage),
+            Error(e) => Ok(Denied(e)),
+        },
+        OpRead(key) => match lookup(db, h, key)? {
+            Some(take row) => Ok(Found(take row)),
+            None => Ok(Denied(Unknown)),
+        },
+    }
+}
+
+/// Apply one authenticated datagram. `from` is the link-pinned sender.
+pub fn worker_message(mut w: Worker, mut db: store.Db, mut hub: roster.HostLinks, clock: Clock, random: Random, from: u64, nonce: u64, data: Bytes) -> Result[(), MoveError] waits {
+    let Some(take msg) = decode(data) else {
+        return Ok(())
+    }
+    match take msg {
+        MoveFreeze(place, attempt, target) => {
+            let Some(i) = slot(place) else {
+                return Ok(())
+            }
+            if from != w.controller {
+                return Ok(())
+            }
+            let current: Tenure = clone(w.tenure[i])
+            match take current {
+                Holding(pair) => {
+                    let seal = place_seal(db, w, place)?
+                    commit_tenure(mut w, mut db, i, Sealed(SealedPlace(pair, attempt, target, seal: clone(seal))), false, None)?
+                    send(mut hub, from, nonce, MoveFrozen(place, attempt, take seal))
+                },
+                Sealed(take s) => {
+                    if s.attempt == attempt {
+                        send(mut hub, from, nonce, MoveFrozen(place, attempt, clone(s.seal)))
+                    }
+                },
+                _ => (),
+            }
+        },
+        MoveClaim(place, auth, source, take seal) => {
+            let Some(i) = slot(place) else {
+                return Ok(())
+            }
+            if from != w.controller {
+                return Ok(())
+            }
+            let current: Tenure = clone(w.tenure[i])
+            if let Vacant = current {
+                let meta: directory.PartitionMeta = clone(seal.meta)
+                let stage = Stage(auth, source, seal: take seal, holder: fresh_holder(random))
+                commit_tenure(mut w, mut db, i, Staging(take stage), true, Some(take meta))?
+                w.staged[i] = 0
+                w.sent_at[i] = 0
+            }
+        },
+        MovePull(place, attempt, seq) => {
+            let Some(i) = slot(place) else {
+                return Ok(())
+            }
+            let current: Tenure = clone(w.tenure[i])
+            if let Sealed(take s) = take current {
+                if s.attempt == attempt && s.target == from {
+                    if let Some((key, take row)) = nth_row(db, w.parts[i], seq)? {
+                        send(mut hub, from, nonce, MoveRow(place, attempt, seq, key, take row))
+                    }
+                }
+            }
+        },
+        MoveRow(place, attempt, seq, key, take row) => {
+            let Some(i) = slot(place) else {
+                return Ok(())
+            }
+            let current: Tenure = clone(w.tenure[i])
+            if let Staging(take st) = take current {
+                if st.auth.attempt == attempt && st.source == from && seq == w.staged[i] && seq < st.seal.rows {
+                    stage_row(mut db, w.parts[i], key, row)?
+                    w.staged[i] += 1
+                    w.sent_at[i] = 0
+                }
+            }
+        },
+        MoveWon(place, attempt, head) => {
+            let Some(i) = slot(place) else {
+                return Ok(())
+            }
+            if from != w.controller {
+                return Ok(())
+            }
+            let current: Tenure = clone(w.tenure[i])
+            if let Staging(take st) = take current {
+                if st.auth.attempt == attempt && head.pair.holder == st.holder {
+                    promote(mut w, mut db, clock, i, head.pair)?
+                }
+            }
+        },
+        MoveSuperseded(place, attempt, _) => {
+            let Some(i) = slot(place) else {
+                return Ok(())
+            }
+            if from != w.controller {
+                return Ok(())
+            }
+            let current: Tenure = clone(w.tenure[i])
+            if let Staging(take st) = take current {
+                if st.auth.attempt == attempt {
+                    commit_tenure(mut w, mut db, i, Vacant, true, None)?
+                }
+            }
+        },
+        MoveRelease(place, attempt) => {
+            let Some(i) = slot(place) else {
+                return Ok(())
+            }
+            if from != w.controller {
+                return Ok(())
+            }
+            let current: Tenure = clone(w.tenure[i])
+            match take current {
+                Sealed(take s) => {
+                    if s.attempt == attempt {
+                        commit_tenure(mut w, mut db, i, Vacant, true, None)?
+                        send(mut hub, from, nonce, MoveReleased(place, attempt))
+                    }
+                },
+                Vacant => send(mut hub, from, nonce, MoveReleased(place, attempt)),
+                _ => (),
+            }
+        },
+        PlaceOp(place, epoch, take op) => {
+            let Some(i) = slot(place) else {
+                return Ok(())
+            }
+            if let Holding(pair) = w.tenure[i] {
+                if pair.epoch == epoch {
+                    let result = run_op(mut db, w.parts[i], w.sessions[i], clock, op)?
+                    send(mut hub, from, nonce, PlaceReply(place, pair.epoch, take result))
+                    return Ok(())
+                }
+            }
+            send(mut hub, from, nonce, PlaceReply(place, epoch, NotHolder))
+        },
+        _ => (),
+    }
+    Ok(())
+}
+
+/// Advance every staging partition: pull the next sealed row, or prove the
+/// staged copy against the seal and ask the controller for the head.
+pub fn worker_poll(mut w: Worker, mut db: store.Db, mut hub: roster.HostLinks, clock: Clock) -> Result[(), MoveError] waits {
+    let now = host.mono_ns(clock)
+    for i in 0u64 .. PLACES {
+        let current: Tenure = clone(w.tenure[i])
+        let Staging(take st) = take current else {
+            continue
+        }
+        if now - w.sent_at[i] < RESEND_NS {
+            continue
+        }
+        w.sent_at[i] = now
+        if w.staged[i] < st.seal.rows {
+            send(mut hub, st.source, 0, MovePull(i + 1, st.auth.attempt, w.staged[i]))
+            continue
+        }
+        if place_seal(db, w, i + 1)? != st.seal {
+            let meta: directory.PartitionMeta = clone(st.seal.meta)
+            commit_tenure(mut w, mut db, i, Staging(take st), true, Some(take meta))?
+            w.staged[i] = 0
+            continue
+        }
+        send(mut hub, w.controller, 0, MoveCas(i + 1, st.auth, st.holder))
+    }
+    Ok(())
+}

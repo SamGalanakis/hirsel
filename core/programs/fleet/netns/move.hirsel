@@ -1,0 +1,351 @@
+// Live move and drain across three OS processes in three network namespaces.
+// Node 0 is the controller and the client. Node 1 creates both places. Node 2
+// receives place 1 by an explicit move and place 2 by the drain of node 1.
+const ISO_STOP: u64 = 0xffffffff00000001
+
+const ISO_FORGE: u64 = 0xffffffff00000002
+
+const ISO_REFUSED: u64 = 0xffffffff00000003
+
+const ISO_READY: u64 = 0xffffffff00000004
+
+const ISO_WAIT_NS: u64 = 200000
+
+type IsoReply {
+    nonce: u64,
+    epoch: u64,
+    result: live.OpResult
+}
+
+type IsoClient {
+    root: TestHost,
+    db: store.Db,
+    cell: store.Cell[roster.Roster],
+    control: live.Control,
+    replies: List[IsoReply],
+    nonce: u64,
+    refused: bool,
+    ready: List[bool]
+}
+
+fn iso_step(mut cl: IsoClient, clock: Clock) waits {
+    result.unwrap(roster.drive(mut cl.root.hub, mut cl.root.socket, clock, host.mono_ns(clock) + ISO_WAIT_NS, mut cl.root.incoming))
+    for e in cl.root.incoming {
+        match e {
+            Admission(req) => {
+                let _ = result.unwrap(roster.admit(mut cl.root.hub, mut cl.db, cl.cell, req))
+            },
+            Message(node: from, incarnation: inc, nonce: id, data: data) => {
+                if id == ISO_READY {
+                    if from < 3 {
+                        cl.ready[from] = true
+                    }
+                    continue
+                }
+                if id == ISO_REFUSED {
+                    if from != 1 {
+                        fail("unexpected refusal report")
+                    }
+                    cl.refused = true
+                    let _ = roster.rpc(mut cl.root.hub, 1, ISO_REFUSED, b"")
+                    continue
+                }
+                let decoded = live.decode(data)
+                if let Some(PlaceReply(_, epoch, take outcome)) = take decoded {
+                    list.push(mut cl.replies, IsoReply(nonce: id, epoch, result: take outcome))
+                } else {
+                    result.unwrap(live.control_message(mut cl.control, mut cl.db, mut cl.root.hub, from, inc, id, data))
+                }
+            },
+            Refused(_) => (),
+        }
+    }
+    result.unwrap(live.control_pump(mut cl.control, mut cl.db, mut cl.root.hub, clock))
+}
+
+// One client operation. With no fixed route it follows the controller's route
+// through `NotHolder`. With a fixed route it returns the first reply.
+fn iso_ask(mut cl: IsoClient, clock: Clock, place: u64, op: live.ClientOp, fixed: Option[(u64, u64)], mut epochs: List[u64]) -> live.OpResult waits {
+    let start = host.mono_ns(clock)
+    cl.nonce += 1
+    let id = cl.nonce
+    let mut sent: u64 = 0
+    while true {
+        let now = host.mono_ns(clock)
+        if now - sent > 5000000 {
+            sent = now
+            let (node, epoch) = match fixed {
+                Some(route) => route,
+                None => option.unwrap(live.route(cl.control, place)),
+            }
+            live.send(mut cl.root.hub, node, id, PlaceOp(place, epoch, clone(op)))
+        }
+        iso_step(mut cl, clock)
+        let mut answer: Option[live.OpResult] = None
+        for r in cl.replies {
+            if r.nonce == id && (r.result != NotHolder || fixed != None) {
+                answer = Some(clone(r.result))
+                list.push(mut epochs, r.epoch)
+            }
+        }
+        list.clear(mut cl.replies)
+        if let Some(take found) = take answer {
+            return take found
+        }
+        check_time(clock, start, "client operation got no answer")
+    }
+    fail("unreachable")
+}
+
+fn iso_room(key: u64) -> Bytes {
+    let mut name = string.from("room-")
+    string.push_u64(mut name, key)
+    string.into_bytes(take name)
+}
+
+// The refusal hint is on the holder's boot clock. The three namespaces share
+// one kernel, so the client reads the same clock.
+fn iso_idle(mut cl: IsoClient, clock: Clock, until: u64) waits {
+    while std.clock.boot_ns(clock) < until {
+        iso_step(mut cl, clock)
+    }
+}
+
+fn iso_claim(mut cl: IsoClient, clock: Clock, place: u64, key: u64, mut epochs: List[u64]) -> u64 waits {
+    let start = host.mono_ns(clock)
+    while true {
+        let req = directory.ClaimReq(key, holder_node: 0, holder_incarnation: 5, expect_term: 0, lease_ns: 0, holder_boot_ns: std.clock.boot_ns(clock), reported_drift_ppm: 200, payload: iso_room(key))
+        match iso_ask(mut cl, clock, place, OpClaim(take req), None, mut epochs) {
+            Granted(grant) => return grant.term,
+            Denied(Quarantined(until)) => iso_idle(mut cl, clock, until),
+            Denied(Held(until)) => iso_idle(mut cl, clock, until),
+            _ => fail("claim refused"),
+        }
+        check_time(clock, start, "claim never granted")
+    }
+    fail("unreachable")
+}
+
+fn iso_check(mut cl: IsoClient, clock: Clock, place: u64, acked: List[(u64, u64)]) waits {
+    let mut epochs: List[u64] = list.new()
+    for entry in acked {
+        let (key, term) = entry
+        let Found(take row) = iso_ask(mut cl, clock, place, OpRead(key), None, mut epochs) else {
+            fail("acknowledged key is missing after the move")
+        }
+        if row.term != term || row.holder_node != 0 || row.holder_incarnation != 5 || list.compare_bytes(row.payload, iso_room(key)) != Equal {
+            fail("acknowledged key changed across the move")
+        }
+    }
+    for epoch in epochs {
+        if epoch != 2 {
+            fail("a read was served at the old head epoch")
+        }
+    }
+}
+
+fn iso_ordered(epochs: List[u64]) -> bool {
+    if list.len(epochs) == 0 || epochs[0] != 1 || epochs[list.len(epochs) - 1] != 2 {
+        return false
+    }
+    for i in 1u64 .. list.len(epochs) {
+        if epochs[i] < epochs[i - 1] {
+            return false
+        }
+    }
+    true
+}
+
+fn iso_pair(place: u64) -> move_kernel.HeadPair {
+    move_kernel.HeadPair(epoch: 1, holder: move_kernel.id16_from_u64(100 + place))
+}
+
+fn move_controller(take root: TestHost, take db: store.Db, take cell: store.Cell[roster.Roster], take table: store.Table[u64, live.PlaceRow], clock: Clock, random: Random, out: Stdout) waits {
+    let control = result.unwrap(live.control_open(db, 0, take table))
+    let mut cl = IsoClient(root: take root, db: take db, cell: take cell, control: take control, replies: list.new(), nonce: 0, refused: false, ready: list.new())
+    list.fill(mut cl.ready, 3, false)
+    publish_seed(mut cl.root, mut cl.db, cl.cell, out)
+    let boot = host.mono_ns(clock)
+    // Each worker reports once it holds a link to both peers, so the move below
+    // does not time the cluster's first convergence.
+    while !cl.ready[1] || !cl.ready[2] || roster.health(cl.root.hub, 1) != Healthy || roster.health(cl.root.hub, 2) != Healthy {
+        iso_step(mut cl, clock)
+        check_time(clock, boot, "workers did not join")
+    }
+    for place in 1u64 .. 3 {
+        if result.unwrap(live.assign(mut cl.control, mut cl.db, place, 1, 6, move_kernel.id16_from_u64(100 + place))) != iso_pair(place) {
+            fail("genesis head")
+        }
+    }
+    let mut epochs: List[u64] = list.new()
+    let mut others: List[u64] = list.new()
+    let mut one: List[(u64, u64)] = list.new()
+    let mut two: List[(u64, u64)] = list.new()
+    for key in 0u64 .. 12 {
+        list.push(mut one, (key, iso_claim(mut cl, clock, 1, key, mut epochs)))
+        list.push(mut two, (key, iso_claim(mut cl, clock, 2, key, mut others)))
+    }
+    // (a) Move place 1 while the client keeps claiming new keys in it.
+    let start = host.mono_ns(clock)
+    let _ = result.unwrap(live.request_move(mut cl.control, mut cl.db, cl.root.hub, 1, 2))
+    let mut key: u64 = 12
+    let mut moved: u64 = 0
+    while !live.settled(cl.control, 1) || key < 16 {
+        list.push(mut one, (key, iso_claim(mut cl, clock, 1, key, mut epochs)))
+        key += 1
+        if moved == 0 && live.route(cl.control, 1) == Some((2, 2)) {
+            moved = host.mono_ns(clock) - start
+        }
+        check_time(clock, start, "move did not complete")
+    }
+    timed_value(out, "move_ns", moved)
+    if live.route(cl.control, 1) != Some((2, 2)) || live.route(cl.control, 2) != Some((1, 1)) {
+        fail("routes after the move")
+    }
+    iso_check(mut cl, clock, 1, one)
+    if !iso_ordered(epochs) {
+        fail("an acknowledgement came from an older head epoch")
+    }
+    // (b) The deposed holder and the old head epoch are refused. The
+    // controller's durable rows are byte-identical afterwards.
+    let before = result.unwrap(live.control_bytes(cl.db, cl.control))
+    let mut stale: List[u64] = list.new()
+    if iso_ask(mut cl, clock, 1, OpRead(0), Some((1, 1)), mut stale) != NotHolder || iso_ask(mut cl, clock, 1, OpRead(0), Some((2, 1)), mut stale) != NotHolder {
+        fail("a request at the old head epoch was served")
+    }
+    let forge = host.mono_ns(clock)
+    let mut asked: u64 = 0
+    while !cl.refused {
+        let now = host.mono_ns(clock)
+        if now - asked > 5000000 {
+            asked = now
+            let _ = roster.rpc(mut cl.root.hub, 1, ISO_FORGE, b"")
+        }
+        iso_step(mut cl, clock)
+        check_time(clock, forge, "the deposed holder reported no refusal")
+    }
+    if list.compare_bytes(before, result.unwrap(live.control_bytes(cl.db, cl.control))) != Equal {
+        fail("a refused claim changed the controller's durable rows")
+    }
+    iso_check(mut cl, clock, 1, one)
+    timed_value(out, "stale_refused", 3)
+    // (c) Drain node 1 while the client keeps claiming in the place it holds.
+    let drain = host.mono_ns(clock)
+    let _ = result.unwrap(roster.configure(mut cl.root.hub, mut cl.db, cl.cell, SetDrain(1, true)))
+    while !live.drained(cl.control, 1) || key < 20 {
+        list.push(mut two, (key, iso_claim(mut cl, clock, 2, key, mut others)))
+        key += 1
+        check_time(clock, drain, "drain did not complete")
+    }
+    timed_value(out, "drain_ns", host.mono_ns(clock) - drain)
+    if live.route(cl.control, 1) != Some((2, 2)) || live.route(cl.control, 2) != Some((2, 2)) {
+        fail("a place stayed on the drained node")
+    }
+    iso_check(mut cl, clock, 1, one)
+    iso_check(mut cl, clock, 2, two)
+    if !iso_ordered(others) {
+        fail("an acknowledgement came from an older head epoch")
+    }
+    if live.request_move(mut cl.control, mut cl.db, cl.root.hub, 1, 1) != Error(TargetNotServing) {
+        fail("a place moved back to the drained node")
+    }
+    timed_value(out, "acked_rows", list.len(one) + list.len(two))
+    // Stop both workers. Each checks its own durable state before it exits.
+    let stop = host.mono_ns(clock)
+    let mut told: u64 = 0
+    while roster.connected(cl.root.hub, 1) || roster.connected(cl.root.hub, 2) {
+        let now = host.mono_ns(clock)
+        if now - told > 5000000 {
+            told = now
+            let _ = roster.rpc(mut cl.root.hub, 1, ISO_STOP, b"")
+            let _ = roster.rpc(mut cl.root.hub, 2, ISO_STOP, b"")
+        }
+        iso_step(mut cl, clock)
+        check_time(clock, stop, "workers did not stop")
+    }
+}
+
+fn move_worker(mut h: TestHost, node: u64, clock: Clock, random: Random, out: Stdout) waits {
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 16777216u64)))
+    let mut w = result.unwrap(live.open_worker(mut db, 0))
+    if node == 1 {
+        for place in 1u64 .. 3 {
+            let cfg = directory.DirectoryConfig(partition_id: place, drift_ppm: 200, default_lease_ns: 50000000, max_lease_cap_ns: 60000000000)
+            result.unwrap(live.worker_genesis(mut w, mut db, clock, place, cfg, 0u64, 999u64, iso_pair(place)))
+        }
+    }
+    // The permit this node sealed place 1 under. It replays it once deposed.
+    let mut old: Option[move_kernel.ClaimAuth] = None
+    let mut forging = false
+    let mut refused = false
+    let mut reported = false
+    let mut sent: u64 = 0
+    let mut greeted = false
+    let mut hailed: u64 = 0
+    while true {
+        result.unwrap(roster.drive(mut h.hub, mut h.socket, clock, host.mono_ns(clock) + ISO_WAIT_NS, mut h.incoming))
+        if !greeted && joined(h, node) && host.mono_ns(clock) - hailed > 5000000 {
+            hailed = host.mono_ns(clock)
+            let _ = roster.rpc(mut h.hub, 0, ISO_READY, b"")
+        }
+        let mut stop = false
+        for e in h.incoming {
+            if let Message(node: from, nonce: id, data: data, ..) = e {
+                if from == 0 && id == ISO_STOP {
+                    stop = true
+                } else if from == 0 && id == ISO_FORGE {
+                    forging = true
+                } else if from == 0 && id == ISO_REFUSED {
+                    reported = true
+                } else if from == 0 && id == ISO_FORGE + 16 {
+                    let Some(auth) = old else {
+                        fail("a refusal arrived before any claim")
+                    }
+                    let Some(MoveSuperseded(place, attempt, actual)) = live.decode(data) else {
+                        fail("a stale claim was not refused")
+                    }
+                    if place != 1 || attempt != auth.attempt || actual.epoch != 2 || Some(actual) == auth.expect {
+                        fail("the refusal did not name the actual head")
+                    }
+                    refused = true
+                } else {
+                    greeted = true
+                    result.unwrap(live.worker_message(mut w, mut db, mut h.hub, clock, random, from, id, data))
+                }
+            }
+        }
+        result.unwrap(live.worker_poll(mut w, mut db, mut h.hub, clock))
+        if let Sealed(s) = w.tenure[0] {
+            old = Some(move_kernel.ClaimAuth(expect: Some(s.pair), attempt: s.attempt, class: Permit))
+        }
+        let now = host.mono_ns(clock)
+        if forging && !reported && now - sent > 5000000 {
+            sent = now
+            if refused {
+                let _ = roster.rpc(mut h.hub, 0, ISO_REFUSED, b"")
+            } else if live.holding(w, 1) == None {
+                if let Some(auth) = old {
+                    live.send(mut h.hub, 0, ISO_FORGE + 16, MoveCas(1, auth, move_kernel.id16_from_u64(666)))
+                }
+            }
+        }
+        if stop {
+            let mut rows: u64 = 0
+            for place in 1u64 .. 3 {
+                let held = live.holding(w, place) != None
+                if held != (node == 2) {
+                    fail("wrong holder at the end of the drain")
+                }
+                if let Ok(seal) = live.place_seal(db, w, place) {
+                    rows += seal.rows
+                }
+            }
+            if node == 1 && rows != 0 {
+                fail("the drained node kept rows")
+            }
+            timed_value(out, "held_rows", rows)
+            result.unwrap(roster.shutdown(mut h.hub, mut h.socket, clock))
+            return
+        }
+    }
+}

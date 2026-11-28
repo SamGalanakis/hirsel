@@ -3,7 +3,8 @@
 type TestHost {
     hub: roster.HostLinks,
     socket: UdpSocket,
-    incoming: List[roster.Incoming]
+    incoming: List[roster.Incoming],
+    rounds: u64
 }
 
 fn cluster_key(random: Random) -> quic.handshake.Identity {
@@ -33,11 +34,21 @@ fn bind_host(network: Net, ip: u32) -> (UdpSocket, Addr) waits {
 
 fn test_host(clock: Clock, random: Random, node: u64, incarnation: u64, take key: quic.handshake.Identity, take sock: UdpSocket, take initial: roster.Roster) -> TestHost {
     let hub = result.unwrap(roster.open_links(clock, random, node, incarnation, 0, take key, take initial))
-    TestHost(hub: take hub, socket: take sock, incoming: list.new())
+    TestHost(hub: take hub, socket: take sock, incoming: list.new(), rounds: 0)
 }
 
+// Most rounds poll without waiting. Every 16th round waits a short real interval:
+// a receive whose deadline has already passed returns before the host poller's
+// next turn, and only that turn refills the UDP receive budget (NET-16), so a
+// loop made only of expired receives stops reading after 256 KiB.
 fn tick(mut h: TestHost, clock: Clock) waits {
-    result.unwrap(roster.drive(mut h.hub, mut h.socket, clock, host.mono_ns(clock), mut h.incoming))
+    h.rounds += 1
+    let wait = if h.rounds % 16 == 0 {
+        20000u64
+    } else {
+        0u64
+    }
+    result.unwrap(roster.drive(mut h.hub, mut h.socket, clock, host.mono_ns(clock) + wait, mut h.incoming))
 }
 
 type DirectoryFixture {

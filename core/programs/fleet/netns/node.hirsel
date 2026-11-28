@@ -22,7 +22,8 @@ fn read_pin(dir: Dir, n: u64) -> roster.Pin waits {
     roster.spki(key)
 }
 
-fn run_controller(mut root: TestHost, mut db: store.Db, cell: store.Cell[roster.Roster], dir_db: DirectoryFixture, clock: Clock, out: Stdout) waits {
+// Admit the controller's own row and print it as the workers' bootstrap seed.
+fn publish_seed(mut root: TestHost, mut db: store.Db, cell: store.Cell[roster.Roster], out: Stdout) waits {
     let own = result.unwrap(roster.bootstrap(root.hub))
     let seed = result.unwrap(roster.admit(mut root.hub, mut db, cell, own))
     let co: std.codec.Codec[roster.Member] = std.codec.of()
@@ -31,6 +32,27 @@ fn run_controller(mut root: TestHost, mut db: store.Db, cell: store.Cell[roster.
     let mut line = std.hex.encode(raw)
     string.push(mut line, "\n")
     result.unwrap(stdout.write(out, line))
+}
+
+// True once `node` sees all three rows serving and holds a link to both peers.
+fn joined(h: TestHost, node: u64) -> bool {
+    for n in 0u64 .. 3 {
+        if let Some(m) = roster.member(h.hub, n) {
+            if m.status != Serving || m.incarnation != 5 + n || m.listen != roster.listen_addr(address(n)) {
+                return false
+            }
+        } else {
+            return false
+        }
+        if n != node && !roster.connected(h.hub, n) {
+            return false
+        }
+    }
+    true
+}
+
+fn run_controller(mut root: TestHost, mut db: store.Db, cell: store.Cell[roster.Roster], dir_db: DirectoryFixture, clock: Clock, out: Stdout) waits {
+    publish_seed(mut root, mut db, cell, out)
     let mut finished: Inline[bool, 3] =[false; 3]
     let mut revoked = false
     while true {
@@ -79,20 +101,7 @@ fn run_worker(mut h: TestHost, node: u64, clock: Clock, out: Stdout) waits {
     while true {
         result.unwrap(roster.drive(mut h.hub, mut h.socket, clock, host.mono_ns(clock) + 100000, mut h.incoming))
         if !ready {
-            let mut all = true
-            for n in 0u64 .. 3 {
-                if let Some(m) = roster.member(h.hub, n) {
-                    if m.status != Serving || m.incarnation != 5 + n || m.listen != roster.listen_addr(address(n)) {
-                        all = false
-                    }
-                } else {
-                    all = false
-                }
-                if n != node && !roster.connected(h.hub, n) {
-                    all = false
-                }
-            }
-            if !all {
+            if !joined(h, node) {
                 continue
             }
             ready = true
@@ -142,6 +151,13 @@ fn run_worker(mut h: TestHost, node: u64, clock: Clock, out: Stdout) waits {
     }
 }
 
+fn number_arg(a: Args, at: u64, default: u64) -> u64 {
+    match args.get(a, at) {
+        Some(arg) => result.unwrap(int.parse(string.from(arg))),
+        None => default,
+    }
+}
+
 pub fn isolated_node(a: Args, dir: Dir, net: Net, clock: Clock, random: Random, out: Stdout) -> Result[(), Exit] waits {
     let Some(arg) = args.get(a, 0) else {
         fail("expected node number")
@@ -150,6 +166,11 @@ pub fn isolated_node(a: Args, dir: Dir, net: Net, clock: Clock, random: Random, 
     if node > 2 {
         fail("invalid node")
     }
+    // Scenario 0 is the roster and lookup qualification, 1 the live move and
+    // drain, 2 the compute benchmark with its concurrency and create count.
+    let scenario = number_arg(a, 1, 0)
+    let concurrency = number_arg(a, 2, 16)
+    let creates = number_arg(a, 3, 100000)
     let key = result.unwrap(secret.seal(result.unwrap(std.file.read(dir, "key.der")), "sign(p256)"))
     let mut chain: List[Bytes] = list.new()
     list.push(mut chain, result.unwrap(std.file.read(dir, "cert.der")))
@@ -159,20 +180,35 @@ pub fn isolated_node(a: Args, dir: Dir, net: Net, clock: Clock, random: Random, 
         let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 16777216u64)))
         let mut decl = result.unwrap(store.declare(db, Migrate))
         let cell = result.unwrap(roster.declare(mut decl))
+        let table = result.unwrap(live.control_declare(mut decl))
         let _ = result.unwrap(store.seal(mut db, take decl))
         for n in 0u64 .. 3 {
             let _ = result.unwrap(roster.commit(mut db, cell, Invite(node: n, pin: read_pin(dir, n), listen: roster.listen_addr(address(n)))))
         }
         let mut root = test_host(clock, random, node, 5, take identity, take sock, result.unwrap(roster.load(db, cell)))
-        let dir_db = cluster_directory(clock, random)
-        run_controller(mut root, mut db, cell, dir_db, clock, out)
+        if scenario == 1 {
+            move_controller(take root, take db, take cell, take table, clock, random, out)
+        } else if scenario == 2 {
+            bench_desk(mut root, mut db, cell, clock, out, creates)
+        } else {
+            let dir_db = cluster_directory(clock, random)
+            run_controller(mut root, mut db, cell, dir_db, clock, out)
+        }
     } else {
         let co: std.codec.Codec[roster.Member] = std.codec.of()
         let seed = result.unwrap(std.codec.decode(co, result.unwrap(std.file.read(dir, "seed"))))
         let mut initial = roster.empty()
         result.unwrap(roster.apply(mut initial, seed))
         let mut h = test_host(clock, random, node, 5 + node, take identity, take sock, take initial)
-        run_worker(mut h, node, clock, out)
+        if scenario == 1 {
+            move_worker(mut h, node, clock, random, out)
+        } else if scenario == 2 && node == 1 {
+            bench_dispatcher(mut h, clock, out, concurrency, creates)
+        } else if scenario == 2 {
+            bench_worker(mut h, clock, out)
+        } else {
+            run_worker(mut h, node, clock, out)
+        }
     }
     Ok(())
 }

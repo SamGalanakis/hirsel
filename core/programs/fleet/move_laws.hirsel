@@ -1,0 +1,427 @@
+// Three Fleet hosts on distinct loopback addresses run the live move verbs over
+// their pinned QUIC links. Node 0 is the controller and the client. Nodes 1 and
+// 2 hold partitions. Every step asserts that no place has two serving hosts.
+type Reply {
+    nonce: u64,
+    epoch: u64,
+    result: live.OpResult
+}
+
+type Seen {
+    nonce: u64,
+    msg: live.Wire
+}
+
+type MoveCluster {
+    root: TestHost,
+    b: TestHost,
+    c: TestHost,
+    db: store.Db,
+    cell: store.Cell[roster.Roster],
+    control: live.Control,
+    db1: store.Db,
+    w1: live.Worker,
+    db2: store.Db,
+    w2: live.Worker,
+    replies: List[Reply],
+    seen1: List[Seen],
+    nonce: u64,
+    spare_key: quic.handshake.Identity,
+    initial: roster.Roster
+}
+
+fn move_cluster(network: Net, clock: Clock, random: Random) -> MoveCluster waits {
+    let (take s0, a0) = bind_host(network, 0x7f000001)
+    let (take s1, a1) = bind_host(network, 0x7f000002)
+    let (take s2, a2) = bind_host(network, 0x7f000003)
+    let k0 = cluster_key(random)
+    let k1 = cluster_key(random)
+    let k2 = cluster_key(random)
+    let spare_key = copy_key(k1)
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 16777216u64)))
+    let mut decl = result.unwrap(store.declare(db, Migrate))
+    let cell = result.unwrap(roster.declare(mut decl))
+    let table = result.unwrap(live.control_declare(mut decl))
+    let _ = result.unwrap(store.seal(mut db, take decl))
+    let _ = result.unwrap(roster.commit(mut db, cell, Invite(node: 0, pin: result.unwrap(roster.identity_pin(k0)), listen: roster.listen_addr(a0))))
+    let _ = result.unwrap(roster.commit(mut db, cell, Invite(node: 1, pin: result.unwrap(roster.identity_pin(k1)), listen: roster.listen_addr(a1))))
+    let _ = result.unwrap(roster.commit(mut db, cell, Invite(node: 2, pin: result.unwrap(roster.identity_pin(k2)), listen: roster.listen_addr(a2))))
+    let mut root = test_host(clock, random, 0, 5, take k0, take s0, result.unwrap(roster.load(db, cell)))
+    let own = result.unwrap(roster.bootstrap(root.hub))
+    let seed = result.unwrap(roster.admit(mut root.hub, mut db, cell, own))
+    let mut initial = roster.empty()
+    result.unwrap(roster.apply(mut initial, seed))
+    let mut b = test_host(clock, random, 1, 6, take k1, take s1, clone(initial))
+    let mut c = test_host(clock, random, 2, 7, take k2, take s2, clone(initial))
+    let start = host.mono_ns(clock)
+    while !converged(b, root) || !converged(c, root) || !roster.connected(b.hub, 2) || !roster.connected(c.hub, 1) || roster.health(root.hub, 1) != Healthy || roster.health(root.hub, 2) != Healthy {
+        admit_round(mut root, clock, mut db, cell)
+        tick(mut b, clock)
+        tick(mut c, clock)
+        check_time(clock, start, "three pinned nodes did not converge")
+    }
+    let control = result.unwrap(live.control_open(db, 0, take table))
+    let mut db1 = store.memory(clock, random, result.unwrap(store.sized(Memory, 16777216u64)))
+    let w1 = result.unwrap(live.open_worker(mut db1, 0))
+    let mut db2 = store.memory(clock, random, result.unwrap(store.sized(Memory, 16777216u64)))
+    let w2 = result.unwrap(live.open_worker(mut db2, 0))
+    MoveCluster(root: take root, b: take b, c: take c, db: take db, cell: take cell, control: take control, db1: take db1, w1: take w1, db2: take db2, w2: take w2, replies: list.new(), seen1: list.new(), nonce: 0, spare_key: take spare_key, initial: take initial)
+}
+
+fn seed_place(mut cl: MoveCluster, clock: Clock, place: u64, node: u64) -> move_kernel.HeadPair waits {
+    let pair = result.unwrap(live.assign(mut cl.control, mut cl.db, place, node, 5 + node, move_kernel.id16_from_u64(100 + place)))
+    let cfg = directory.DirectoryConfig(partition_id: place, drift_ppm: 200, default_lease_ns: 50000000, max_lease_cap_ns: 60000000000)
+    if node == 1 {
+        result.unwrap(live.worker_genesis(mut cl.w1, mut cl.db1, clock, place, cfg, 0u64, 999u64, pair))
+    } else {
+        result.unwrap(live.worker_genesis(mut cl.w2, mut cl.db2, clock, place, cfg, 0u64, 999u64, pair))
+    }
+    pair
+}
+
+fn move_step(mut cl: MoveCluster, clock: Clock, random: Random) waits {
+    tick(mut cl.root, clock)
+    for e in cl.root.incoming {
+        match e {
+            Admission(req) => {
+                let _ = result.unwrap(roster.admit(mut cl.root.hub, mut cl.db, cl.cell, req))
+            },
+            Message(node: from, incarnation: inc, nonce: id, data: data) => {
+                let decoded = live.decode(data)
+                if let Some(PlaceReply(_, epoch, take outcome)) = take decoded {
+                    list.push(mut cl.replies, Reply(nonce: id, epoch, result: take outcome))
+                } else {
+                    result.unwrap(live.control_message(mut cl.control, mut cl.db, mut cl.root.hub, from, inc, id, data))
+                }
+            },
+            Refused(_) => (),
+        }
+    }
+    result.unwrap(live.control_pump(mut cl.control, mut cl.db, mut cl.root.hub, clock))
+    tick(mut cl.b, clock)
+    for e in cl.b.incoming {
+        if let Message(node: from, nonce: id, data: data, ..) = e {
+            if id != 0 {
+                if let Some(take msg) = live.decode(data) {
+                    list.push(mut cl.seen1, Seen(nonce: id, msg: take msg))
+                }
+            }
+            result.unwrap(live.worker_message(mut cl.w1, mut cl.db1, mut cl.b.hub, clock, random, from, id, data))
+        }
+    }
+    result.unwrap(live.worker_poll(mut cl.w1, mut cl.db1, mut cl.b.hub, clock))
+    tick(mut cl.c, clock)
+    for e in cl.c.incoming {
+        if let Message(node: from, nonce: id, data: data, ..) = e {
+            result.unwrap(live.worker_message(mut cl.w2, mut cl.db2, mut cl.c.hub, clock, random, from, id, data))
+        }
+    }
+    result.unwrap(live.worker_poll(mut cl.w2, mut cl.db2, mut cl.c.hub, clock))
+    for place in 1u64 .. live.PLACES + 1 {
+        if live.holding(cl.w1, place) != None && live.holding(cl.w2, place) != None {
+            fail("two hosts serve one place")
+        }
+    }
+}
+
+fn routed(cl: MoveCluster, place: u64) -> (u64, u64) {
+    option.unwrap(live.route(cl.control, place))
+}
+
+// One client operation over the wire. With no fixed route the client follows
+// the controller's route and repeats through `NotHolder`. With a fixed route it
+// returns the first reply. Each answer's serving epoch is appended to `epochs`.
+fn place_ask(mut cl: MoveCluster, clock: Clock, random: Random, place: u64, op: live.ClientOp, fixed: Option[(u64, u64)], mut epochs: List[u64]) -> live.OpResult waits {
+    let start = host.mono_ns(clock)
+    cl.nonce += 1
+    let id = cl.nonce
+    let mut sent: u64 = 0
+    while true {
+        let now = host.mono_ns(clock)
+        if now - sent > 5000000 {
+            sent = now
+            let (node, epoch) = match fixed {
+                Some(route) => route,
+                None => routed(cl, place),
+            }
+            live.send(mut cl.root.hub, node, id, PlaceOp(place, epoch, clone(op)))
+        }
+        move_step(mut cl, clock, random)
+        let mut answer: Option[live.OpResult] = None
+        for r in cl.replies {
+            if r.nonce == id && (r.result != NotHolder || fixed != None) {
+                answer = Some(clone(r.result))
+                list.push(mut epochs, r.epoch)
+            }
+        }
+        list.clear(mut cl.replies)
+        if let Some(take found) = take answer {
+            return take found
+        }
+        check_time(clock, start, "client operation got no answer")
+    }
+    fail("unreachable")
+}
+
+fn room(key: u64) -> Bytes {
+    let mut name = string.from("room-")
+    string.push_u64(mut name, key)
+    string.into_bytes(take name)
+}
+
+// Keep every host running until the holder's refusal hint passes. The hint is
+// on the holder's boot clock, which all three hosts of this process share.
+fn idle_until(mut cl: MoveCluster, clock: Clock, random: Random, until: u64) waits {
+    while std.clock.boot_ns(clock) < until {
+        move_step(mut cl, clock, random)
+    }
+}
+
+// Claim `expect + 1` for the client, waiting out a lease or a takeover quarantine.
+fn claim_key(mut cl: MoveCluster, clock: Clock, random: Random, place: u64, key: u64, expect: u64, mut epochs: List[u64]) -> u64 waits {
+    let start = host.mono_ns(clock)
+    while true {
+        let req = directory.ClaimReq(key, holder_node: 0, holder_incarnation: 5, expect_term: expect, lease_ns: 0, holder_boot_ns: std.clock.boot_ns(clock), reported_drift_ppm: 200, payload: room(key))
+        match place_ask(mut cl, clock, random, place, OpClaim(take req), None, mut epochs) {
+            Granted(grant) => return grant.term,
+            Denied(Quarantined(until)) => idle_until(mut cl, clock, random, until),
+            Denied(Held(until)) => idle_until(mut cl, clock, random, until),
+            _ => fail("claim refused"),
+        }
+        check_time(clock, start, "claim never granted")
+    }
+    fail("unreachable")
+}
+
+// Every acknowledged `(key, term)` must read back from the place's holder.
+fn check_acked(mut cl: MoveCluster, clock: Clock, random: Random, place: u64, acked: List[(u64, u64)]) waits {
+    let mut epochs: List[u64] = list.new()
+    for entry in acked {
+        let (key, term) = entry
+        let Found(take row) = place_ask(mut cl, clock, random, place, OpRead(key), None, mut epochs) else {
+            fail("acknowledged key is missing after the move")
+        }
+        if row.term != term || row.holder_node != 0 || row.holder_incarnation != 5 || list.compare_bytes(row.payload, room(key)) != Equal {
+            fail("acknowledged key changed across the move")
+        }
+    }
+}
+
+fn nondecreasing(epochs: List[u64], first: u64, last: u64) -> bool {
+    if list.len(epochs) == 0 || epochs[0] != first || epochs[list.len(epochs) - 1] != last {
+        return false
+    }
+    for i in 1u64 .. list.len(epochs) {
+        if epochs[i] < epochs[i - 1] {
+            return false
+        }
+    }
+    true
+}
+
+fn durable_bytes(cl: MoveCluster) -> Bytes waits {
+    let mut out = result.unwrap(live.control_bytes(cl.db, cl.control))
+    let held = result.unwrap(live.worker_bytes(cl.db2, cl.w2))
+    list.append(mut out, held)
+    take out
+}
+
+// Node 1 sends a claim of its own making and returns the controller's answer.
+fn forged_claim(mut cl: MoveCluster, clock: Clock, random: Random, place: u64, auth: move_kernel.ClaimAuth) -> live.Wire waits {
+    let start = host.mono_ns(clock)
+    cl.nonce += 1
+    let id = cl.nonce
+    let mut sent: u64 = 0
+    while true {
+        let now = host.mono_ns(clock)
+        if now - sent > 5000000 {
+            sent = now
+            live.send(mut cl.b.hub, 0, id, MoveCas(place, auth, move_kernel.id16_from_u64(666)))
+        }
+        move_step(mut cl, clock, random)
+        let mut answer: Option[live.Wire] = None
+        for s in cl.seen1 {
+            if s.nonce == id {
+                answer = Some(clone(s.msg))
+            }
+        }
+        list.clear(mut cl.seen1)
+        if let Some(take found) = take answer {
+            return take found
+        }
+        check_time(clock, start, "forged claim got no answer")
+    }
+    fail("unreachable")
+}
+
+/// bug: A live move serves a place from two hosts at once, copies a source that still accepts writes, or drops a row the source already acknowledged.
+/// oracle: FLT-8. The client's own record of acknowledged (key, term) pairs, taken before and during the move, reads back unchanged from worker 2, worker 1 keeps no row, and acknowledgements never return to an older head epoch.
+@test
+fn fleet_live_move_keeps_committed_keys(network: Net, clock: Clock, random: Random, out: Stdout) -> Result[(), ()] waits {
+    let mut cl = move_cluster(network, clock, random)
+    let genesis = seed_place(mut cl, clock, 1, 1)
+    let mut epochs: List[u64] = list.new()
+    let mut acked: List[(u64, u64)] = list.new()
+    for key in 0u64 .. 12 {
+        list.push(mut acked, (key, claim_key(mut cl, clock, random, 1, key, 0, mut epochs)))
+    }
+    acked[0] = (0, claim_key(mut cl, clock, random, 1, 0, 1, mut epochs))
+    if acked[0] != (0, 2) || acked[11] != (11, 1) {
+        fail("claims before the move")
+    }
+    let start = host.mono_ns(clock)
+    let _ = result.unwrap(live.request_move(mut cl.control, mut cl.db, cl.root.hub, 1, 2))
+    let mut key: u64 = 12
+    let mut moved: u64 = 0
+    while routed(cl, 1) != (2, 2) || !live.drained(cl.control, 1) || key < 16 {
+        list.push(mut acked, (key, claim_key(mut cl, clock, random, 1, key, 0, mut epochs)))
+        key += 1
+        if moved == 0 && routed(cl, 1) == (2, 2) {
+            moved = host.mono_ns(clock) - start
+        }
+        check_time(clock, start, "move did not complete")
+    }
+    timed_value(out, "move_ns", moved)
+    let Some(pair) = live.holding(cl.w2, 1) else {
+        fail("worker 2 does not hold the moved place")
+    }
+    if pair.epoch != genesis.epoch + 1 || pair.holder == genesis.holder || live.holding(cl.w1, 1) != None {
+        fail("head after the move")
+    }
+    check_acked(mut cl, clock, random, 1, acked)
+    if result.unwrap(live.place_seal(cl.db2, cl.w2, 1)).rows != list.len(acked) || result.unwrap(live.place_seal(cl.db1, cl.w1, 1)).rows != 0 {
+        fail("row counts after the move")
+    }
+    if !nondecreasing(epochs, 1, 2) {
+        fail("an acknowledgement came from an older head epoch")
+    }
+    let renew = directory.RenewReq(key: 15u64, holder_node: 0, holder_incarnation: 5, term: 1, seq: 1, lease_ns: 0, holder_boot_ns: std.clock.boot_ns(clock), reported_drift_ppm: 200, max_rtt_ns: 1000000000)
+    let Granted(_) = place_ask(mut cl, clock, random, 1, OpRenew(renew), None, mut epochs) else {
+        fail("the new holder refused a renewal")
+    }
+    Ok(())
+}
+
+/// bug: The controller installs a head for a deposed, draining or restarted node, or a stale request changes durable state before it is refused.
+/// oracle: FLT-2 and FLT-8. Each stale claim is answered `MoveSuperseded` with the actual head, each stale client request is refused, and the encoded controller rows and holder partition are byte-identical before and after.
+@test
+fn fleet_stale_move_claims_change_nothing(network: Net, clock: Clock, random: Random) -> Result[(), ()] waits {
+    let mut cl = move_cluster(network, clock, random)
+    let first = seed_place(mut cl, clock, 1, 1)
+    let second = seed_place(mut cl, clock, 2, 2)
+    let mut epochs: List[u64] = list.new()
+    for key in 0u64 .. 4 {
+        let _ = claim_key(mut cl, clock, random, 1, key, 0, mut epochs)
+        let _ = claim_key(mut cl, clock, random, 2, key, 0, mut epochs)
+    }
+    let attempt = result.unwrap(live.request_move(mut cl.control, mut cl.db, cl.root.hub, 1, 2))
+    let start = host.mono_ns(clock)
+    while routed(cl, 1) != (2, 2) || !live.drained(cl.control, 1) {
+        move_step(mut cl, clock, random)
+        check_time(clock, start, "setup move did not complete")
+    }
+    let Some(actual) = live.holding(cl.w2, 1) else {
+        fail("worker 2 does not hold the moved place")
+    }
+    let before = durable_bytes(cl)
+    let refusal: live.Wire = MoveSuperseded(1, attempt, actual)
+    if forged_claim(mut cl, clock, random, 1, move_kernel.ClaimAuth(expect: Some(first), attempt, class: Permit)) != refusal {
+        fail("a consumed permit was not refused with the actual head")
+    }
+    if forged_claim(mut cl, clock, random, 1, move_kernel.ClaimAuth(expect: Some(actual), attempt, class: Continue)) != refusal {
+        fail("a deposed holder reopened the place")
+    }
+    let guess = move_kernel.Id16(lo: 2, hi: 1)
+    let unpermitted: live.Wire = MoveSuperseded(1, guess, actual)
+    if forged_claim(mut cl, clock, random, 1, move_kernel.ClaimAuth(expect: Some(actual), attempt: guess, class: Permit)) != unpermitted {
+        fail("a claim without a permit was not refused")
+    }
+    if place_ask(mut cl, clock, random, 1, OpRead(0), Some((1, 1)), mut epochs) != NotHolder || place_ask(mut cl, clock, random, 1, OpRead(0), Some((2, 1)), mut epochs) != NotHolder {
+        fail("a request at the old head epoch was served")
+    }
+    let stale = directory.ClaimReq(key: 0u64, holder_node: 9, holder_incarnation: 9, expect_term: 0, lease_ns: 0, holder_boot_ns: std.clock.boot_ns(clock), reported_drift_ppm: 200, payload: b"late")
+    // The new holder answers every claim `Quarantined` until its takeover wait ends.
+    let mut late = place_ask(mut cl, clock, random, 1, OpClaim(clone(stale)), None, mut epochs)
+    if let Denied(Quarantined(until)) = late {
+        idle_until(mut cl, clock, random, until)
+        late = place_ask(mut cl, clock, random, 1, OpClaim(stale), None, mut epochs)
+    }
+    if late != Denied(Stale(1)) {
+        fail("a stale term claim was not refused")
+    }
+    let _ = result.unwrap(roster.configure(mut cl.root.hub, mut cl.db, cl.cell, SetDrain(1, true)))
+    if live.request_move(mut cl.control, mut cl.db, cl.root.hub, 2, 1) != Error(TargetNotServing) {
+        fail("a draining node was given a permit")
+    }
+    if forged_claim(mut cl, clock, random, 1, move_kernel.ClaimAuth(expect: Some(first), attempt, class: Permit)) != refusal {
+        fail("a draining node's stale claim was not refused")
+    }
+    if list.compare_bytes(before, durable_bytes(cl)) != Equal {
+        fail("a refused request changed durable state")
+    }
+    // A permit names one incarnation. The node restarts before it can claim.
+    let _ = result.unwrap(roster.configure(mut cl.root.hub, mut cl.db, cl.cell, SetDrain(1, false)))
+    let permit = result.unwrap(live.request_move(mut cl.control, mut cl.db, cl.root.hub, 2, 1))
+    result.unwrap(roster.shutdown(mut cl.b.hub, mut cl.b.socket, clock))
+    let (take socket, _) = bind_host(network, 0x7f000002)
+    cl.b = test_host(clock, random, 1, 9, copy_key(cl.spare_key), take socket, clone(cl.initial))
+    let restart = host.mono_ns(clock)
+    while !live.move_sealed(cl.control, 2) || !roster.connected(cl.b.hub, 0) || option.unwrap(roster.member(cl.root.hub, 1)).incarnation != 9 {
+        move_step(mut cl, clock, random)
+        check_time(clock, restart, "restarted node did not rejoin")
+    }
+    let sealed = durable_bytes(cl)
+    let outdated: live.Wire = MoveSuperseded(2, permit, second)
+    if forged_claim(mut cl, clock, random, 2, move_kernel.ClaimAuth(expect: Some(second), attempt: permit, class: Permit)) != outdated {
+        fail("a permit for an older incarnation was honoured")
+    }
+    if routed(cl, 2) != (2, 1) || list.compare_bytes(sealed, durable_bytes(cl)) != Equal {
+        fail("a stale incarnation changed durable state")
+    }
+    Ok(())
+}
+
+/// bug: A drain leaves a place on the draining node, picks the leaving node as target, loses acknowledged rows, or strands clients on the old holder.
+/// oracle: FLT-8. After `SetDrain(1)` both places route to worker 2 at epoch 2, worker 1 keeps no row, the client's acknowledged keys read back from worker 2, and the client is answered at epoch 1 and then epoch 2 with no failed request.
+@test
+fn fleet_drain_moves_every_place(network: Net, clock: Clock, random: Random, out: Stdout) -> Result[(), ()] waits {
+    let mut cl = move_cluster(network, clock, random)
+    let _ = seed_place(mut cl, clock, 1, 1)
+    let _ = seed_place(mut cl, clock, 2, 1)
+    let mut epochs: List[u64] = list.new()
+    let mut others: List[u64] = list.new()
+    let mut one: List[(u64, u64)] = list.new()
+    let mut two: List[(u64, u64)] = list.new()
+    for key in 0u64 .. 6 {
+        list.push(mut one, (key, claim_key(mut cl, clock, random, 1, key, 0, mut epochs)))
+        list.push(mut two, (key, claim_key(mut cl, clock, random, 2, key, 0, mut others)))
+    }
+    let start = host.mono_ns(clock)
+    let row = result.unwrap(roster.configure(mut cl.root.hub, mut cl.db, cl.cell, SetDrain(1, true)))
+    let mut key: u64 = 6
+    while !live.drained(cl.control, 1) || key < 10 {
+        list.push(mut one, (key, claim_key(mut cl, clock, random, 1, key, 0, mut epochs)))
+        list.push(mut two, (key, claim_key(mut cl, clock, random, 2, key, 0, mut others)))
+        key += 1
+        check_time(clock, start, "drain did not complete")
+    }
+    timed_value(out, "drain_ns", host.mono_ns(clock) - start)
+    if routed(cl, 1) != (2, 2) || routed(cl, 2) != (2, 2) || live.holding(cl.w1, 1) != None || live.holding(cl.w1, 2) != None {
+        fail("a place stayed on the drained node")
+    }
+    check_acked(mut cl, clock, random, 1, one)
+    check_acked(mut cl, clock, random, 2, two)
+    if result.unwrap(live.place_seal(cl.db1, cl.w1, 1)).rows != 0 || result.unwrap(live.place_seal(cl.db1, cl.w1, 2)).rows != 0 || result.unwrap(live.place_seal(cl.db2, cl.w2, 2)).rows != list.len(two) {
+        fail("row counts after the drain")
+    }
+    if !nondecreasing(epochs, 1, 2) || !nondecreasing(others, 1, 2) {
+        fail("an acknowledgement came from an older head epoch")
+    }
+    if roster.member(cl.root.hub, 1) != Some(row) || row.status != Draining || !roster.connected(cl.root.hub, 1) {
+        fail("the drained node left the roster")
+    }
+    if live.request_move(mut cl.control, mut cl.db, cl.root.hub, 1, 1) != Error(TargetNotServing) {
+        fail("a place moved back to the drained node")
+    }
+    Ok(())
+}

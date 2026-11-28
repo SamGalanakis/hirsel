@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """Build and measure three Fleet processes in three Linux network namespaces.
 
-run.py build COMPILER RUNTIME WORK
-run.py measure WORK [--shield]
+run.py build COMPILER RUNTIME WORK [--release]
+run.py measure WORK [--shield] [--scenario rpc|move|bench] [--concurrency N] [--creates N] [--cpus A/B/C]
+
+Scenario rpc joins the roster and reads one Directory row. Scenario move moves
+a partition between the workers, replays a stale claim and drains worker 1.
+Scenario bench runs compute@1 creates: node 0 is the credit desk, node 1 the
+dispatcher, node 2 the worker. Under --shield all three nodes share CPU 16
+unless --cpus names a reserved CPU list for each node, as in 1/2/3.
 """
 import argparse
 from contextlib import ExitStack
@@ -13,6 +19,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import tomllib
 import uuid
 
@@ -30,7 +37,7 @@ def build(args):
     for edge in fleet['dependencies']:
         alias = edge['name']
         edge['name'] = bindings.get(alias, {}).get('package', alias)
-    for source in (HERE.parent / 'cluster_laws.hirsel', HERE / 'node.hirsel'):
+    for source in (HERE.parent / 'cluster_laws.hirsel', HERE / 'node.hirsel', HERE / 'move.hirsel', HERE / 'bench.hirsel'):
         fleet['sources'].append(dict(file=str(source), modules=['laws'], signatures=False))
     args.work.mkdir(parents=True, exist_ok=True)
     manifest = args.work / 'inputs.json'
@@ -41,7 +48,7 @@ def build(args):
         '--grant', 'Clock', '--grant', 'Random', '--grant', 'Stdout',
         '--grant', 'Net=UdpBind 10.77.0.0/24 7339-7339;UdpSend 10.77.0.0/24 7339-7339',
         '--limit', '134217728', '--runtime', args.runtime, '--store', args.work / 'probe-store',
-        '-o', args.work / 'isolated-node',
+        '-o', args.work / 'isolated-node', *(['--release'] if args.release else []),
     ], cwd=ROOT, check=True)
 
 
@@ -85,14 +92,39 @@ def credentials(run):
         (run / '0' / f'pin{n}').write_bytes(hashlib.sha256(spki).digest())
 
 
+SCENARIOS = {'rpc': 0, 'move': 1, 'bench': 2}
+
+
+def cpu_ns(proc):
+    """On-CPU nanoseconds of every thread of the node binary under `proc`."""
+    pid = proc.pid
+    while Path(f'/proc/{pid}/comm').read_text().strip() != 'isolated-node':
+        pid = int(Path(f'/proc/{pid}/task/{pid}/children').read_text().split()[0])
+    return sum(int(stat.read_text().split()[0]) for stat in Path(f'/proc/{pid}/task').glob('*/schedstat'))
+
+
+def values(output):
+    found = {}
+    for line in output.splitlines():
+        key, *rest = line.split()
+        found.setdefault(key, []).append([int(v) for v in rest])
+    return found
+
+
+def rank(samples, percent):
+    return samples[(len(samples) * percent + 99) // 100 - 1]
+
+
 def drive(args):
     binary = args.work / 'isolated-node'
+    extra = [str(SCENARIOS[args.scenario]), str(args.concurrency), str(args.creates)]
     with ExitStack() as stack:
         def launch(n):
+            pin = ['taskset', '-c', args.cpus.split('/')[n]] if args.cpus else []
             proc = subprocess.Popen([
                 'sudo', '-n', 'ip', 'netns', 'exec', f'{args.prefix}-{n}',
                 'setpriv', f'--reuid={os.getuid()}', f'--regid={os.getgid()}', '--clear-groups',
-                'timeout', '30', binary, str(n),
+                *pin, 'timeout', str(args.timeout), binary, str(n), *extra,
             ], cwd=args.run / str(n), stdout=subprocess.PIPE, text=True)
             return stack.enter_context(proc)
 
@@ -102,25 +134,72 @@ def drive(args):
             raise RuntimeError('controller did not publish its bootstrap row')
         for n in (1, 2):
             (args.run / str(n) / 'seed').write_bytes(seed)
+        # The desk prints a line at the first and last measured grant. Read
+        # its CPU time as each line arrives.
+        lines, marks = [], []
+
+        def follow():
+            for line in controller.stdout:
+                if line.startswith('desk_mark'):
+                    marks.append(cpu_ns(controller))
+                lines.append(line)
+
+        reader = threading.Thread(target=follow)
+        reader.start()
         workers = [launch(n) for n in (1, 2)]
-        joins, samples = [], []
+        outputs = []
         for worker in workers:
             output = worker.communicate()[0]
             if worker.returncode:
                 raise RuntimeError(f'worker exited {worker.returncode}: {output}')
-            times = {}
-            for line in output.splitlines():
-                key, value = line.split()
-                times.setdefault(key, []).append(int(value))
+            outputs.append(values(output))
+        if controller.wait():
+            raise RuntimeError(f'controller exited {controller.returncode}')
+        reader.join()
+        root = values(''.join(lines))
+    if args.scenario == 'rpc':
+        joins, samples = [], []
+        for times in outputs:
             if len(times.get('join_roster_ns', [])) != 1 or len(times.get('rpc_ns', [])) != 50:
                 raise RuntimeError('incomplete worker measurements')
-            joins.extend(times['join_roster_ns'])
-            samples.extend(times['rpc_ns'])
-        if controller.wait():
-            raise RuntimeError('controller missed the revocation acknowledgement')
-    samples.sort()
-    print(json.dumps(dict(join_roster_ns=joins, rpc_samples=len(samples),
-                          rpc_p50_ns=samples[49], rpc_p99_ns=samples[98])))
+            joins.extend(v[0] for v in times['join_roster_ns'])
+            samples.extend(v[0] for v in times['rpc_ns'])
+        samples.sort()
+        report = dict(join_roster_ns=joins, rpc_samples=len(samples),
+                      rpc_p50_ns=samples[49], rpc_p99_ns=samples[98])
+    elif args.scenario == 'move':
+        acked = root['acked_rows'][0][0]
+        held = [times['held_rows'][0][0] for times in outputs]
+        if held != [0, acked] or root['stale_refused'] != [[3]]:
+            raise RuntimeError(f'workers hold {held} rows, the client was acknowledged {acked}')
+        report = dict(move_ns=root['move_ns'][0][0], drain_ns=root['drain_ns'][0][0],
+                      acked_rows=acked, worker_rows=held, stale_requests_refused=3)
+    else:
+        caller = outputs[0]
+        count, elapsed, _ = caller['creates'][0]
+        failed, repeats, _ = caller['failed'][0]
+        demands, grants_received, _ = caller['demands'][0]
+        sent, answers, _ = caller['create_datagrams'][0]
+        arrived, answered, _ = outputs[1]['worker_creates'][0]
+        samples = caller['samples'][0]
+        (first, step_first, rounds_first), (last, step_last, rounds_last) = root['desk_mark']
+        if count != args.creates or len(samples) != count or failed or len(marks) != 2:
+            raise RuntimeError(f'incomplete benchmark: {count} creates, {failed} failed')
+        ordered = sorted(samples)
+        grants = last - first
+        report = dict(
+            concurrency=args.concurrency, creates=count, elapsed_ns=elapsed,
+            creates_per_s=count * 1e9 / elapsed,
+            latency_p50_ns=rank(ordered, 50), latency_p99_ns=rank(ordered, 99),
+            latency_min_ns=ordered[0], latency_max_ns=ordered[-1],
+            desk_grants=grants, desk_cpu_ns=marks[1] - marks[0],
+            desk_cpu_ns_per_100k_grants=(marks[1] - marks[0]) * 100000 // grants,
+            desk_kernel_ns_per_100k_grants=(step_last - step_first) * 100000 // grants,
+            desk_io_rounds=rounds_last - rounds_first,
+            repeated_creates=repeats, create_datagrams_sent=sent, create_datagrams_arrived=arrived,
+            reply_datagrams_sent=answered, reply_datagrams_arrived=answers, demand_datagrams=demands, grants_received=grants_received,
+            latency_samples_ns=samples)
+    print(json.dumps(dict(scenario=args.scenario, **report)))
 
 
 def measure(args):
@@ -129,11 +208,16 @@ def measure(args):
         prefix = 'fleet-' + uuid.uuid4().hex[:10]
         namespaces(stack, prefix)
         credentials(run)
-        command = [sys.executable, __file__, 'drive', str(args.work), str(run), prefix]
+        command = [sys.executable, __file__, 'drive', str(args.work), str(run), prefix, *workload(args)]
         if args.shield:
             command = [sys.executable, str(ROOT / 'core/tools/timing_shield.py'), 'run', '--',
                        'taskset', '-c', '16', str(ROOT / 'tools/capped'), *command]
         subprocess.run(command, check=True, env={**os.environ, 'HIRSEL_MEMORY_LIMIT': '2G', 'HIRSEL_JOBS': '1'})
+
+
+def workload(args):
+    return ['--scenario', args.scenario, '--concurrency', str(args.concurrency),
+            '--creates', str(args.creates), '--timeout', str(args.timeout), '--cpus', args.cpus]
 
 
 def main():
@@ -143,6 +227,7 @@ def main():
     b.add_argument('compiler', type=Path)
     b.add_argument('runtime', type=Path)
     b.add_argument('work', type=Path)
+    b.add_argument('--release', action='store_true')
     m = modes.add_parser('measure')
     m.add_argument('work', type=Path)
     m.add_argument('--shield', action='store_true')
@@ -150,6 +235,12 @@ def main():
     d.add_argument('work', type=Path)
     d.add_argument('run', type=Path)
     d.add_argument('prefix')
+    for mode in (m, d):
+        mode.add_argument('--scenario', choices=sorted(SCENARIOS), default='rpc')
+        mode.add_argument('--concurrency', type=int, default=16)
+        mode.add_argument('--creates', type=int, default=100000)
+        mode.add_argument('--timeout', type=int, default=30)
+        mode.add_argument('--cpus', default='')
     args = parser.parse_args()
     args.work = args.work.resolve()
     {'build': build, 'measure': measure, 'drive': drive}[args.mode](args)

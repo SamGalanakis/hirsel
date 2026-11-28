@@ -1,0 +1,319 @@
+// Controller shell around `move_kernel.step` for live moves and drains (FLT-8).
+// The controller's durable `head` column is the head register of each place.
+// A row is durable before any datagram derived from it is sent (K11), and a
+// timeout only repeats a send. It never cancels a permit.
+pub type Pending: codec + key + send {
+    attempt: move_kernel.Id16,
+    node: u64
+}
+
+pub type PlaceRow: codec + key + send {
+    kernel: move_kernel.State,
+    head: move_kernel.HeadView,
+    source: u64,
+    seal: Option[Seal],
+    release: Option[Pending]
+}
+
+pub type Control {
+    me: u64,
+    table: store.Table[u64, PlaceRow],
+    rows: List[Option[PlaceRow]],
+    sent_at: List[u64]
+}
+
+pub fn control_declare(mut d: store.Declare) -> Result[store.Table[u64, PlaceRow], store.Error] {
+    let co: std.codec.Codec[PlaceRow] = std.codec.of()
+    let decl = store.declare_table(mut d, "fleet.places", std.codec.key_u64(), take co)?
+    store.finish(mut d, take decl)
+}
+
+/// Load the committed place rows. A restarted controller resumes from them.
+pub fn control_open(db: store.Db, me: u64, take table: store.Table[u64, PlaceRow]) -> Result[Control, MoveError] waits {
+    let reader = store.reader(db, 1048576) ?=> |_| Storage
+    let snap = store.snapshot(db)
+    let mut rows: List[Option[PlaceRow]] = list.new()
+    let mut sent_at: List[u64] = list.new()
+    for i in 0u64 .. PLACES {
+        let row = store.get(reader, snap, table, i + 1) ?=> |_| Storage
+        list.push(mut rows, take row)
+        list.push(mut sent_at, 0)
+    }
+    Ok(Control(me, table: take table, rows: take rows, sent_at: take sent_at))
+}
+
+fn save(mut c: Control, mut db: store.Db, i: u64, take row: PlaceRow) -> Result[(), MoveError] waits {
+    let ran = store.run(mut db, None, (store.copy_env(c.table), i + 1, store.copy_env(row)), fn(mut tx, input) -> Result[(), store.Error] {
+        store.put(mut tx, input.0, input.1, clone(input.2))
+    }) ?=> |_| Storage
+    let Committed(take done) = take ran else {
+        return Error(Storage)
+    }
+    let _ = store.durable(mut db, done.ticket) ?=> |_| Storage
+    c.rows[i] = Some(take row)
+    Ok(())
+}
+
+/// Durable place rows, for byte comparison in refusal laws.
+pub fn control_bytes(db: store.Db, c: Control) -> Result[Bytes, MoveError] waits {
+    let reader = store.reader(db, 1048576) ?=> |_| Storage
+    let snap = store.snapshot(db)
+    let co: std.codec.Codec[Option[PlaceRow]] = std.codec.of()
+    let mut out: Bytes = list.new()
+    for i in 0u64 .. PLACES {
+        let row = store.get(reader, snap, c.table, i + 1) ?=> |_| Storage
+        std.codec.encode(co, row, mut out) ?=> |_| Storage
+    }
+    Ok(take out)
+}
+
+/// Record the genesis holder of a place. The host creates it with the same pair.
+pub fn assign(mut c: Control, mut db: store.Db, place: u64, node: u64, incarnation: u64, holder: move_kernel.Id16) -> Result[move_kernel.HeadPair, MoveError] waits {
+    let Some(i) = slot(place) else {
+        return Error(UnknownPlace)
+    }
+    if let Some(_) = c.rows[i] {
+        return Error(Busy)
+    }
+    let head = move_kernel.HeadView(pair: move_kernel.HeadPair(epoch: 1, holder), origin: None)
+    let row = PlaceRow(kernel: move_kernel.init_state(place, 1, node, incarnation, head), head, source: node, seal: None, release: None)
+    save(mut c, mut db, i, take row)?
+    Ok(head.pair)
+}
+
+/// Current holder node and head epoch of a place, as clients route by them.
+pub fn route(c: Control, place: u64) -> Option[(u64, u64)] {
+    let i = slot(place)?
+    match c.rows[i] {
+        Some(row) => Some((row.kernel.incumbent_node, row.head.pair.epoch)),
+        None => None,
+    }
+}
+
+/// True once the source's seal for the open move of `place` is durable.
+pub fn move_sealed(c: Control, place: u64) -> bool {
+    let Some(i) = slot(place) else {
+        return false
+    }
+    match c.rows[i] {
+        Some(row) => row.seal != None,
+        None => false,
+    }
+}
+
+fn issued(k: move_kernel.State) -> Option[(u64, move_kernel.ClaimAuth)] {
+    for entry in k.outbox {
+        if let IssueClaim(target, _, _, auth) = entry.cmd {
+            return Some((target, auth))
+        }
+    }
+    None
+}
+
+/// Authorize a move of `place` to `target`. The permit row is durable on return.
+pub fn request_move(mut c: Control, mut db: store.Db, hub: roster.HostLinks, place: u64, target: u64) -> Result[move_kernel.Id16, MoveError] waits {
+    let Some(i) = slot(place) else {
+        return Error(UnknownPlace)
+    }
+    let Some(m) = roster.member(hub, target) else {
+        return Error(TargetNotServing)
+    }
+    if target == c.me || m.status != Serving {
+        return Error(TargetNotServing)
+    }
+    if roster.health(hub, target) != Healthy || !roster.connected(hub, target) {
+        return Error(TargetUnhealthy)
+    }
+    let current: Option[PlaceRow] = clone(c.rows[i])
+    let Some(take row) = take current else {
+        return Error(UnknownPlace)
+    }
+    if let Some(_) = row.release {
+        return Error(Busy)
+    }
+    let source = row.kernel.incumbent_node
+    let (take kernel, _) = move_kernel.step(row.kernel, RequestMove(target, m.incarnation, row.kernel.desired_generation + 1, 0))
+    if list.len(kernel.open_permits) != 1 || list.len(row.kernel.open_permits) != 0 {
+        return Error(Busy)
+    }
+    let attempt = kernel.open_permits[0].attempt
+    save(mut c, mut db, i, PlaceRow(kernel: take kernel, head: row.head, source, seal: None, release: None))?
+    c.sent_at[i] = 0
+    Ok(attempt)
+}
+
+fn drain_target(c: Control, hub: roster.HostLinks, leaving: u64) -> Option[u64] {
+    for n in 0u64 .. advisory.MAX_ADVISORY_ENTRIES {
+        if n == leaving || n == c.me {
+            continue
+        }
+        if let Some(m) = roster.member(hub, n) {
+            if m.status == Serving && roster.health(hub, n) == Healthy && roster.connected(hub, n) {
+                return Some(n)
+            }
+        }
+    }
+    None
+}
+
+/// True when `place` has no open move and no source copy awaiting release.
+pub fn settled(c: Control, place: u64) -> bool {
+    let Some(i) = slot(place) else {
+        return false
+    }
+    match c.rows[i] {
+        Some(row) => list.len(row.kernel.open_permits) == 0 && row.release == None,
+        None => false,
+    }
+}
+
+/// True when no place is held by, moving from, or awaiting release on `node`.
+pub fn drained(c: Control, node: u64) -> bool {
+    for row in c.rows {
+        if let Some(r) = row {
+            if r.kernel.incumbent_node == node {
+                return false
+            }
+            if let Some(p) = r.release {
+                if p.node == node {
+                    return false
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Repeat the pending datagram of every moving place, and start a move for
+/// each place whose holder the roster marks `Draining`.
+pub fn control_pump(mut c: Control, mut db: store.Db, mut hub: roster.HostLinks, clock: Clock) -> Result[(), MoveError] waits {
+    let now = host.mono_ns(clock)
+    for i in 0u64 .. PLACES {
+        let current: Option[PlaceRow] = clone(c.rows[i])
+        let Some(take row) = take current else {
+            continue
+        }
+        if let Some(p) = row.release {
+            let gone = match roster.member(hub, p.node) {
+                Some(m) => m.status == Revoked,
+                None => true,
+            }
+            if gone {
+                save(mut c, mut db, i, PlaceRow(kernel: clone(row.kernel), head: row.head, source: row.source, seal: None, release: None))?
+                continue
+            }
+        }
+        if list.len(row.kernel.open_permits) == 0 && row.release == None {
+            if let Some(m) = roster.member(hub, row.kernel.incumbent_node) {
+                if m.status == Draining {
+                    if let Some(target) = drain_target(c, hub, m.node) {
+                        let _ = request_move(mut c, mut db, hub, i + 1, target)
+                    }
+                }
+            }
+            continue
+        }
+        if now - c.sent_at[i] < RESEND_NS {
+            continue
+        }
+        c.sent_at[i] = now
+        if let Some(p) = row.release {
+            send(mut hub, p.node, 0, MoveRelease(i + 1, p.attempt))
+        }
+        if let Some((target, auth)) = issued(row.kernel) {
+            match row.seal {
+                None => send(mut hub, row.source, 0, MoveFreeze(i + 1, auth.attempt, target)),
+                Some(seal) => send(mut hub, target, 0, MoveClaim(i + 1, auth, row.source, clone(seal))),
+            }
+        }
+    }
+    Ok(())
+}
+
+// The fence. A claim installs epoch + 1 only for the open permit's own target
+// at the permitted incarnation, on the exact expected pair, after the source
+// sealed. Every refusal returns before the first write.
+fn cas(mut c: Control, mut db: store.Db, hub: roster.HostLinks, from: u64, incarnation: u64, place: u64, auth: move_kernel.ClaimAuth, holder: move_kernel.Id16) -> Result[Option[Wire], MoveError] waits {
+    let Some(i) = slot(place) else {
+        return Ok(None)
+    }
+    let current: Option[PlaceRow] = clone(c.rows[i])
+    let Some(take row) = take current else {
+        return Ok(None)
+    }
+    let actual = row.head.pair
+    if actual.holder == holder {
+        if let Some(origin) = row.head.origin {
+            if origin.attempt == auth.attempt {
+                return Ok(Some(MoveWon(place, auth.attempt, row.head)))
+            }
+        }
+    }
+    let refused = Some(MoveSuperseded(place, auth.attempt, actual))
+    let Some(m) = roster.member(hub, from) else {
+        return Ok(refused)
+    }
+    if m.status != Serving || m.incarnation != incarnation || auth.class != Permit || auth.expect != Some(actual) || row.seal == None {
+        return Ok(refused)
+    }
+    let mut permitted = false
+    for p in row.kernel.open_permits {
+        if p.attempt == auth.attempt && p.target_node == from && p.target_incarnation == incarnation && p.expect == actual {
+            permitted = true
+        }
+    }
+    if !permitted {
+        return Ok(refused)
+    }
+    let epoch = actual.epoch + 1
+    let head = move_kernel.HeadView(pair: move_kernel.HeadPair(epoch, holder), origin: Some(move_kernel.next_origin(row.head.origin, epoch, auth.attempt, Permit)))
+    let (take kernel, _) = move_kernel.step(row.kernel, HeadRead(head))
+    if kernel.incumbent_node != from || list.len(kernel.open_permits) != 0 {
+        return Error(Storage)
+    }
+    save(mut c, mut db, i, PlaceRow(kernel: take kernel, head, source: row.source, seal: None, release: Some(Pending(attempt: auth.attempt, node: row.source))))?
+    c.sent_at[i] = 0
+    Ok(Some(MoveWon(place, auth.attempt, head)))
+}
+
+/// Apply one authenticated datagram. `from` and `incarnation` are link-pinned.
+pub fn control_message(mut c: Control, mut db: store.Db, mut hub: roster.HostLinks, from: u64, incarnation: u64, nonce: u64, data: Bytes) -> Result[(), MoveError] waits {
+    let Some(take msg) = decode(data) else {
+        return Ok(())
+    }
+    match take msg {
+        MoveFrozen(place, attempt, take seal) => {
+            let Some(i) = slot(place) else {
+                return Ok(())
+            }
+            let current: Option[PlaceRow] = clone(c.rows[i])
+            let Some(take row) = take current else {
+                return Ok(())
+            }
+            if from != row.source || row.seal != None || list.len(row.kernel.open_permits) == 0 || row.kernel.open_permits[0].attempt != attempt {
+                return Ok(())
+            }
+            save(mut c, mut db, i, PlaceRow(kernel: clone(row.kernel), head: row.head, source: row.source, seal: Some(take seal), release: None))?
+            c.sent_at[i] = 0
+        },
+        MoveCas(place, auth, holder) => {
+            if let Some(take reply) = cas(mut c, mut db, hub, from, incarnation, place, auth, holder)? {
+                send(mut hub, from, nonce, take reply)
+            }
+        },
+        MoveReleased(place, attempt) => {
+            let Some(i) = slot(place) else {
+                return Ok(())
+            }
+            let current: Option[PlaceRow] = clone(c.rows[i])
+            let Some(take row) = take current else {
+                return Ok(())
+            }
+            if row.release == Some(Pending(attempt, node: from)) {
+                save(mut c, mut db, i, PlaceRow(kernel: clone(row.kernel), head: row.head, source: row.source, seal: None, release: None))?
+            }
+        },
+        _ => (),
+    }
+    Ok(())
+}

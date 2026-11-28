@@ -1,6 +1,6 @@
 // test-of: core.map
 // test-reason: private slot state is required to prove moved entries are not cleaned twice
-fn word(i: u64) -> String {
+fn drain_word(i: u64) -> String {
     string.from(match i {
         0 => "a",
         1 => "b",
@@ -28,7 +28,7 @@ fn word(i: u64) -> String {
 fn drained_after_compact() -> u64 {
     let mut m: Map[u64, String] = map.new()
     for i in 0u64 .. 9 {
-        map.insert(mut m, i, word(i))
+        map.insert(mut m, i, drain_word(i))
     }
     let _ = map.remove(mut m, 0)
     let _ = map.remove(mut m, 2)
@@ -39,12 +39,12 @@ fn drained_after_compact() -> u64 {
     let _ = map.remove(mut m, 5)
     let _ = map.remove(mut m, 7)
     for i in 9u64 .. 16 {
-        map.insert(mut m, i, word(i))
+        map.insert(mut m, i, drain_word(i))
     }
-    map.insert(mut m, 16, word(16))
+    map.insert(mut m, 16, drain_word(16))
     let mut count: u64 = 0
     for take (k, v) in m {
-        if k != count + 8 || v != word(k) {
+        if k != count + 8 || v != drain_word(k) {
             return 99
         }
         count += 1
@@ -59,13 +59,13 @@ fn drained_after_compact() -> u64 {
 fn drained_past_dead_slots() -> u64 {
     let mut m: Map[u64, String] = map.new()
     for i in 0u64 .. 4 {
-        map.insert(mut m, i, word(i))
+        map.insert(mut m, i, drain_word(i))
     }
     let _ = map.remove(mut m, 0)
     let _ = map.remove(mut m, 2)
     let mut seen: u64 = 0
     for take (k, v) in m {
-        if v != word(k) {
+        if v != drain_word(k) {
             return 99
         }
         seen = seen * 10 + k
@@ -78,7 +78,7 @@ fn drained_past_dead_slots() -> u64 {
 fn early_break_cleans_tail() -> u64 {
     let mut m: Map[u64, String] = map.new()
     for i in 0u64 .. 4 {
-        map.insert(mut m, i, word(i))
+        map.insert(mut m, i, drain_word(i))
     }
     let mut count: u64 = 0
     for take (k, v) in m {
@@ -94,7 +94,7 @@ fn early_break_cleans_tail() -> u64 {
 fn failing_body_cleans_tail() -> u64 {
     let mut m: Map[u64, String] = map.new()
     for i in 0u64 .. 4 {
-        map.insert(mut m, i, word(i))
+        map.insert(mut m, i, drain_word(i))
     }
     let mut count: u64 = 0
     for take (k, v) in m {

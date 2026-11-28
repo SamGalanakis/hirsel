@@ -250,3 +250,88 @@ fn release_engines_agree() {
     engines_agree_across_waits();
     engines_agree_on_core_leaves();
 }
+
+/// A pass after binding that moves a coverage unit's source decision to
+/// another block stops the release build with a coverage error naming the
+/// unit and the definition; it does not panic, and no flag is misattributed.
+fn reordered_blocks_refused() {
+    use hirsel_core_ir::{BlockId, PoolRange, Terminator};
+
+    // Keep the CFG valid while leaving the source binding at its old indices.
+    fn reorder(module: &mut hirsel_core_ir::Module) {
+        for body in module.functions.iter_mut().filter_map(|f| f.body.as_mut()) {
+            let available = |block: usize| {
+                let id = BlockId(block as u32);
+                !body.parked_returns.contains(&id)
+                    && !body.insts.iter().any(|inst| inst.fail(body) == Some(id))
+                    && !body.terminators.iter().any(|term| {
+                        matches!(term, Terminator::Raise { cleanup: Some(target), .. } if *target == id)
+                    })
+            };
+            let Some(i) = (1..body.blocks.len()).find(|&i| body.blocks[i].decision && available(i)) else {
+                continue;
+            };
+            let Some(j) = (1..body.terminators.len()).find(|&j| {
+                !matches!(body.terminators[j], Terminator::Branch { .. } | Terminator::Switch { .. })
+                    && available(j)
+            })
+            else {
+                continue;
+            };
+            body.blocks.swap(i, j);
+            body.terminators.swap(i, j);
+            let mut insts = Vec::with_capacity(body.insts.len());
+            let mut anchors = Vec::with_capacity(body.inst_anchors.len());
+            for block in &mut body.blocks {
+                let range = block.insts;
+                let start = range.start as usize;
+                anchors.extend_from_slice(&body.inst_anchors[start..start + range.len as usize]);
+                block.insts = PoolRange::push(&mut insts, range.get(&body.insts).unwrap().iter().cloned());
+            }
+            body.insts = insts;
+            body.inst_anchors = anchors;
+            for edge in &mut body.edges {
+                if edge.target.index() == i {
+                    edge.target = BlockId(j as u32);
+                } else if edge.target.index() == j {
+                    edge.target = BlockId(i as u32);
+                }
+            }
+            return;
+        }
+        panic!("coverage fixture has no movable decision");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let product = Driver::default()
+        .check(
+            prog4_request(KNOWN_ARMS, dir.path()),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let test = DefPath::from_full("app@1/main/arms").unwrap();
+    let options = NativeOptions {
+        optimize: true,
+        coverage: Some([package("app")].into()),
+        ..native_options(Backend::Llvm, dir.path())
+    };
+    crate::native::RELEASE_PASS.set(Some(reorder));
+    let built = product.build(&test, &options);
+    crate::native::RELEASE_PASS.set(None);
+    match built {
+        Err(NativeStop::Coverage(mismatch)) => {
+            assert!(mismatch.definition.starts_with("app@1/main/"), "{mismatch}");
+            assert!(mismatch.reason.contains("with its source's"), "{mismatch}");
+            assert!(
+                mismatch.unit.starts_with('h') && mismatch.unit.len() == 65,
+                "the unit's symbol: {mismatch}"
+            );
+        }
+        other => panic!("a reordered unit built: {:?}", other.map(|_| ())),
+    }
+}

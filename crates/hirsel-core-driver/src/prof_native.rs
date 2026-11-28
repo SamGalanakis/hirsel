@@ -716,29 +716,27 @@ pub fn main() -> Result[(), Exit] {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    // Charged: root startup (256 + 32) plus the full 160-byte scope.
-    // Record runtimes use the release layout (FrameRecord is one pointer).
-    // Context's first cache line holds current, events, steps, stack_limit,
-    // map_fast_salt, heap_heads and execution. Next come the two map keys,
-    // site_owner, run and stack_floor, flags padded to a word, four state
-    // words, causes, task_record, two pointers, the isolates Vec, inline
-    // step bounds (three payload words and a tag), two step IDs, eight state words,
-    // contained instances (a Linux Vec), glue Vec and pending decode (Vec and scratch word).
+    // Context starts with one cache line, two map keys, three pointers,
+    // flags, four state words, causes/task record and two more pointers.
+    // Then isolates, step bounds and IDs, eight state words, contained
+    // instances (a Linux Vec), glue and pending decode. Allocation custody
+    // adds a padded flag, a frame-list RefCell<HashMap> and an optional (payer, amount).
     let instances = match crate::host::HOST_TARGET.os() {
         hirsel_core_layout::Os::Linux => 3 * 8,
         hirsel_core_layout::Os::Macos | hirsel_core_layout::Os::Ios => 0,
     };
+    let allocation_custody = 8 + (6 + 1) * 8 + 2 * 8;
     let context_fields: i64 = 64 + 2 * 32 + 3 * 8 + 8 + 4 * 8 + 2 * 16 + 2 * 8
-        + 24 + 32 + 2 * 8 + 8 * 8 + instances + 24 + 32;
+        + 24 + 32 + 2 * 8 + 8 * 8 + instances + 24 + 32 + allocation_custody;
     let cache_aligned = |bytes: i64| (bytes + 63) / 64 * 64;
-    // Task's flags, polls_left and context pointer precede the aligned owned
-    // Context. Then run and ready, waiters and links, timer, operation and four
-    // all/warm links, warm/channel/state flags and id.
+    // Task holds the aligned Context, scheduler links, waits, timer and flags.
     let task_header = 64 + cache_aligned(context_fields) + 16 + 16 + 24 + 40 + 5 * 8 + 8 + 8;
     // Group; stack; sp and body; input and result pointers; storage Layout;
     // TaskLayout. The root uses separate 16-byte input and 24-byte result stores.
     let task_entry = 24 + 24 + 16 + 2 * 8 + 16 + 64;
-    let task_tail = 8 + 16 + 8 + 8 + 24 + 24 + 16 + 8 + 24; // Ends with the code pins Vec.
+    // Release FrameRecord is one word. The tail ends with the code pins Vec
+    // and boxed recipe pins. The sanitizer state is zero-sized here.
+    let task_tail = 8 + 16 + 8 + 8 + 24 + 24 + 16 + 8 + 24 + 16;
     let task = cache_aligned(task_header + task_entry + task_tail);
     // PACK-9.7's cause cell adds an owner word and two inline owner pointers.
     let cause_cell = 32 + 3 * 8 + 2 * 8 + 8;

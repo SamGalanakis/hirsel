@@ -71,6 +71,10 @@ pub fn validate_bucket_graph(mut client: std.object.Client, locator: history.His
         history.history_list_page(mut reader_client, locator, deadline, cache, store_id, ptr)
     })?
     final_item = None
+    manifest.read_page_list(mut client, id, page_record, page_record.deferred_frees, None, DeferredList, mut final_item, mut lists, scoped fn(mut reader_client: std.object.Client, store_id: types.StoreKey, ptr: std.page.PagePtr) -> Result[(String, std.page.Image), types.Failure] waits {
+        history.history_list_page(mut reader_client, locator, deadline, cache, store_id, ptr)
+    })?
+    final_item = None
     manifest.read_page_list(mut client, id, page_record, page_record.lineage, None, LineageList, mut final_item, mut lists, scoped fn(mut reader_client: std.object.Client, store_id: types.StoreKey, ptr: std.page.PagePtr) -> Result[(String, std.page.Image), types.Failure] waits {
         history.history_list_page(mut reader_client, locator, deadline, cache, store_id, ptr)
     })?
@@ -99,6 +103,10 @@ pub fn validate_bucket_graph(mut client: std.object.Client, locator: history.His
         let pack = history_check_list_pack(mut client, locator, deadline, cache, id, seq, page_record.next_stamp, offsets)?
         types.capacity(map.try_reserve(mut lists.packs, 1))?
         map.insert(mut lists.packs, seq, pack)
+    }
+    for queued in lists.deferred {
+        let inventory = manifest.RecoveryInventory(packs: view lists.packs, next_stamp: page_record.next_stamp, allow_tiered: allow_tiered)
+        manifest.validate_deferred_target(inventory, queued.target)?
     }
     let mut pending: Map[u64, List[history.LocatedNeed]] = map.new()
     for holder in page_record.branches {

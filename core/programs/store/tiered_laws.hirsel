@@ -840,6 +840,16 @@ fn l68_bucket_restore(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits
     if object.seq != 8 || object.epoch != 1 || object.len != 220 || object.digest != 79 || pack.inventory.index != 168 || paging.generation != 1 {
         fail("L68: reopening changed the immutable name or pack extent")
     }
+    let mut queued: manifest.PageManifest = clone(page_record)
+    let mut missing = queued.pack_root
+    missing.pack = 7
+    queued.deferred_frees = missing
+    let Error(Corrupt(Fault(why: Dangling(stamp), ..))) = failure_result_from_rep(object_writer.validate_bucket_graph(mut source.client, source.locator, source.deadline, store_key_to_rep(owner), "MANIFEST", take queued, true, None)) else {
+        fail("Bucket verifier accepted a missing deferred-free queue")
+    }
+    if stamp != missing.stamp {
+        fail("Bucket verifier reported the wrong missing queue")
+    }
     let mut truncated = cold
     truncated.len = 219
     history.fixture_set_pack(mut source.locator, truncated)

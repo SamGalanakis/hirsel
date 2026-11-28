@@ -3,9 +3,9 @@
 Hirsel is a systems-level, general-purpose language whose primary user is a coding agent.
 It is procedural with value semantics: loops and local mutation, no raw pointers, no
 methods. Every type declares once how its values are represented: own, region data, a
-resource, or plain data. Values are read through lexical views, shared only
-through explicit `Rc` and `Arc`, and allocated against limits whose refusal is the ordinary failure
-`Capacity`. Tasks share nothing, and every outside effect arrives through a
+resource, or plain data. Code reads values through lexical views and allocates against
+limits whose refusal is the ordinary failure `Capacity`. `Rc`, `Arc` and `Shared` give
+explicit access to immutable counted payloads. Every outside effect arrives through a
 capability parameter.
 
 This specification defines the v1 core language: its syntax, typing, ownership, memory,

@@ -250,9 +250,8 @@ pub type DirError: codec + key + send = Stale(u64) | Held(u64) | Quarantined(u64
 ### Normative rules `D1`–`D6`
 
 - **D1 (Durable renewal barrier).** The directory releases a `claim`, `renew` or `release`
-  reply only after the durable commit (`store.Tx` / `store.durable` or `runner.transact`) that
-  started after the request arrived is observed `Applied` (amortized across a batching
-  interval).
+  reply only after it observes `Applied` for a durable transaction that started after
+  the request arrived. A single commit can cover several requests in the batching interval.
 - **D2 (Suspend-inclusive elapsed clock).** Both the directory and every lease holder measure
   lease windows strictly with `std.clock.boot_ns(clock)` (`CLOCK_BOOTTIME` /
   `mach_continuous_time`). A monotonic clock that freezes across OS suspend or VM pause

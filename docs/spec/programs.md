@@ -540,9 +540,9 @@ as tags, and a change in the meaning of one gets a new tag, under the same rule.
   order: the module's files in the order the package index lists them, and each file's
   items in order, so the k-th assertion's initialiser is named `_$k`, from 0. An initialiser
   has a body, slots and an address like any instance. Its own reach walk starts at it and
-  gives its address, whether or not the program's entry reaches the constant. For a constant
-  that depends on `target`, its address is computed once for each target, from that target's
-  retained code.
+  gives the same address during checking and building, even if the program's entry
+  does not reach the constant. For a constant that depends on `target`, its address is
+  computed once for each target, from that target's retained code.
 - **Value bytes and value hash.** A computed constant's **value bytes** are its value written
   as follows: a scalar little-endian at its width; `bool` as one byte, 0 or 1; `char` as four
   bytes; `()` as nothing; a float as its IEEE 754 bit pattern; a tuple or record field by

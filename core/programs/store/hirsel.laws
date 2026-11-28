@@ -262,6 +262,7 @@ store@1/store/recovery_table_accounts_for_every_cell src=4a70ede82f42fc97 sig=ea
 store@1/store/recovery_table_live_follower_capture src=3f402ea0e4e06166 sig=5d9eed094a7f5b9b run=ea720f3846592392 bug=66107db2878fb9a5 oracle=3672a45d17b345d3 rows=pending
 store@1/store/recovery_table_owner_reopen src=e4b9432a1424f506 sig=5d9eed094a7f5b9b run=ea720f3846592392 bug=3680223d0f473f67 oracle=97cd03d0a0db1c57 rows=pending
 store@1/store/reexecute_zero_data_write_serve src=ee418deceb50f99c sig=11f996d64dc8b285 run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/reviewed_store_format15 src=def0e2eb90739865 sig=29f06c6a3514e592 run=c2c0c6612d4cbb79 bug=360a1eabd8ac55d6 oracle=4ca987a0ab36a272 rows=pending
 store@1/store/small_bucket_place_plan_at_floor src=d302981002727e52 sig=faa834a81fac114e run=dbf6722727633166 bug=- oracle=- rows=pending
 store@1/store/small_directory_place_need src=ec9370a4d2e392bf sig=767db6198a979ef7 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/sorted_batch_equivalence src=a5d8ebb4112e6733 sig=307951dc0fed7ade run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending

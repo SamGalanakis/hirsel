@@ -532,3 +532,107 @@ fn total_suite(k: u64) -> schedule.Suite12 {
         _ => ChaCha20Poly1305Sha256,
     }
 }
+
+// Reviewed DTLS record datagrams. Regenerate with fixtures.py rows dtls-record --write.
+const REVIEWED_DTLS_RECORD: String = "accepted-ccs-before-next-record accepted 0 14fefd000000000000000100010116feff000000000001020300020101 1400000000000000000001000000000000000d000000000000000e01 -\naccepted-legacy-client-hello accepted 1 16feff000000000001020300020101 1600000000000000010203000000000000000d000000000000000f0101 -\nrefused-legacy-record-in-fixed-mode discarded-malformed 0 16feff000000000001020300020101 000000000000000f0000000000000001 -\nrefused-truncated-record discarded-malformed 0 14fefd00000000000000010001 000000000000000d0000000000000001 -\n"
+
+fn reviewed_dtls_case(surface: String, raw: Bytes) -> (String, Bytes) {
+    let mode: dtls.RecordVersion = if surface == "0" {
+        Fixed
+    } else {
+        BeforeServerHello
+    }
+    let mut r = dtls.records(0)
+    let mut a = dtls.ahead(4)
+    let mut at = 0u64
+    let mut shown: Bytes = list.new()
+    let event = dtls.next_record(mut r, mut a, mode, raw, mut at)
+    let Some(h) = dtls.record_header(raw, 0, mode) else {
+        let Ok(Discarded) = event else {
+            fail("malformed reviewed DTLS record was not discarded")
+        }
+        list.put_word_be(mut shown, at)
+        list.put_word_be(mut shown, dtls.record_discards(r).malformed)
+        return ("discarded-malformed", take shown)
+    }
+    let body = match event {
+        Ok(HandshakeRecord(received_header, take body)) if received_header.kind == h.kind && received_header.epoch == h.epoch && received_header.sequence == h.sequence && received_header.start == h.start && received_header.end == h.end => take body,
+        Ok(ChangeCipherSpec) if h.kind == 20 => clone(list.slice(raw, h.start, h.end)),
+        _ => fail("unexpected reviewed DTLS record event"),
+    }
+    if at != h.end {
+        fail("reviewed DTLS record consumed a different span")
+    }
+    list.push(mut shown, h.kind)
+    list.put_word_be(mut shown, h.epoch)
+    list.put_word_be(mut shown, h.sequence)
+    list.put_word_be(mut shown, h.start)
+    list.put_word_be(mut shown, at)
+    list.append(mut shown, body)
+    ("accepted", take shown)
+}
+
+fn reviewed_dtls_field(row: String, mut at: u64) -> View[String] in row {
+    let start = at
+    let end = option.unwrap(string.find(row, start, " "))
+    at = end + 1
+    string.slice(row, start, end)
+}
+
+fn reviewed_dtls_matches(actual: String, projection: Bytes, expected: String, fields: Bytes) -> bool {
+    actual == expected && projection == fields
+}
+
+/// bug: Report the same disposition for a different decoded family, field, cursor or refusal.
+/// oracle: RFC 6347 §4.1. The reviewed bundle supplies each expected projection.
+@test
+fn reviewed_dtls_record() -> Result[(), ()] {
+    let data = REVIEWED_DTLS_RECORD
+    let mut at = 0u64
+    let mut completed = 0u64
+    let mut accepted = 0u64
+    let mut families = 0u64
+    while at < string.byte_len(data) {
+        let end = option.unwrap(string.find(data, at, "\n"))
+        let row = string.slice(data, at, end)
+        let mut next = 0u64
+        let id = reviewed_dtls_field(row, mut next)
+        let expected = reviewed_dtls_field(row, mut next)
+        let surface = reviewed_dtls_field(row, mut next)
+        let raw = option.unwrap(std.hex.decode(string.as_bytes(reviewed_dtls_field(row, mut next))))
+        let projection = reviewed_dtls_field(row, mut next)
+        let fields = if projection == "-" {
+            b""
+        } else {
+            option.unwrap(std.hex.decode(string.as_bytes(projection)))
+        }
+        if let Error(reason) = dtls_record_total_law(raw) {
+            fail(take reason)
+        }
+        let (class, take first) = reviewed_dtls_case(surface, raw)
+        let (replayed, take second) = reviewed_dtls_case(surface, raw)
+        if class != replayed || first != second || !reviewed_dtls_matches(class, first, expected, fields) {
+            fail(string.from(id))
+        }
+        // Feed a wrong expectation through the same comparison.
+        let wrong_fields = if expected == "accepted" {
+            b""
+        } else {
+            fields
+        }
+        if reviewed_dtls_matches(class, first, "accepted", wrong_fields) {
+            fail("wrong reviewed expectation matched")
+        }
+        completed += 1
+        if class == "accepted" {
+            accepted += 1
+            let family: u64 = int.widen(first[0] - 20)
+            families = families | (1u64 << family)
+        }
+        at = end + 1
+    }
+    if completed != 4 || accepted != 2 || families != 5 {
+        fail("reviewed dtls decode counts or accepted families")
+    }
+    Ok(())
+}

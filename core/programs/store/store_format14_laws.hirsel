@@ -597,3 +597,205 @@ fn disk_test_format14() -> Result[(), Error] {
     format14_pack_row_law()?
     format14_index_law()
 }
+
+// Format 15 references resolve through corpus_directory_files, the same bytes
+// used by test_frozen_format_corpus. Regenerate with fixtures.py rows store-format15 --write.
+const REVIEWED_STORE_FORMAT15: String = "accepted-blob-index accepted 4 010000000000000000000000480000000000000011000000220b0000001100000000000000000015000000000b0200000000000000050000000000000001 05000000000000003e00000000000000000000000000000048000000000000004800000011220000000b00000000000000110000000b0200000000000000050000000000000001 -\naccepted-direct-blob-op4 accepted 2 000000000000000000000000000000000000000001000100000004150000000000000b020000000000000005000000000000000100000000110000000000000009000000000000001300000000000000060000000000000048000000000000000000000000000000b7000000000000001600000000000000 0300000000000000780000000000000000000000000000000000000000000000110000000000000009000000000000001300000000000000060000000000000048000000000000000000000000000000b700000000000000160000000b0200000000000000050000000000000001 -\naccepted-foreign-pack-row accepted 1 04010000001100000000000000b700000000000000690000000000000001030000000000000004000000000000000102030405060708090a0b0c0d0e0f100700000000000000b7000000000000001600000000000000 020400000001000000000000001100000000000000b70000000000000069000000000000000300000000000000040102030405060708090a0b0c0d0e0f10000000000000000700000000000000b70000000000000016 -\naccepted-local-pack-row accepted 1 04010000001100000000000000b700000000000000690000000000000000 010400000001000000000000001100000000000000b70000000000000069 -\naccepted-manifest-identity accepted 0 @directory/MANIFEST 00000000000000000f00000000000002f2956df45cbf4b7ef6413dd10b3e66528200000000000000050000000000000267000000000000000b0000000000000005 -\naccepted-page-index accepted 3 @directory/p-8 040000000000000164000000000000000000000000000000480000000000000048000000bf210000000200000000000002580000000200000000000000000000000000000000 -\nrefused-invalid-pack-tag malformed 1 04010000001100000000000000b700000000000000690000000000000002 0000000000000000 -\nrefused-short-direct-descriptor truncated 2 000000000000000000000000000000000000000001000100000004150000000000000b020000000000000005000000000000000100000000110000000000000009000000000000001300000000000000060000000000000048000000000000000000000000000000b70000000000000016000000000000 0000000000000038 -\nrefused-short-manifest truncated 0 0100 0000000000000000 -\n"
+
+fn reviewed_store_input(field: String) -> Bytes {
+    if string.starts_with(field, "@directory/") {
+        let name = string.slice(field, 11, string.byte_len(field))
+        for (file, raw) in corpus_directory_files() {
+            if file == name {
+                return clone(raw)
+            }
+        }
+        fail("unknown reviewed Format 15 reference")
+    }
+    option.unwrap(std.hex.decode(string.as_bytes(field)))
+}
+
+fn reviewed_store_pack(raw: Bytes) -> Result[Bytes, types.Failure] {
+    let p = manifest.pack_record("pack row", 0, raw)?
+    let mut shown: Bytes = list.new()
+    list.push(mut shown, if p.foreign == None {
+        1u8
+    } else {
+        2u8
+    })
+    list.push(mut shown, p.class)
+    list.put_word_be(mut shown, p.frames)
+    list.put_word_be(mut shown, p.live)
+    list.put_word_be(mut shown, p.payload_bytes)
+    list.put_word_be(mut shown, p.index)
+    if let Some(parent) = p.foreign {
+        list.put_word_be(mut shown, parent.parent.hi)
+        list.put_word_be(mut shown, parent.parent.lo)
+        for byte in parent.incarnation {
+            list.push(mut shown, byte)
+        }
+        list.put_word_be(mut shown, parent.epoch)
+        list.put_word_be(mut shown, parent.len)
+        list.put_word_be(mut shown, parent.digest)
+    }
+    if manifest.encode_pack_row(p) != raw {
+        fail("reviewed Format 15 pack row did not re-encode")
+    }
+    Ok(take shown)
+}
+
+fn reviewed_store_direct(raw: Bytes) -> Result[Bytes, types.Failure] {
+    let path = "direct COMMIT"
+    let mut ops = format.capture_data_ops(path, raw)?
+    let Some(CaptureDirect(key_at, key_len, prior, d)) = format.capture_next_op(path, raw, 1024, mut ops)? else {
+        fail("reviewed Format 15 COMMIT lacked op 4")
+    }
+    if ops.at != list.len(raw) || ops.left != 0 {
+        fail("reviewed Format 15 op 4 consumed a different span")
+    }
+    let mut shown: Bytes = list.new()
+    list.push(mut shown, 3u8)
+    list.put_word_be(mut shown, ops.at)
+    list.put_word_be(mut shown, ops.left)
+    list.put_word_be(mut shown, prior)
+    for value in[d.stamp, d.len, d.checksum, d.pack, d.offset, d.epoch, d.pack_len, d.digest] {
+        list.put_word_be(mut shown, value)
+    }
+    list.append(mut shown, list.slice(raw, key_at, key_at + key_len))
+    Ok(take shown)
+}
+
+fn reviewed_store_index(raw: Bytes, page_pack: bool) -> Result[Bytes, types.Failure] {
+    let mut at = 105u64
+    let payload = if page_pack {
+        let header = manifest.disk_read_header("p-8", raw, 3, Some(8), None)?
+        at = 279
+        let frame = manifest.disk_read_frame("p-8", header.context, raw, at)?
+        if frame.kind != 0x23 || frame.end != list.len(raw) {
+            fail("reviewed Format 15 PAGE pack index frame")
+        }
+        list.slice(raw, frame.payload, frame.end)
+    } else {
+        list.slice(raw, 0, list.len(raw))
+    }
+    let mut last_row = 0u64
+    let decoded_index = manifest.decode_pack_index("PACK_INDEX", at, payload, mut last_row)?
+    if list.len(decoded_index.rows) != 1 {
+        fail("reviewed Format 15 pack index row count")
+    }
+    let row = decoded_index.rows[0]
+    let mut shown: Bytes = list.new()
+    list.push(mut shown, if page_pack {
+        4u8
+    } else {
+        5u8
+    })
+    list.put_word_be(mut shown, list.len(raw))
+    list.put_word_be(mut shown, decoded_index.prev)
+    list.put_word_be(mut shown, last_row)
+    list.put_word_be(mut shown, row.offset)
+    list.put_word_be(mut shown, row.len)
+    list.push(mut shown, row.kind)
+    list.put_word_be(mut shown, row.collection)
+    list.put_word_be(mut shown, row.stamp)
+    list.append(mut shown, row.key)
+    Ok(take shown)
+}
+
+fn reviewed_store_decode(surface: u8, raw: Bytes) -> Result[Bytes, types.Failure] {
+    match surface {
+        0 => {
+            let (id, take m) = manifest.disk_read_page_manifest("MANIFEST", raw)?
+            let mut shown: Bytes = list.new()
+            list.push(mut shown, 0u8)
+            for value in[format.DISK_FORMAT, list.len(raw), id.hi, id.lo, m.generation, m.next_stamp, m.next_pack, m.first_live] {
+                list.put_word_be(mut shown, value)
+            }
+            Ok(take shown)
+        },
+        1 => reviewed_store_pack(raw),
+        2 => reviewed_store_direct(raw),
+        3 => reviewed_store_index(raw, true),
+        4 => reviewed_store_index(raw, false),
+        _ => fail("unknown reviewed Format 15 decoder"),
+    }
+}
+
+fn reviewed_store_case(surface: String, raw: Bytes) -> (String, Bytes) {
+    match reviewed_store_decode(string.as_bytes(surface)[0] - 48, raw) {
+        Ok(take observed_bytes) => ("accepted", take observed_bytes),
+        Error(Corrupt(fault)) => {
+            let class = match fault.why {
+                Truncated => "truncated",
+                Malformed => "malformed",
+                _ => fail("unexpected reviewed Format 15 corruption"),
+            }
+            let mut shown: Bytes = list.new()
+            list.put_word_be(mut shown, fault.offset)
+            (class, take shown)
+        },
+        Error(_) => fail("unexpected reviewed Format 15 refusal"),
+    }
+}
+
+fn reviewed_store_field(row: String, mut at: u64) -> View[String] in row {
+    let start = at
+    let end = option.unwrap(string.find(row, start, " "))
+    at = end + 1
+    string.slice(row, start, end)
+}
+
+fn reviewed_store_matches(actual: String, observed_bytes: Bytes, expected: String, fields: Bytes) -> bool {
+    actual == expected && observed_bytes == fields
+}
+
+/// bug: Report the same disposition for a different decoded family, field, cursor or refusal.
+/// oracle: STORE-SPEC §§3.5 and 13.5 and the frozen Directory manifest and PAGE pack. The reviewed bundle supplies each expected observed_bytes.
+@test
+fn reviewed_store_format15() -> Result[(), ()] {
+    let data = REVIEWED_STORE_FORMAT15
+    let mut at = 0u64
+    let mut completed = 0u64
+    let mut accepted = 0u64
+    let mut families = 0u64
+    while at < string.byte_len(data) {
+        let end = option.unwrap(string.find(data, at, "\n"))
+        let row = string.slice(data, at, end)
+        let mut column = 0u64
+        let id = reviewed_store_field(row, mut column)
+        let expected = reviewed_store_field(row, mut column)
+        let surface = reviewed_store_field(row, mut column)
+        let raw = reviewed_store_input(reviewed_store_field(row, mut column))
+        let observed_bytes = reviewed_store_field(row, mut column)
+        let fields = if observed_bytes == "-" {
+            b""
+        } else {
+            option.unwrap(std.hex.decode(string.as_bytes(observed_bytes)))
+        }
+        let (class, take first) = reviewed_store_case(surface, raw)
+        let (replayed, take second) = reviewed_store_case(surface, raw)
+        if class != replayed || first != second || !reviewed_store_matches(class, first, expected, fields) {
+            fail(string.from(id))
+        }
+        // Feed a wrong expectation through the same comparison.
+        let wrong_fields = if expected == "accepted" {
+            b""
+        } else {
+            fields
+        }
+        if reviewed_store_matches(class, first, "accepted", wrong_fields) {
+            fail("wrong reviewed expectation matched")
+        }
+        completed += 1
+        if class == "accepted" {
+            accepted += 1
+            let family: u64 = int.widen(first[0])
+            families = families | (1u64 << family)
+        }
+        at = end + 1
+    }
+    if completed != 9 || accepted != 6 || families != 63 {
+        fail("reviewed store decode counts or accepted families")
+    }
+    Ok(())
+}

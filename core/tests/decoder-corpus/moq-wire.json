@@ -1,0 +1,196 @@
+{
+  "schema_version": 1,
+  "objects": {
+    "37ed124dd5ed341f5915048a6264b2f45ea42efdde9b277e1cff22915c56f69d": "05812caa",
+    "6373942bb15f61f68274f783c09fcbee60dae6a470c3f7f2cca299bbb067ee0e": "30070905026162",
+    "6c637825c8ded6cb5ea5cb93e752ed029d06a0f77f616517c3fceee5ae6239af": "f0132b3e2800",
+    "77f8804b6f117c1d3e907d083a8da1ed61e74fe4915efc3cfc8b70da09c092d1": "0581",
+    "7e42db725cbba0dc09c50865e93a4e93ebdbabdc74f2b3f68126ec51e9db3736": "360709",
+    "8b4db71f45502876aa0feb13b7f1abc2d3e443432e3eae2ed236f0c0cb538018": "af00aa",
+    "9c0f37fe533fa88ca15ccc287af05b1afc7494b6d52edda5ac3e8adf94762434": "3007090511"
+  },
+  "cases": [
+    {
+      "id": "accepted-control",
+      "target": "moq-wire",
+      "law": "reviewed_moq_wire",
+      "input_kind": "moq-stream",
+      "generator_version": 1,
+      "digest": "8b4db71f45502876aa0feb13b7f1abc2d3e443432e3eae2ed236f0c0cb538018",
+      "limits": {
+        "input_bytes": 64,
+        "object_bytes": 16
+      },
+      "setup": {},
+      "oracle": {
+        "name": "moqt-23-stream-framing",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "030000000000000000"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "accepted-fetch",
+      "target": "moq-wire",
+      "law": "reviewed_moq_wire",
+      "input_kind": "moq-stream",
+      "generator_version": 1,
+      "digest": "37ed124dd5ed341f5915048a6264b2f45ea42efdde9b277e1cff22915c56f69d",
+      "limits": {
+        "input_bytes": 64,
+        "object_bytes": 16
+      },
+      "setup": {},
+      "oracle": {
+        "name": "moqt-23-stream-framing",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "010000000000000003000000000000012c"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "accepted-padding",
+      "target": "moq-wire",
+      "law": "reviewed_moq_wire",
+      "input_kind": "moq-stream",
+      "generator_version": 1,
+      "digest": "6c637825c8ded6cb5ea5cb93e752ed029d06a0f77f616517c3fceee5ae6239af",
+      "limits": {
+        "input_bytes": 64,
+        "object_bytes": 16
+      },
+      "setup": {},
+      "oracle": {
+        "name": "moqt-23-stream-framing",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "020000000000000005"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "accepted-subgroup-object",
+      "target": "moq-wire",
+      "law": "reviewed_moq_wire",
+      "input_kind": "moq-stream",
+      "generator_version": 1,
+      "digest": "6373942bb15f61f68274f783c09fcbee60dae6a470c3f7f2cca299bbb067ee0e",
+      "limits": {
+        "input_bytes": 64,
+        "object_bytes": 16
+      },
+      "setup": {},
+      "oracle": {
+        "name": "moqt-23-stream-framing",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "00000000000000000300000000000000070000000000000009000000000000000500000000000000026162"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-object-length",
+      "target": "moq-wire",
+      "law": "reviewed_moq_wire",
+      "input_kind": "moq-stream",
+      "generator_version": 1,
+      "digest": "9c0f37fe533fa88ca15ccc287af05b1afc7494b6d52edda5ac3e8adf94762434",
+      "limits": {
+        "input_bytes": 64,
+        "object_bytes": 16
+      },
+      "setup": {},
+      "oracle": {
+        "name": "moqt-23-stream-framing",
+        "version": 1
+      },
+      "expected": {
+        "class": "field-length-exceeded",
+        "projection_hex": "0000000000000003"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-reserved-subgroup-id-mode",
+      "target": "moq-wire",
+      "law": "reviewed_moq_wire",
+      "input_kind": "moq-stream",
+      "generator_version": 1,
+      "digest": "7e42db725cbba0dc09c50865e93a4e93ebdbabdc74f2b3f68126ec51e9db3736",
+      "limits": {
+        "input_bytes": 64,
+        "object_bytes": 16
+      },
+      "setup": {},
+      "oracle": {
+        "name": "moqt-23-stream-framing",
+        "version": 1
+      },
+      "expected": {
+        "class": "invalid-stream-header",
+        "projection_hex": "0000000000000000"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-truncated-fetch-id",
+      "target": "moq-wire",
+      "law": "reviewed_moq_wire",
+      "input_kind": "moq-stream",
+      "generator_version": 1,
+      "digest": "77f8804b6f117c1d3e907d083a8da1ed61e74fe4915efc3cfc8b70da09c092d1",
+      "limits": {
+        "input_bytes": 64,
+        "object_bytes": 16
+      },
+      "setup": {},
+      "oracle": {
+        "name": "moqt-23-stream-framing",
+        "version": 1
+      },
+      "expected": {
+        "class": "truncated",
+        "projection_hex": "0000000000000000"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    }
+  ]
+}

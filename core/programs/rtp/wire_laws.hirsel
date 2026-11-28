@@ -516,3 +516,151 @@ fn rtcp_twcc_loss_totality_property() -> Result[(), ()] {
     std.prop.check(c, twcc_draw_gen(), twcc_total_law)?
     std.prop.check(c, loss_draw_gen(), loss_total_law)
 }
+
+// Reviewed RTP and RTCP datagrams. Regenerate with fixtures.py rows rtp-wire --write.
+const REVIEWED_RTP_WIRE: String = "accepted-fixed accepted 0 80e012340102030411223344616263 00000000000000000c000000000000000f000000000000000301601234010203041122334400616263 -\naccepted-one-byte-extension accepted 0 b16012350102030511223344aabbccddbede00011078000061620002 010000000000000018000000000000001c000000000000000200601235010203051122334401000000000000001400000000000000046162 -\naccepted-receiver-report accepted 1 80c900011122334480cb0000 0200000000000000000000000000000004000000000000000800000000000000081122334400 -\nrefused-extension-overrun extension 0 906012340102030411223344bede000210780000 - -\nrefused-receiver-report-length length 1 80c90001112233 0000000000000000 -\nrefused-zero-padding padding 0 a0601234010203041122334400 000000000000000c -\n"
+
+fn reviewed_rtp_packet(raw: Bytes) -> (String, Bytes) {
+    let h = match header.parse(raw) {
+        Ok(h) => h,
+        Error(Extension) => return ("extension", b""),
+        Error(_) => fail("unexpected reviewed RTP header refusal"),
+    }
+    let mut shown: Bytes = list.new()
+    let (start, size) = match header.payload(h, raw) {
+        Ok(span) => span,
+        Error(Padding) => {
+            list.put_word_be(mut shown, h.end)
+            return ("padding", take shown)
+        },
+        Error(_) => fail("unexpected reviewed RTP payload refusal"),
+    }
+    let mut extension: Option[(u64, u64)] = None
+    match h.block {
+        NoBlock => list.push(mut shown, 0u8),
+        OneByte(at, len) => {
+            list.push(mut shown, 1u8)
+            extension = Some((at, len))
+        },
+        _ => fail("unexpected reviewed RTP extension"),
+    }
+    list.put_word_be(mut shown, start)
+    list.put_word_be(mut shown, h.len)
+    list.put_word_be(mut shown, size)
+    list.push(mut shown, if h.marker {
+        1u8
+    } else {
+        0u8
+    })
+    list.push(mut shown, h.pt)
+    list.put_word_be(mut shown, h.seq)
+    list.put_word_be(mut shown, h.ts)
+    list.put_word_be(mut shown, h.ssrc)
+    list.push(mut shown, h.csrcs)
+    if let Some((at, len)) = extension {
+        list.put_word_be(mut shown, at)
+        list.put_word_be(mut shown, len)
+    }
+    list.append(mut shown, list.slice(raw, start, start + size))
+    if h.end != start {
+        fail("reviewed RTP header and payload spans disagree")
+    }
+    ("accepted", take shown)
+}
+
+fn reviewed_rtp_case(surface: String, raw: Bytes) -> (String, Bytes) {
+    if surface == "0" {
+        return reviewed_rtp_packet(raw)
+    }
+    let mut at = 0u64
+    let mut shown: Bytes = list.new()
+    match rtcp.next(raw, mut at) {
+        Ok(Some(p)) => {
+            let Rr(ssrc, reports) = p.item else {
+                fail("expected reviewed RTCP receiver report")
+            }
+            list.push(mut shown, 2u8)
+            list.put_word_be(mut shown, p.at)
+            list.put_word_be(mut shown, p.body)
+            list.put_word_be(mut shown, p.end)
+            list.put_word_be(mut shown, at)
+            list.put_word_be(mut shown, ssrc)
+            list.push(mut shown, reports)
+            ("accepted", take shown)
+        },
+        Error(Length) => {
+            list.put_word_be(mut shown, at)
+            ("length", take shown)
+        },
+        _ => fail("unexpected reviewed RTCP result"),
+    }
+}
+
+fn reviewed_rtp_field(row: String, mut at: u64) -> View[String] in row {
+    let start = at
+    let end = option.unwrap(string.find(row, start, " "))
+    at = end + 1
+    string.slice(row, start, end)
+}
+
+fn reviewed_rtp_matches(actual: String, projection: Bytes, expected: String, expected_bytes: Bytes) -> bool {
+    actual == expected && projection == expected_bytes
+}
+
+/// bug: Report the same disposition for a different decoded family, field, cursor or refusal.
+/// oracle: RFC 3550 §§5.1 and 6.4.2 and RFC 8285 §4.2. The reviewed bundle supplies each expected projection.
+@test
+fn reviewed_rtp_wire() -> Result[(), ()] {
+    let data = REVIEWED_RTP_WIRE
+    let mut at = 0u64
+    let mut completed = 0u64
+    let mut accepted_count = 0u64
+    let mut families = 0u64
+    while at < string.byte_len(data) {
+        let end = option.unwrap(string.find(data, at, "\n"))
+        let row = string.slice(data, at, end)
+        let mut next = 0u64
+        let id = reviewed_rtp_field(row, mut next)
+        let expected = reviewed_rtp_field(row, mut next)
+        let surface = reviewed_rtp_field(row, mut next)
+        let raw = option.unwrap(std.hex.decode(string.as_bytes(reviewed_rtp_field(row, mut next))))
+        let projection = reviewed_rtp_field(row, mut next)
+        let expected_bytes = if projection == "-" {
+            b""
+        } else {
+            option.unwrap(std.hex.decode(string.as_bytes(projection)))
+        }
+        if let Error(reason) = if surface == "0" {
+            rtp_total_law(raw)
+        } else {
+            rtcp_total_law(raw)
+        } {
+            fail(take reason)
+        }
+        let (class, take first) = reviewed_rtp_case(surface, raw)
+        let (replayed, take second) = reviewed_rtp_case(surface, raw)
+        if class != replayed || first != second || !reviewed_rtp_matches(class, first, expected, expected_bytes) {
+            fail(string.from(id))
+        }
+        // Feed a wrong expectation through the same comparison.
+        let wrong_fields = if expected == "accepted" {
+            b""
+        } else {
+            expected_bytes
+        }
+        if reviewed_rtp_matches(class, first, "accepted", wrong_fields) {
+            fail("wrong reviewed expectation matched")
+        }
+        completed += 1
+        if class == "accepted" {
+            accepted_count += 1
+            let family: u64 = int.widen(first[0])
+            families = families | (1u64 << family)
+        }
+        at = end + 1
+    }
+    if completed != 6 || accepted_count != 3 || families != 7 {
+        fail("reviewed rtp decode counts or accepted families")
+    }
+    Ok(())
+}

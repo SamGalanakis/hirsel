@@ -217,3 +217,124 @@ fn total_order(k: u64) -> codec.Direction {
         _ => Descending,
     }
 }
+
+// Reviewed moqt-23 stream vectors. Regenerate with fixtures.py rows moq-wire --write.
+const REVIEWED_MOQ_WIRE: String = "accepted-control accepted 0 af00aa 030000000000000000 -\naccepted-fetch accepted 0 05812caa 010000000000000003000000000000012c -\naccepted-padding accepted 0 f0132b3e2800 020000000000000005 -\naccepted-subgroup-object accepted 0 30070905026162 00000000000000000300000000000000070000000000000009000000000000000500000000000000026162 -\nrefused-object-length field-length-exceeded 0 3007090511 0000000000000003 -\nrefused-reserved-subgroup-id-mode invalid-stream-header 0 360709 0000000000000000 -\nrefused-truncated-fetch-id truncated 0 0581 0000000000000000 -\n"
+
+fn reviewed_moq_case(raw: Bytes) -> (String, Bytes) {
+    let end = list.len(raw)
+    let mut at = 0u64
+    let mut shown: Bytes = list.new()
+    match codec.read_stream_header(raw, mut at, end) {
+        Ok(SubgroupStream(h)) => {
+            let header_end = at
+            match codec.read_subgroup_object(raw, mut at, end, h, None, 16) {
+                Ok(o) if o.length <= end - at && h.subgroup == ZeroSubgroup && h.priority == None && !h.properties && !h.end_of_group && !h.first_object && o.status == Normal && list.len(o.properties) == 0 => {
+                    list.push(mut shown, 0u8)
+                    list.put_word_be(mut shown, header_end)
+                    list.put_word_be(mut shown, h.alias)
+                    list.put_word_be(mut shown, h.group)
+                    list.put_word_be(mut shown, o.id)
+                    list.put_word_be(mut shown, o.length)
+                    list.append(mut shown, list.slice(raw, at, at + o.length))
+                    if at + o.length != end || at != header_end + 2 {
+                        fail("reviewed subgroup object span")
+                    }
+                },
+                Error(FieldLengthExceeded) => {
+                    list.put_word_be(mut shown, at)
+                    return ("field-length-exceeded", take shown)
+                },
+                _ => fail("reviewed subgroup object"),
+            }
+        },
+        Ok(FetchStream(request)) => {
+            list.push(mut shown, 1u8)
+            list.put_word_be(mut shown, at)
+            list.put_word_be(mut shown, request)
+        },
+        Ok(PaddingStream) => {
+            list.push(mut shown, 2u8)
+            list.put_word_be(mut shown, at)
+        },
+        Ok(ControlStream) => {
+            list.push(mut shown, 3u8)
+            list.put_word_be(mut shown, at)
+        },
+        Error(Truncated) => {
+            list.put_word_be(mut shown, at)
+            return ("truncated", take shown)
+        },
+        Error(InvalidStreamHeader) => {
+            list.put_word_be(mut shown, at)
+            return ("invalid-stream-header", take shown)
+        },
+        Error(_) => fail("unexpected reviewed MoQ refusal"),
+    }
+    ("accepted", take shown)
+}
+
+fn reviewed_moq_field(row: String, mut at: u64) -> View[String] in row {
+    let start = at
+    let end = option.unwrap(string.find(row, start, " "))
+    at = end + 1
+    string.slice(row, start, end)
+}
+
+fn reviewed_moq_matches(actual: String, projection: Bytes, expected: String, fields: Bytes) -> bool {
+    actual == expected && projection == fields
+}
+
+/// bug: Report the same disposition for a different decoded family, field, cursor or refusal.
+/// oracle: moqt-23 §§6.4.1 and 11.3.1. The reviewed bundle supplies each expected projection.
+@test
+fn reviewed_moq_wire() -> Result[(), ()] {
+    let data = REVIEWED_MOQ_WIRE
+    let mut at = 0u64
+    let mut completed = 0u64
+    let mut accepted = 0u64
+    let mut families = 0u64
+    while at < string.byte_len(data) {
+        let end = option.unwrap(string.find(data, at, "\n"))
+        let row = string.slice(data, at, end)
+        let mut next = 0u64
+        let id = reviewed_moq_field(row, mut next)
+        let expected = reviewed_moq_field(row, mut next)
+        let _ = reviewed_moq_field(row, mut next)
+        let raw = option.unwrap(std.hex.decode(string.as_bytes(reviewed_moq_field(row, mut next))))
+        let projection = reviewed_moq_field(row, mut next)
+        let fields = if projection == "-" {
+            b""
+        } else {
+            option.unwrap(std.hex.decode(string.as_bytes(projection)))
+        }
+        if let Error(reason) = moq_codec_total_law(raw) {
+            fail(take reason)
+        }
+        let (class, take first) = reviewed_moq_case(raw)
+        let (replayed, take second) = reviewed_moq_case(raw)
+        if class != replayed || first != second || !reviewed_moq_matches(class, first, expected, fields) {
+            fail(string.from(id))
+        }
+        // Feed a wrong expectation through the same comparison.
+        let wrong_fields = if expected == "accepted" {
+            b""
+        } else {
+            fields
+        }
+        if reviewed_moq_matches(class, first, "accepted", wrong_fields) {
+            fail("wrong reviewed expectation matched")
+        }
+        completed += 1
+        if class == "accepted" {
+            accepted += 1
+            let family: u64 = int.widen(first[0])
+            families = families | (1u64 << family)
+        }
+        at = end + 1
+    }
+    if completed != 7 || accepted != 4 || families != 15 {
+        fail("reviewed moq decode counts or accepted families")
+    }
+    Ok(())
+}

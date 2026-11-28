@@ -43,8 +43,13 @@ def python_gates(out, call, Raw):
         ("test-boat-dispatch", "tools/test_boat_dispatch.py", ["tools/boat-dispatch", "tools/sim-campaign"]),
         ("test-decoder-fixtures", "//tools/decoder-fuzz:test_fixtures.py",
          ["//tools/decoder-fuzz:fixtures.py", "core/std/tests/json.hirsel", "core/std/tests/jwt.hirsel",
-          "core/programs/quic/initial_laws.hirsel", "core/programs/webtransport/laws.hirsel"]
-         + ["core/tests/decoder-corpus/{}.json".format(stem) for stem in ("json", "jwt", "quic-tls", "qpack")]),
+          "core/programs/quic/initial_laws.hirsel", "core/programs/webtransport/laws.hirsel",
+          "core/programs/moq/totality_laws.hirsel", "core/programs/rtp/wire_laws.hirsel",
+          "core/programs/dtls/laws.hirsel", "core/programs/store/store_format14_laws.hirsel",
+          "core/programs/store/store_corpus_format15.hirsel", "core/programs/store/corpus/format-15/directory/MANIFEST",
+          "core/programs/store/corpus/format-15/directory/p-8"]
+         + ["core/tests/decoder-corpus/{}.json".format(stem)
+            for stem in ("json", "jwt", "quic-tls", "qpack", "moq-wire", "rtp-wire", "dtls-record", "store-format15")]),
         ("test-store-chaos", "tools/store-chaos/test_harness.py",
          ["tools/store-chaos/history.py", "tools/store-chaos/log_writes.py",
           "tools/store-chaos/recover.py", "tools/store-chaos/relay.py"]),

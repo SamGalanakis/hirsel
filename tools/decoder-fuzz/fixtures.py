@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Project reviewed v1 inputs for an ordinary decoder law."""
 import argparse
+import base64
 import hashlib
 import json
 from pathlib import Path
+import re
 import struct
 
 ROOT = Path(__file__).resolve().parents[2]
 CORPUS = ROOT / "core/tests/decoder-corpus"
+FORMAT15 = ROOT / "core/programs/store/corpus/format-15"
+FORMAT15_SOURCE = ROOT / "core/programs/store/store_corpus_format15.hirsel"
 
 
 def unique(pairs):
@@ -28,6 +32,20 @@ def number(value, low, high):
     return value
 
 
+def frozen_input(reference):
+    keys(reference, "path")
+    path = reference["path"]
+    if not re.fullmatch(r"directory/(?:MANIFEST|p-[1-9][0-9]*)", path):
+        raise ValueError(f"invalid Format 15 reference {path!r}")
+    raw = (FORMAT15 / path).read_bytes()
+    name = Path(path).name
+    directory = FORMAT15_SOURCE.read_text().split("fn corpus_bucket_objects()", 1)[0]
+    match = re.search(rf'string\.from\("{name}"\), corpus_decode_b64\(b"([A-Za-z0-9+/=]+)"\)', directory)
+    if match is None or base64.b64decode(match[1], validate=True) != raw:
+        raise ValueError(f"embedded Format 15 corpus differs from {path}")
+    return raw
+
+
 def select(path, target, law):
     bundle = json.loads(path.read_bytes(), object_pairs_hook=unique)
     version = bundle.get("schema_version")
@@ -36,8 +54,13 @@ def select(path, target, law):
     keys(bundle, "schema_version", "objects", "cases")
     objects = bundle["objects"]
     for digest, encoded in objects.items():
-        raw = bytes.fromhex(encoded)
-        if raw.hex() != encoded or hashlib.sha256(raw).hexdigest() != digest:
+        if target == "store-format15" and isinstance(encoded, dict):
+            raw = frozen_input(encoded)
+        else:
+            raw = bytes.fromhex(encoded)
+            if raw.hex() != encoded:
+                raise ValueError(f"noncanonical reviewed object {digest}")
+        if hashlib.sha256(raw).hexdigest() != digest:
             raise ValueError(f"invalid reviewed object {digest}")
     selected = []
     previous = ""
@@ -162,6 +185,31 @@ NATIVE = {
                     "surface"),
         "selectors": ("section:4096", "decoder-stream", "encoder-stream", "section:64"),
     },
+    "moq-wire": {
+        "law": "reviewed_moq_wire", "input_kind": "moq-stream", "oracle": "moqt-23-stream-framing",
+        "source": "core/programs/moq/totality_laws.hirsel", "constant": "REVIEWED_MOQ_WIRE",
+        "classes": ("accepted", "truncated", "invalid-stream-header", "field-length-exceeded"),
+        "limits": {"input_bytes": 64, "object_bytes": 16},
+    },
+    "rtp-wire": {
+        "law": "reviewed_rtp_wire", "input_kind": "rtp-rtcp-datagram", "oracle": "rfc3550-rfc8285-wire",
+        "source": "core/programs/rtp/wire_laws.hirsel", "constant": "REVIEWED_RTP_WIRE",
+        "classes": ("accepted", "extension", "padding", "length"),
+        "selectors": ("rtp", "rtcp"), "limits": {"input_bytes": 64},
+    },
+    "dtls-record": {
+        "law": "reviewed_dtls_record", "input_kind": "dtls-datagram", "oracle": "rfc6347-record-framing",
+        "source": "core/programs/dtls/laws.hirsel", "constant": "REVIEWED_DTLS_RECORD",
+        "classes": ("accepted", "discarded-malformed"),
+        "selectors": ("fixed", "before-server-hello"), "limits": {"input_bytes": 64},
+    },
+    "store-format15": {
+        "law": "reviewed_store_format15", "input_kind": "format15-wire", "oracle": "store-format15-wire-spec",
+        "source": "core/programs/store/store_format14_laws.hirsel", "constant": "REVIEWED_STORE_FORMAT15",
+        "classes": ("accepted", "truncated", "malformed"),
+        "selectors": ("manifest", "pack-row", "direct-op", "page-index", "blob-index"),
+        "limits": {"input_bytes": 1024},
+    },
 }
 
 
@@ -180,7 +228,11 @@ def native_cases(stem):
     bundle = select(CORPUS / f"{stem}.json", stem, cohort["law"])
     cases = []
     for case in bundle["cases"]:
-        raw = bytes.fromhex(bundle["objects"][case["digest"]])
+        source = bundle["objects"][case["digest"]]
+        raw = frozen_input(source) if isinstance(source, dict) else bytes.fromhex(source)
+        limits = cohort.get("limits")
+        if limits is not None and (case["limits"] != limits or len(raw) > limits["input_bytes"]):
+            raise ValueError(f"{case['id']}: wrong limits or input above bound")
         expected = case["expected"]
         streaming = cohort.get("streaming", False)
         keys(expected, "class", "projection_hex", *(("partials",) if streaming else ()))
@@ -197,7 +249,8 @@ def native_cases(stem):
             raise ValueError(f"{case['id']}: a whole-input decoder has the contiguous schedule")
         else:
             ends, partials = [], []
-        cases.append({"id": case["id"], "input": raw, "selector": selector(stem, case), "ends": ends,
+        cases.append({"id": case["id"], "input": raw, "reference": source.get("path") if isinstance(source, dict) else None,
+                      "selector": selector(stem, case), "ends": ends,
                       "partials": [number(n, 0, len(raw) + 1) for n in partials], "class": expected["class"],
                       "projection": bytes.fromhex(expected["projection_hex"])})
     return cases
@@ -208,13 +261,14 @@ def packed(ends):
 
 
 def native_rows(stem):
-    """Rows `id class selector input projection schedules`: hex fields, `-` for an empty one."""
+    """Rows `id class selector input projection schedules`; a frozen input is `@path`."""
     def field(data):
         return data.hex() or "-"
     rows = []
     for case in native_cases(stem):
         schedules = ",".join(f"{field(packed(ends))}:{partial}" for ends, partial in zip(case["ends"], case["partials"]))
-        rows.append(f"{case['id']} {case['class']} {case['selector']} {field(case['input'])} "
+        source = f"@{case['reference']}" if case["reference"] else field(case["input"])
+        rows.append(f"{case['id']} {case['class']} {case['selector']} {source} "
                     f"{field(case['projection'])} {schedules or '-'}\n")
     return "".join(rows)
 

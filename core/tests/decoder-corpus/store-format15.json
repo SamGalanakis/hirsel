@@ -1,0 +1,263 @@
+{
+  "schema_version": 1,
+  "objects": {
+    "122bae1ece7f29060c4aa269ce30d75a8708a932889aa07316f26d445d69e1fc": "04010000001100000000000000b700000000000000690000000000000002",
+    "160c0d77e4718c11dd7b757e637982678902b0be72b0b04dd227eec4b7855c66": "04010000001100000000000000b700000000000000690000000000000001030000000000000004000000000000000102030405060708090a0b0c0d0e0f100700000000000000b7000000000000001600000000000000",
+    "2233ee83b8dfb6933716a8e05c7952d2a69775f3f6bf0503f4cf70c9d949e3c0": "04010000001100000000000000b700000000000000690000000000000000",
+    "2961661dee3e0c0f48e11da47771af7acb1e1ce514ad314e80a99b330aad57fb": "000000000000000000000000000000000000000001000100000004150000000000000b020000000000000005000000000000000100000000110000000000000009000000000000001300000000000000060000000000000048000000000000000000000000000000b70000000000000016000000000000",
+    "2d8aa7daadf5240a576bd40f747ef6bf83e216466fa7918641805d485311d8ea": "010000000000000000000000480000000000000011000000220b0000001100000000000000000015000000000b0200000000000000050000000000000001",
+    "40635892ff252fe755984115b847429d903883cc9b5bf09115d17c5df38958df": {
+      "path": "directory/MANIFEST"
+    },
+    "47dc540c94ceb704a23875c11273e16bb0b8a87aed84de911f2133568115f254": "0100",
+    "71b6b4cc3984e35fb9f649d3a33da7ee78937f288a0b64ac256e263633dfcada": {
+      "path": "directory/p-8"
+    },
+    "7f8758c39a5180703a1be4b5143de40850ee4c7926c0f135c715672f5e93c4d5": "000000000000000000000000000000000000000001000100000004150000000000000b020000000000000005000000000000000100000000110000000000000009000000000000001300000000000000060000000000000048000000000000000000000000000000b7000000000000001600000000000000"
+  },
+  "cases": [
+    {
+      "id": "accepted-blob-index",
+      "target": "store-format15",
+      "law": "reviewed_store_format15",
+      "input_kind": "format15-wire",
+      "generator_version": 1,
+      "digest": "2d8aa7daadf5240a576bd40f747ef6bf83e216466fa7918641805d485311d8ea",
+      "limits": {
+        "input_bytes": 1024
+      },
+      "setup": {
+        "surface": "blob-index"
+      },
+      "oracle": {
+        "name": "store-format15-wire-spec",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "05000000000000003e00000000000000000000000000000048000000000000004800000011220000000b00000000000000110000000b0200000000000000050000000000000001"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "accepted-direct-blob-op4",
+      "target": "store-format15",
+      "law": "reviewed_store_format15",
+      "input_kind": "format15-wire",
+      "generator_version": 1,
+      "digest": "7f8758c39a5180703a1be4b5143de40850ee4c7926c0f135c715672f5e93c4d5",
+      "limits": {
+        "input_bytes": 1024
+      },
+      "setup": {
+        "surface": "direct-op"
+      },
+      "oracle": {
+        "name": "store-format15-wire-spec",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "0300000000000000780000000000000000000000000000000000000000000000110000000000000009000000000000001300000000000000060000000000000048000000000000000000000000000000b700000000000000160000000b0200000000000000050000000000000001"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "accepted-foreign-pack-row",
+      "target": "store-format15",
+      "law": "reviewed_store_format15",
+      "input_kind": "format15-wire",
+      "generator_version": 1,
+      "digest": "160c0d77e4718c11dd7b757e637982678902b0be72b0b04dd227eec4b7855c66",
+      "limits": {
+        "input_bytes": 1024
+      },
+      "setup": {
+        "surface": "pack-row"
+      },
+      "oracle": {
+        "name": "store-format15-wire-spec",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "020400000001000000000000001100000000000000b70000000000000069000000000000000300000000000000040102030405060708090a0b0c0d0e0f10000000000000000700000000000000b70000000000000016"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "accepted-local-pack-row",
+      "target": "store-format15",
+      "law": "reviewed_store_format15",
+      "input_kind": "format15-wire",
+      "generator_version": 1,
+      "digest": "2233ee83b8dfb6933716a8e05c7952d2a69775f3f6bf0503f4cf70c9d949e3c0",
+      "limits": {
+        "input_bytes": 1024
+      },
+      "setup": {
+        "surface": "pack-row"
+      },
+      "oracle": {
+        "name": "store-format15-wire-spec",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "010400000001000000000000001100000000000000b70000000000000069"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "accepted-manifest-identity",
+      "target": "store-format15",
+      "law": "reviewed_store_format15",
+      "input_kind": "format15-wire",
+      "generator_version": 1,
+      "digest": "40635892ff252fe755984115b847429d903883cc9b5bf09115d17c5df38958df",
+      "limits": {
+        "input_bytes": 1024
+      },
+      "setup": {
+        "surface": "manifest"
+      },
+      "oracle": {
+        "name": "store-format15-wire-spec",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "00000000000000000f00000000000002f2956df45cbf4b7ef6413dd10b3e66528200000000000000050000000000000267000000000000000b0000000000000005"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "accepted-page-index",
+      "target": "store-format15",
+      "law": "reviewed_store_format15",
+      "input_kind": "format15-wire",
+      "generator_version": 1,
+      "digest": "71b6b4cc3984e35fb9f649d3a33da7ee78937f288a0b64ac256e263633dfcada",
+      "limits": {
+        "input_bytes": 1024
+      },
+      "setup": {
+        "surface": "page-index"
+      },
+      "oracle": {
+        "name": "store-format15-wire-spec",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "040000000000000164000000000000000000000000000000480000000000000048000000bf210000000200000000000002580000000200000000000000000000000000000000"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-invalid-pack-tag",
+      "target": "store-format15",
+      "law": "reviewed_store_format15",
+      "input_kind": "format15-wire",
+      "generator_version": 1,
+      "digest": "122bae1ece7f29060c4aa269ce30d75a8708a932889aa07316f26d445d69e1fc",
+      "limits": {
+        "input_bytes": 1024
+      },
+      "setup": {
+        "surface": "pack-row"
+      },
+      "oracle": {
+        "name": "store-format15-wire-spec",
+        "version": 1
+      },
+      "expected": {
+        "class": "malformed",
+        "projection_hex": "0000000000000000"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-short-direct-descriptor",
+      "target": "store-format15",
+      "law": "reviewed_store_format15",
+      "input_kind": "format15-wire",
+      "generator_version": 1,
+      "digest": "2961661dee3e0c0f48e11da47771af7acb1e1ce514ad314e80a99b330aad57fb",
+      "limits": {
+        "input_bytes": 1024
+      },
+      "setup": {
+        "surface": "direct-op"
+      },
+      "oracle": {
+        "name": "store-format15-wire-spec",
+        "version": 1
+      },
+      "expected": {
+        "class": "truncated",
+        "projection_hex": "0000000000000038"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-short-manifest",
+      "target": "store-format15",
+      "law": "reviewed_store_format15",
+      "input_kind": "format15-wire",
+      "generator_version": 1,
+      "digest": "47dc540c94ceb704a23875c11273e16bb0b8a87aed84de911f2133568115f254",
+      "limits": {
+        "input_bytes": 1024
+      },
+      "setup": {
+        "surface": "manifest"
+      },
+      "oracle": {
+        "name": "store-format15-wire-spec",
+        "version": 1
+      },
+      "expected": {
+        "class": "truncated",
+        "projection_hex": "0000000000000000"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    }
+  ]
+}

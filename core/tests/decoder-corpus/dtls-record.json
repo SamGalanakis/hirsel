@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "objects": {
+    "428cece25de9bc0349aa2461bc87e262e80aaaa9b2e426f292d295a3bc4c9fe9": "14fefd000000000000000100010116feff000000000001020300020101",
+    "5674b102af6b307a54ce9005c76eb4c9c88dfbb07fc1f080e06580013d64d518": "14fefd00000000000000010001",
+    "ac870e6518448b342f902bd1abe240e4523ce6648230d9363ebde959ddf5665e": "16feff000000000001020300020101"
+  },
+  "cases": [
+    {
+      "id": "accepted-ccs-before-next-record",
+      "target": "dtls-record",
+      "law": "reviewed_dtls_record",
+      "input_kind": "dtls-datagram",
+      "generator_version": 1,
+      "digest": "428cece25de9bc0349aa2461bc87e262e80aaaa9b2e426f292d295a3bc4c9fe9",
+      "limits": {
+        "input_bytes": 64
+      },
+      "setup": {
+        "surface": "fixed"
+      },
+      "oracle": {
+        "name": "rfc6347-record-framing",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "1400000000000000000001000000000000000d000000000000000e01"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "accepted-legacy-client-hello",
+      "target": "dtls-record",
+      "law": "reviewed_dtls_record",
+      "input_kind": "dtls-datagram",
+      "generator_version": 1,
+      "digest": "ac870e6518448b342f902bd1abe240e4523ce6648230d9363ebde959ddf5665e",
+      "limits": {
+        "input_bytes": 64
+      },
+      "setup": {
+        "surface": "before-server-hello"
+      },
+      "oracle": {
+        "name": "rfc6347-record-framing",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "1600000000000000010203000000000000000d000000000000000f0101"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-legacy-record-in-fixed-mode",
+      "target": "dtls-record",
+      "law": "reviewed_dtls_record",
+      "input_kind": "dtls-datagram",
+      "generator_version": 1,
+      "digest": "ac870e6518448b342f902bd1abe240e4523ce6648230d9363ebde959ddf5665e",
+      "limits": {
+        "input_bytes": 64
+      },
+      "setup": {
+        "surface": "fixed"
+      },
+      "oracle": {
+        "name": "rfc6347-record-framing",
+        "version": 1
+      },
+      "expected": {
+        "class": "discarded-malformed",
+        "projection_hex": "000000000000000f0000000000000001"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-truncated-record",
+      "target": "dtls-record",
+      "law": "reviewed_dtls_record",
+      "input_kind": "dtls-datagram",
+      "generator_version": 1,
+      "digest": "5674b102af6b307a54ce9005c76eb4c9c88dfbb07fc1f080e06580013d64d518",
+      "limits": {
+        "input_bytes": 64
+      },
+      "setup": {
+        "surface": "fixed"
+      },
+      "oracle": {
+        "name": "rfc6347-record-framing",
+        "version": 1
+      },
+      "expected": {
+        "class": "discarded-malformed",
+        "projection_hex": "000000000000000d0000000000000001"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    }
+  ]
+}

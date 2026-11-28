@@ -14,6 +14,7 @@ moq@1/laws/one_upstream_per_track src=caa63303622b6718 sig=83f1d4bd6ff72389 run=
 moq@1/laws/priority_order src=3de07db3fde13c53 sig=9c595ed8c2c54398 run=c2c0c6612d4cbb79 bug=075d69650f947f6f oracle=6749c8065d032e08 rows=pending
 moq@1/laws/relay_never_sees_plaintext src=15aa1ad62c39ed99 sig=2ed169f833093e42 run=c2c0c6612d4cbb79 bug=f04ae2e1650b024e oracle=451446b511c5db7b rows=pending
 moq@1/laws/relay_preserves_stream_order src=6288aa462e27700d sig=f81775cc661be461 run=c2c0c6612d4cbb79 bug=db6460d6d5956891 oracle=c3b7cbd2d7659e67 rows=pending
+moq@1/laws/reviewed_moq_wire src=c3681761061cdff9 sig=1c9a21d658dfe17f run=c2c0c6612d4cbb79 bug=360a1eabd8ac55d6 oracle=469f9aa14d923d10 rows=pending
 moq@1/laws/session_native_webtransport_and_refusals src=8d78b79098e7d468 sig=72e20680a9552114 run=c2c0c6612d4cbb79 bug=c1e7ce9d9d177de4 oracle=201cc178352a46c6 rows=pending
 moq@1/laws/session_object_limits_and_fetch_extremes src=b82b8cf5bd041463 sig=40cb281cfb850dd0 run=c2c0c6612d4cbb79 bug=0d21f9985910c79d oracle=12909ab862c1c3a3 rows=pending
 moq@1/laws/slow_subscriber_costs_only_itself src=7f64f7bee233aabb sig=8adfcb323650a5de run=c2c0c6612d4cbb79 bug=929f78b21e03ec6f oracle=78e8c0181ce2eff1 rows=pending

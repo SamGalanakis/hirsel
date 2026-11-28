@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "objects": {
+    "00f3dcea424fb0e14860be94eec639fdeb591d28248982239e8d7357a82a3809": "80c90001112233",
+    "074c4ce97a8461bfa615c7a4f627bd5c9b90562dfc573c2886ea1399462a89d3": "b16012350102030511223344aabbccddbede00011078000061620002",
+    "1160595f510979b2828462f8b0c681060094d141c9169f0dd54ee09523f6a12a": "a0601234010203041122334400",
+    "46521c36103f923c2d2723cec694d79d7ff783df16a84640d21df8323e9f8915": "80e012340102030411223344616263",
+    "9a1d3afc09ef5eece54795985aad0ef69d25a424da8784f645b2035ad7cb7be1": "80c900011122334480cb0000",
+    "a61e2070a7609a3bebff196cc93cd4360d91f4c3ba641e23c829354ee5cb898c": "906012340102030411223344bede000210780000"
+  },
+  "cases": [
+    {
+      "id": "accepted-fixed",
+      "target": "rtp-wire",
+      "law": "reviewed_rtp_wire",
+      "input_kind": "rtp-rtcp-datagram",
+      "generator_version": 1,
+      "digest": "46521c36103f923c2d2723cec694d79d7ff783df16a84640d21df8323e9f8915",
+      "limits": {
+        "input_bytes": 64
+      },
+      "setup": {
+        "surface": "rtp"
+      },
+      "oracle": {
+        "name": "rfc3550-rfc8285-wire",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "00000000000000000c000000000000000f000000000000000301601234010203041122334400616263"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "accepted-one-byte-extension",
+      "target": "rtp-wire",
+      "law": "reviewed_rtp_wire",
+      "input_kind": "rtp-rtcp-datagram",
+      "generator_version": 1,
+      "digest": "074c4ce97a8461bfa615c7a4f627bd5c9b90562dfc573c2886ea1399462a89d3",
+      "limits": {
+        "input_bytes": 64
+      },
+      "setup": {
+        "surface": "rtp"
+      },
+      "oracle": {
+        "name": "rfc3550-rfc8285-wire",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "010000000000000018000000000000001c000000000000000200601235010203051122334401000000000000001400000000000000046162"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "accepted-receiver-report",
+      "target": "rtp-wire",
+      "law": "reviewed_rtp_wire",
+      "input_kind": "rtp-rtcp-datagram",
+      "generator_version": 1,
+      "digest": "9a1d3afc09ef5eece54795985aad0ef69d25a424da8784f645b2035ad7cb7be1",
+      "limits": {
+        "input_bytes": 64
+      },
+      "setup": {
+        "surface": "rtcp"
+      },
+      "oracle": {
+        "name": "rfc3550-rfc8285-wire",
+        "version": 1
+      },
+      "expected": {
+        "class": "accepted",
+        "projection_hex": "0200000000000000000000000000000004000000000000000800000000000000081122334400"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-extension-overrun",
+      "target": "rtp-wire",
+      "law": "reviewed_rtp_wire",
+      "input_kind": "rtp-rtcp-datagram",
+      "generator_version": 1,
+      "digest": "a61e2070a7609a3bebff196cc93cd4360d91f4c3ba641e23c829354ee5cb898c",
+      "limits": {
+        "input_bytes": 64
+      },
+      "setup": {
+        "surface": "rtp"
+      },
+      "oracle": {
+        "name": "rfc3550-rfc8285-wire",
+        "version": 1
+      },
+      "expected": {
+        "class": "extension",
+        "projection_hex": ""
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-receiver-report-length",
+      "target": "rtp-wire",
+      "law": "reviewed_rtp_wire",
+      "input_kind": "rtp-rtcp-datagram",
+      "generator_version": 1,
+      "digest": "00f3dcea424fb0e14860be94eec639fdeb591d28248982239e8d7357a82a3809",
+      "limits": {
+        "input_bytes": 64
+      },
+      "setup": {
+        "surface": "rtcp"
+      },
+      "oracle": {
+        "name": "rfc3550-rfc8285-wire",
+        "version": 1
+      },
+      "expected": {
+        "class": "length",
+        "projection_hex": "0000000000000000"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "refused-zero-padding",
+      "target": "rtp-wire",
+      "law": "reviewed_rtp_wire",
+      "input_kind": "rtp-rtcp-datagram",
+      "generator_version": 1,
+      "digest": "1160595f510979b2828462f8b0c681060094d141c9169f0dd54ee09523f6a12a",
+      "limits": {
+        "input_bytes": 64
+      },
+      "setup": {
+        "surface": "rtp"
+      },
+      "oracle": {
+        "name": "rfc3550-rfc8285-wire",
+        "version": 1
+      },
+      "expected": {
+        "class": "padding",
+        "projection_hex": "000000000000000c"
+      },
+      "schedules": [
+        {
+          "kind": "contiguous"
+        }
+      ]
+    }
+  ]
+}

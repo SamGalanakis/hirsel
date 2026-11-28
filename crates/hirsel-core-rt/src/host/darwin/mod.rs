@@ -17,3 +17,18 @@ pub(crate) mod warm;
 #[cfg(test)]
 pub(crate) const HOST_TARGET: hirsel_core_layout::Target =
     hirsel_core_layout::Target::Aarch64Darwin;
+
+pub(crate) fn literal_file() -> std::io::Result<std::fs::File> {
+    use std::os::fd::BorrowedFd;
+    // SAFETY: tmpfile creates an anonymous file. Duplicate its descriptor with
+    // close-on-exec before fclose releases the stream's ownership.
+    unsafe {
+        let stream = libc::tmpfile();
+        if stream.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let file = BorrowedFd::borrow_raw(libc::fileno(stream)).try_clone_to_owned();
+        libc::fclose(stream);
+        file.map(std::fs::File::from)
+    }
+}

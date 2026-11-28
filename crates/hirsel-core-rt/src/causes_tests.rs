@@ -462,7 +462,7 @@ fn cause_cell_owner_prefix_handles_single_pair_host_exhausted_payer_and_drop_ord
     // SAFETY: `owner_a` is live.
     let addr = unsafe { (*owner_a.as_ptr()).mapped_addr() };
     if let Some(perms) = crate::host::mapping_perms(addr) {
-        assert_eq!(perms, "r--p", "CauseData pages must be strictly R/NX");
+        assert_eq!(&perms[..3], "r--", "CauseData pages must be strictly R/NX");
     }
 
     // Reserve a primary cell and a resource cell, then exhaust the payer to 0 bytes

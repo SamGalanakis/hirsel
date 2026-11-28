@@ -68,7 +68,7 @@ pub(crate) mod unix_api;
 mod unix_native;
 #[cfg(feature = "prof")]
 pub(crate) use provider::prof_sampler;
-pub(crate) use provider::{clock, contained, file, path, stat::stat, sync, sys, warm};
+pub(crate) use provider::{clock, contained, file, literal_file, path, stat::stat, sync, sys, warm};
 
 /// A terminal's size as `cols | rows << 16` from `TIOCGWINSZ`, zero when the
 /// descriptor answers no size or either dimension is zero. Linux and Darwin

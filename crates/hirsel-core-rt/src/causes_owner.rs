@@ -7,6 +7,9 @@
 //! edge to executable text, any image handle, executable glue, slab cohort, or
 //! PC-table row, so RX bytes reclaim immediately even while cause chains survive.
 
+#[path = "causes_owner/chunks.rs"]
+mod chunks;
+
 use crate::abi_sites::{SourceFile, SourceTable};
 use std::ptr::{self, NonNull};
 use std::sync::RwLock;
@@ -92,8 +95,7 @@ pub struct CauseData {
     /// Mutable count outside the `PROT_READ` mapping.
     refs: AtomicUsize,
     /// Anonymous `PROT_READ` (R/NX) mapping: `[self_ptr: 8][literals][pad8][sites_body]`.
-    mapped: *mut u8,
-    mapped_len: usize,
+    chunk: Option<std::sync::Arc<chunks::Chunk>>,
     /// Address of the immutable 8-byte `self_ptr` word at the start of `mapped`.
     slot_addr: usize,
     /// Base and byte length of copied RO literal bytes inside `mapped`.
@@ -182,12 +184,6 @@ impl CauseDataRef {
     }
 }
 
-fn page_size() -> usize {
-    // SAFETY: sysconf reads one constant integer.
-    let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    if size > 0 { size as usize } else { 4096 }
-}
-
 impl CauseData {
     /// Build a new independent R/NX data owner from a module's literal bytes
     /// (the read-only data after import slots) and validated section-8 `sites` bytes.
@@ -203,14 +199,13 @@ impl CauseData {
         //   8..8 + literals.len():        copied literal bytes
         //   sites_off..sites_off + len:   8-byte-aligned `SourceFile` rows + path/position bytes
         let literals_off = 8usize;
-        let sites_off = (literals_off + literals.len()).next_multiple_of(8);
-        let total = sites_off + sites_body.len();
-        let mapped_len = total.next_multiple_of(page_size());
+        let sites_off = literals_off
+            .checked_add(literals.len())?
+            .checked_next_multiple_of(8)?;
 
-        let boxed = Box::new(Self {
+        let mut boxed = Box::new(Self {
             refs: AtomicUsize::new(1),
-            mapped: ptr::null_mut(),
-            mapped_len: 0,
+            chunk: None,
             slot_addr: 0,
             literals_ptr: ptr::null(),
             literals_len: 0,
@@ -219,46 +214,12 @@ impl CauseData {
                 files_len: 0,
             },
         });
-        let raw = Box::into_raw(boxed);
-
-        // SAFETY: anonymous private mapping, populated while RW then locked to PROT_READ.
-        let mapped = unsafe {
-            libc::mmap(
-                ptr::null_mut(),
-                mapped_len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        };
-        if mapped == libc::MAP_FAILED {
-            // SAFETY: `raw` has not been shared yet.
-            unsafe { drop(Box::from_raw(raw)) };
-            return None;
-        }
-        let base = mapped.cast::<u8>();
-        // SAFETY: `mapped_len >= total`, all ranges are disjoint and in bounds.
+        let raw = &raw mut *boxed;
+        let (chunk, base) = chunks::Chunk::append(raw.addr(), literals, sites_body, sites_off)?;
+        // SAFETY: the chunk pins this aligned, fully initialized record.
         unsafe {
-            ptr::copy_nonoverlapping((raw.addr()).to_le_bytes().as_ptr(), base, 8);
-            if !literals.is_empty() {
-                ptr::copy_nonoverlapping(literals.as_ptr(), base.add(literals_off), literals.len());
-            }
-            if !sites_body.is_empty() {
-                ptr::copy_nonoverlapping(
-                    sites_body.as_ptr(),
-                    base.add(sites_off),
-                    sites_body.len(),
-                );
-            }
-            if libc::mprotect(mapped, mapped_len, libc::PROT_READ) != 0 {
-                libc::munmap(mapped, mapped_len);
-                drop(Box::from_raw(raw));
-                return None;
-            }
-            let data = &mut *raw;
-            data.mapped = base;
-            data.mapped_len = mapped_len;
+            let data = &mut *boxed;
+            data.chunk = Some(chunk);
             data.slot_addr = base.addr();
             data.literals_ptr = if literals.is_empty() {
                 ptr::null()
@@ -277,7 +238,7 @@ impl CauseData {
             register_literal_range(data.literals_ptr, data.literals_len, raw);
         }
         // SAFETY: `raw` is non-null and initialized with count 1.
-        Some(CauseDataRef(unsafe { NonNull::new_unchecked(raw) }))
+        Some(CauseDataRef(NonNull::from(Box::leak(boxed))))
     }
 
     /// Look up the live [`CauseData`] whose independent R/NX literal mapping
@@ -317,9 +278,6 @@ impl CauseData {
             unsafe {
                 let boxed = Box::from_raw(ptr.cast_mut());
                 unregister_literal_range(boxed.literals_ptr, boxed.literals_len);
-                if !boxed.mapped.is_null() && boxed.mapped_len != 0 {
-                    libc::munmap(boxed.mapped.cast(), boxed.mapped_len);
-                }
                 drop(boxed);
             }
         }
@@ -346,7 +304,7 @@ impl CauseData {
 
     /// Base address of the `PROT_READ` mapping (for protection verification in tests).
     pub fn mapped_addr(&self) -> usize {
-        self.mapped.addr()
+        self.slot_addr
     }
 }
 

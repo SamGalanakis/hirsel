@@ -10,9 +10,6 @@ import subprocess
 import sys
 import tempfile
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools/toolchain-dist'))
-import hcfg
-
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(ROOT / "core/tools"))
@@ -24,7 +21,7 @@ from measurement_artifacts import (
     phase_allocations,
 )
 from omap_bench import counter_command
-from std_native import library_sources
+from store_tests import inputs
 
 PROFILES = ("cm", "gcm128", "gcm256")
 OPERATIONS = (
@@ -64,23 +61,14 @@ def build(out, mode):
     compiler = ROOT / paths["root" + COMPILER_TARGET]
     cc = ROOT / "tools/buck2/toolchains/llvm-files/bin/hirsel-clang"
 
-    source_package = ROOT / "core/programs/srtp"
-    manifest = hcfg.package(source_package)
-    core = dict(name="core", version="1")
-    std = dict(name="std", version="1")
-    srtp = dict(name="srtp", version=str(manifest["version"].split(".")[0]))
-    app = dict(name="srtp_cost", version="1")
-    document = dict(core=core, packages=[
-        dict(package=core, dependencies=[], sources=library_sources(ROOT / "core/core", True)),
-        dict(package=std, dependencies=[core], sources=library_sources(ROOT / "core/std", False)),
-        dict(package=srtp, dependencies=[core, std], sources=[
-            dict(file=str(source_package / file), modules=module.split("/"), signatures=False)
-            for file, module in manifest["sources"].items()
-        ]),
-        dict(package=app, dependencies=[core, std, srtp], sources=[
+    document = inputs(ROOT, package="srtp")
+    srtp = document["packages"][-1]["package"]
+    document["packages"].append(
+        dict(package=dict(name="srtp_cost", version="1"),
+             dependencies=[document["core"], dict(name="std", version="1"), srtp], sources=[
             dict(file=str(HERE / "packets.hirsel"), modules=["main"], signatures=False),
         ]),
-    ])
+    )
     manifest_path = out / "inputs.json"
     manifest_path.write_text(json.dumps(document))
 

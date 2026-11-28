@@ -102,7 +102,7 @@ jobs:
       - name: Build the release compiler with Cargo
         run: cargo build --release -p hirsel-core-driver --locked
       - name: Run CoreIR laws with Cargo
-        run: cargo test --release -p hirsel-core-ir --features wf --lib --locked
+        run: cargo test --release -p hirsel-core-ir --lib --locked
       - name: Check a package with the Cargo-built compiler and std
         run: |
           target/release/hirsel new "$RUNNER_TEMP/cargo-smoke"

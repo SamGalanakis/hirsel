@@ -215,6 +215,15 @@
     }
   ],
   "archive_omissions": {
+    "iced": {
+      "source": "https://raw.githubusercontent.com/icedland/iced",
+      "path": "LICENSE.txt",
+      "sha256": "93a47598376fd3f276b631e75149340087153c6ff1635a53c5790249e9124e2d",
+      "license": "MIT",
+      "packages": {
+        "iced-x86": "src/rust/iced-x86"
+      }
+    },
     "wasmtime": {
       "source": "https://raw.githubusercontent.com/bytecodealliance/wasmtime",
       "path": "LICENSE",

@@ -104,7 +104,8 @@ impl PinTable {
 /// The stop state is an async-signal-safe, lock-free, allocation-free
 /// first-stop-wins handoff (EMB-3).
 pub struct Execution {
-    pub(crate) launch: std::sync::OnceLock<Launch>,
+    /// Only a Unit pool owns launch configuration. Synchronous Places use worker stock.
+    pub(crate) launch: Option<Box<Launch>>,
     /// The worst status any unit of a pool run has returned.
     pub(crate) worst: AtomicU8,
     /// 0 = Running, 1 = Recording RunStop, 2 = RunStop published, 3 = HostStop.
@@ -130,7 +131,7 @@ pub struct Execution {
 impl Execution {
     pub const fn new(contained: bool) -> Self {
         Self {
-            launch: std::sync::OnceLock::new(),
+            launch: None,
             worst: AtomicU8::new(0),
             state: AtomicU8::new(0),
             ended: AtomicBool::new(false),
@@ -206,6 +207,15 @@ impl Execution {
 
     pub const fn standalone() -> Self {
         Self::new(false)
+    }
+
+    pub(crate) fn for_units(
+        run: &'static (dyn Fn(&crate::entry::OsConfig) -> u8 + Sync),
+        base: crate::entry::OsConfig,
+    ) -> Self {
+        let mut execution = Self::standalone();
+        execution.launch = Some(Box::new(Launch { run, base }));
+        execution
     }
 
     #[inline(always)]

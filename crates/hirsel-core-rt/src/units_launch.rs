@@ -64,10 +64,7 @@ pub(super) fn launch_planned(
         .map_err(|error| format!("untied memory thread: {error}"))?;
     // The run's one generation: every worker enters it on its own thread, so
     // a stop recorded by a unit on any worker ends the whole pool.
-    let generation = crate::run_stop::Execution::standalone();
-    let _ = generation
-        .launch
-        .set(crate::run_stop::Launch { run, base: *input });
+    let generation = crate::run_stop::Execution::for_units(run, *input);
     let generation = &generation;
     let start = (std::sync::Mutex::new(None), std::sync::Condvar::new());
     std::thread::scope(|scope| {

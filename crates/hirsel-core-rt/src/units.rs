@@ -471,7 +471,7 @@ pub(super) unsafe extern "C" fn unit_entry(a: *mut u8, _b: *mut u8) -> ! {
                 job();
                 0
             }
-            None => (u.execution.launch.get().unwrap().run)(&u.config),
+            None => (u.execution.launch.as_ref().unwrap().run)(&u.config),
         };
         // The program and all its local tasks have returned. A page with
         // outstanding slots still owns its Arc, even across record reuse.

@@ -230,7 +230,7 @@ pub(super) fn create_initial_unit(id: u32, execution: &crate::run_stop::Executio
 // out of the shared constructor also keeps its vtable out of the root path.
 fn new_unit(id: u32, execution: &crate::run_stop::Execution) -> Box<Unit> {
     let t0 = now();
-    let config = execution.launch.get().unwrap().base;
+    let config = execution.launch.as_ref().unwrap().base;
     // SAFETY: the launch joins every worker, and so drops every unit's last
     // use, before its execution record goes out of scope.
     let execution: &'static crate::run_stop::Execution = unsafe { &*std::ptr::from_ref(execution) };

@@ -1178,17 +1178,16 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     static BODY: std::sync::OnceLock<fn(u32) -> u8> = std::sync::OnceLock::new();
     let _ = BODY.set(case.body);
     static DISPATCH: fn(&crate::entry::OsConfig) -> u8 = |_| (BODY.get().unwrap())(this_unit());
-    static EXECUTION: crate::run_stop::Execution = crate::run_stop::Execution::standalone();
-    let _ = EXECUTION.launch.set(crate::run_stop::Launch {
-        run: &DISPATCH,
-        // SAFETY: an all-zero configuration: no arguments, grants or operations.
-        base: unsafe { std::mem::zeroed() },
+    static EXECUTION: std::sync::OnceLock<crate::run_stop::Execution> = std::sync::OnceLock::new();
+    let execution = EXECUTION.get_or_init(|| {
+        // SAFETY: an all-zero configuration has no arguments, grants or operations.
+        crate::run_stop::Execution::for_units(&DISPATCH, unsafe { std::mem::zeroed() })
     });
     enable_pool();
     let p = pool();
     std::mem::forget(p.memory.start(p.plan.memory_stack_bytes).unwrap());
     for id in 0..case.units {
-        create_unit(id, &EXECUTION);
+        create_unit(id, execution);
     }
     // Names for the trace.
     fn addr<T>(x: &T) -> usize {

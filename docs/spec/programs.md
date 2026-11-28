@@ -164,9 +164,10 @@ calls was (held, truncated, vacuous, closed, to depth, …). A row never changes
 above, and no program reads it (R28). Under `--laws` a pass is reused only together with the
 rows recorded with it; otherwise the test is executed.
 
-In `hirsel.hcfg`, use plural `grants` and `dirs` in `[tests]` or an individual
-test's run table. The `test` command accepts `--grant` and `--dir` when the package
-has no manifest test configuration.
+In `hirsel.hcfg`, `Tests.grants` lists the grants for the test run, including
+directory grants. A `TestRun.grant_change` can replace all, only directories,
+or only non-directory grants. The `test` command accepts `--grant` and `--dir`
+when the package has no manifest test configuration.
 
 ```hirsel
 @test

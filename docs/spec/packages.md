@@ -16,7 +16,7 @@ The files are `hirsel.hcfg`, the **manifest** of a package or a workspace, and `
 the workspace's **lock**. A dependency is either another package of the
 same local workspace or a published library fixed by its root, whose content comes from the
 package store, a package archive, a URL, a git commit or its scope's registry.
-[Registry](registry.md) specifies Phase 1 named selection, logged status and publication. Git is a transport only: a commit is
+[Registry](registry.md) specifies named selection, logged status and publication. Git is a transport only: a commit is
 packed into canonical content and verified against the root before anything else sees it
 (section 7, GIT-1 to GIT-12). The canonical library content
 (section 1) is separate from the checked package image and from the executable release root R
@@ -409,11 +409,11 @@ the list, `ReplaceDirs` replaces only the directories and `ReplaceNonDir` retain
 directories while replacing the other grants. A run naming an unknown test is refused.
 A dependency's test configuration does not enter `C`.
 
-**`foreign`.** Each key is a module of `sources` that is a foreign module, with its symbol
-prefix and archive table. [FFI-2](foreign.md#ffi-2-foreign-modules) defines the fields and their
-refusals. Every row's file is read and captured in resolution step 2, for every target, not
-only the build's: a missing, escaping or non-regular archive file is refused like a source
-file. A member's archive whose bytes do not match its pin is refused when the member's root is
+**`foreign`.** Each key names a module of `sources`. [FFI-2](foreign.md#ffi-2-foreign-modules)
+defines `Native` archive rows and [FFI-10](foreign.md#ffi-10-contained-modules-and-their-build)
+defines `Contained` module rows. Resolution step 2 captures every archive or module
+file, including archives for other targets. It refuses a missing, escaping or
+non-regular file by the source file rules. A member's archive whose bytes do not match its pin is refused when the member's root is
 computed (section 6), and FFI-3 refuses it when a build links it; a check that links nothing
 does not refuse it. Every key that depends on a foreign module holds the SHA-256 of the
 captured bytes as well as the pin (section 10).
@@ -514,7 +514,7 @@ root. A single-package workspace's root is its one manifest. Each key is an iden
 section 2: the source says where the selected content may come from, and the root says what it
 must be. A selection has no alias and no `authority`, because it binds no source name: every
 edge to that identity, from any package of the closure, is bound to the selected root instead
-of its own (section 5). Only `hirsel update`<!-- doc-ref: planned --> writes `selections` (section 12), and a build never adds, drops or changes a row. A member's manifest with
+of its own (section 5). Only `hirsel update` writes `selections` (section 12), and a build never adds, drops or changes a row. A member's manifest with
 `selections` is refused. A selection of a member's identity is refused, because a member is
 already the workspace's choice for its identity.
 
@@ -571,7 +571,7 @@ refusal stops it:
    - Any other identity binds to the one root its edges record. When its edges record two or
      more different roots, the closure is refused as a **diamond** (section 9). The refusal
      names every root with its least path, says for each edge whether it is exact or a floor,
-     and prints the one command that can repair it, `hirsel update <name@major>`<!-- doc-ref: planned -->,
+     and prints the one command that can repair it, `hirsel update <name@major>`,
      when some root satisfies every edge, as below, and otherwise the exact edges that no
      single root satisfies, whose binders must be rebound or republished to agree.
 
@@ -681,7 +681,7 @@ first, each its identity, its version and its root:
 fixture.test/json@1 1.0.0 sha256:9158205f94d44b9e04d00980842459973c2ea442a48b183097ad9d46fe13a7f7
 ```
 
-Publishing never edits a manifest; `hirsel add`<!-- doc-ref: planned --> and `hirsel update`<!-- doc-ref: planned --> (section 12) are the
+Publishing never edits a manifest; `hirsel add` and `hirsel update` (section 12) are the
 commands that do. Inside the producing workspace the member binding stays a
 `path`, and the published root is what that path binding means to anyone else. A workspace
 that wants to depend on the published library instead writes `{ package, major, root, archive }` or
@@ -822,7 +822,7 @@ repository can run code on the host.
    package is at the top of the tree. It is never written as `.` or with `..`.
 4. `ref` is a full reference name, `refs/heads/<branch>` or `refs/tags/<tag>`, the one
    `hirsel add` resolved to `rev` (GIT-10). Resolution, the lock and every key ignore it; only
-   `hirsel add` and `hirsel update`<!-- doc-ref: planned --> read it (GIT-11).
+   `hirsel add` and `hirsel update` read it (GIT-11).
 
 The binding's **source spelling**, used by the lock and in diagnostics, is
 `git:<git>#<rev>` followed by `/<dir>` when `dir` is present
@@ -1058,8 +1058,8 @@ An annotated tag is peeled to the object it names, and the resolved object must 
 (checked on the fetched pack). The `ref` written is the full name.
 
 **GIT-11. Mutable references.** A binding names a commit, so a moved reference never changes
-a manifest, a lock or a build. Only `hirsel update`<!-- doc-ref: planned --> takes a new commit for a bound
-reference (section 12). The **same source** is the pair (`git`, `dir`). `hirsel update`<!-- doc-ref: planned --> resolves
+a manifest, a lock or a build. Only `hirsel update` takes a new commit for a bound
+reference (section 12). The **same source** is the pair (`git`, `dir`). `hirsel update` resolves
 the bound `ref` again; when it now names another commit, update packs that commit and, if the
 result checks (section 12), rebinds the row and says what it saw: a tag `moved`, which a tag
 should never do, and a branch `now names another commit`. The fetch has depth 1 and no
@@ -1067,7 +1067,7 @@ ancestry, so the tool cannot tell a branch that went forward from one rolled bac
 commit, and it never says which. Each prints the bound and the fetched commit and root. A row
 with no `ref` names a commit and nothing moves it. `hirsel add` of the same source with the
 same `REF` refuses when the reference has moved, prints both commits and roots, and names the
-`hirsel update <alias>`<!-- doc-ref: planned --> command that takes it; `add` never rebinds a moved reference. A
+`hirsel update <alias>` command that takes it; `add` never rebinds a moved reference. A
 different `REF`, or a commit id, for the same source given to `add` is a named update, as a new
 URL is: it replaces the binding and prints both commits and roots. A source bound to the same
 `rev` and root is `unchanged`.
@@ -1092,7 +1092,7 @@ verified that root (it cannot be derived from archive bytes); everything else it
 derived from verified archives. Submission is a URL, no account owns a name, and two URLs may
 serve the same `name@major`. Rows are never edited: changed content at a URL gets a new row and
 a mark. **No command contacts it**, and `build` never treats it as an authority. Each row shows
-`hirsel add <url> --root sha256:<root>`<!-- doc-ref: planned -->. The index and the origin are
+`hirsel add <url> --root sha256:<root>`. The index and the origin are
 then two observers: if the origin later serves other bytes, `add` refuses. A URL and root copied
 together from one compromised page authenticate nothing about the publisher.
 
@@ -1326,18 +1326,18 @@ Text that comes from a server (an `ERR` packet, band 3, a status line) or from a
 entry name, a mode) is written with the lock's string escapes (section 8) and cut at
 256 bytes, so no byte a server chooses reaches the terminal as a control sequence.
 
-`hirsel add`<!-- doc-ref: planned --> (section 12) adds these refusals, each exit 2 with nothing written (the store may
+`hirsel add` (section 12) adds these refusals, each exit 2 with nothing written (the store may
 hold verified entries):
 
 | case | diagnostic |
 |---|---|
 | add, locked | `hirsel: <manifest> needs to be updated but --locked was passed` (or `--frozen`: the flag actually given) |
-| add, root differs | `hirsel: <id>: fetched root differs from --root`<!-- doc-ref: planned -->, then `  fetched: sha256:<Q>`, `  expected: sha256:<P>` and `  source: <url or archive>` |
-| add, source rebound | `hirsel: <source> is already bound to another root`, then `  bound: sha256:<P>`, `  fetched: sha256:<Q>` and `to take the fetched root, run: hirsel update <alias>`<!-- doc-ref: planned --> |
-| add, manifest changed | `hirsel: <manifest> changed while hirsel add ran; nothing was written`<!-- doc-ref: planned --> |
+| add, root differs | `hirsel: <id>: fetched root differs from --root`, then `  fetched: sha256:<Q>`, `  expected: sha256:<P>` and `  source: <url or archive>` |
+| add, source rebound | `hirsel: <source> is already bound to another root`, then `  bound: sha256:<P>`, `  fetched: sha256:<Q>` and `to take the fetched root, run: hirsel update <alias>` |
+| add, manifest changed | `hirsel: <manifest> changed while hirsel add ran; nothing was written` |
 | add, local and workspace | `hirsel: <manifest>: dependencies.<alias> is bound here to another package, root or source than the workspace binding; remove one of them first`, then both bindings |
 | add, inherited | `hirsel: <manifest>: dependencies.<alias> inherits the workspace binding; pass --workspace to change it for every member that inherits it, or remove { workspace = true } here first`, for a plain `add` of another source or root |
-| add, alias taken | `hirsel: <manifest>: dependencies.<alias> already binds <id>; pass --as to choose another alias`<!-- doc-ref: planned --> |
+| add, alias taken | `hirsel: <manifest>: dependencies.<alias> already binds <id>; pass --as to choose another alias` |
 | add, root absent | `hirsel: sha256:<P> is not in the package store` |
 | add, toolchain | `hirsel: the toolchain does not provide <id>` |
 | add, local | `hirsel: <id> has a local name; only a workspace member can have one` |
@@ -1347,15 +1347,15 @@ hold verified entries):
 | add, ambiguous ref | `hirsel: <git>: <REF> names both refs/tags/<REF> and refs/heads/<REF>; write the full name` |
 | add, not a commit | `hirsel: <git>: <REF> names a <type>, not a commit` |
 | add, no HEAD branch | `hirsel: <git>: HEAD names no branch; give a branch, a tag or a commit` |
-| add, ref moved | `hirsel: <git> <ref> moved:` (a tag) or `hirsel: <git> <ref> now names another commit:` (a branch), then `  bound: <rev> sha256:<P>`, `  fetched: <rev> sha256:<Q>` and `to take it, run: hirsel update <alias>`<!-- doc-ref: planned --> (GIT-11) |
-| add, virtual root | `hirsel: <root manifest>: no package manifest here; pass --workspace to declare it for the workspace`<!-- doc-ref: planned --> |
-| add, no workspace | `hirsel: <manifest>: no workspace record; hirsel add does not create a workspace boundary`<!-- doc-ref: planned --> |
-| add, root on a local form | `hirsel: --root applies to a fetched source`<!-- doc-ref: planned --> |
+| add, ref moved | `hirsel: <git> <ref> moved:` (a tag) or `hirsel: <git> <ref> now names another commit:` (a branch), then `  bound: <rev> sha256:<P>`, `  fetched: <rev> sha256:<Q>` and `to take it, run: hirsel update <alias>` (GIT-11) |
+| add, virtual root | `hirsel: <root manifest>: no package manifest here; pass --workspace to declare it for the workspace` |
+| add, no workspace | `hirsel: <manifest>: no workspace record; hirsel add does not create a workspace boundary` |
+| add, root on a local form | `hirsel: --root applies to a fetched source` |
 
 Resolution refusals (diamond, member and root, cycles) are the rows above, reported against the
 edited manifests before anything is written. A failure after `add` has renamed a manifest is
 exit status 1, not a refusal: its block names what was committed, what was not, and the command
-that completes it (the same `hirsel add`<!-- doc-ref: planned --> again). A partial cache write (section 7) is exit 2
+that completes it (the same `hirsel add` again). A partial cache write (section 7) is exit 2
 with `cache: partial` and the I/O error.
 
 ## 10. Keys, reuse and the recipe
@@ -1526,8 +1526,8 @@ A row's list is not part of `C` (section 1), so a published package's root says 
 any consumer's ceiling, and changing a list changes no root and no key of section 10. The
 check's result is recomputed from the checked program, which those keys already cover.
 
-**The card.** `hirsel audit`<!-- doc-ref: planned --> prints one card per bound package, and
-`hirsel update`<!-- doc-ref: planned --> prints the change of each card it causes (section 12).
+**The card.** `hirsel audit` prints one card per bound package, and
+`hirsel update` prints the change of each card it causes (section 12).
 A card holds three facts:
 
 1. **Carried authority**: each export of B whose parameters or results hold a capability, a
@@ -1542,9 +1542,9 @@ A card holds three facts:
 
 The **per-export diff** compares two cards export by export: an export that appears or goes, a
 kind that appears or goes in its reached kinds or carried authority, and a changed verdict.
-`hirsel update`<!-- doc-ref: planned --> prints it for each package whose root it changes, before it writes anything,
+`hirsel update` prints it for each package whose root it changes, before it writes anything,
 and a diff that adds a kind outside the row's list is the `authority exceeded` refusal, so an
-update never widens authority silently. `hirsel update`<!-- doc-ref: planned --> never edits a list; widening one is a
+update never widens authority silently. `hirsel update` never edits a list; widening one is a
 manifest edit the user makes.
 
 ## 12. Commands
@@ -1554,12 +1554,12 @@ manifest edit the user makes.
 | `hirsel lock [DIR]` | resolves the workspace and writes the lock |
 | `hirsel fetch [DIR]` | resolves the workspace and fills the store with every published root of the closure, building nothing |
 | `hirsel pack [DIR] --output FILE` | makes the checked offline archive of the member at DIR (section 6) |
-| `hirsel registry publish [--workspace]`<!-- doc-ref: planned --> | uploads a checked member, or all members dependency-first, to their routed registries ([registry §5](registry.md#5-client-selection-and-transport)) |
+| `hirsel registry publish [--workspace]` | see [registry publication](registry.md#5-client-selection-and-transport) |
 | `hirsel inspect DIR\|ARCHIVE.hpkg\|DEPENDENCY` | prints the selected package's public interface by default |
 | `hirsel new NAME` | writes `NAME/hirsel.hcfg`, its sources, its tests and its first lock |
 | `hirsel add SOURCE` | binds one dependency in a manifest and updates the lock |
-| `hirsel update [ALIAS\|ID[@VERSION]]`<!-- doc-ref: planned --> | re-reads sources and selects one root per identity (below) |
-| `hirsel audit [DIR]`<!-- doc-ref: planned --> | prints each bound package's binding, tested root and card (section 11) |
+| `hirsel update [ALIAS\|ID[@VERSION]]` | re-reads sources and selects one root per identity (below) |
+| `hirsel audit [DIR]` | prints each bound package's binding, tested root and card (section 11) |
 
 Inspect a dependency by its alias from the package that declares it.
 An archive supplies its head package and verified dependency closure.
@@ -1579,7 +1579,7 @@ library can be packed offline or published to its scope registry.
 directories and Phase 1 scoped registry names, in a member's own table or, with `--workspace`, in the workspace's. `github:`
 names a repository commit, never a release asset (below).
 
-`hirsel add SOURCE [--as ALIAS] [--root sha256:HEX] [--workspace] [--plan] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
+`hirsel add SOURCE [--as ALIAS] [--root sha256:HEX] [--workspace] [--plan] [--package-store DIR] [--json]`
 
 | `SOURCE` | Fetches | Writes |
 |---|---|---|
@@ -1593,19 +1593,19 @@ names a repository commit, never a release asset (below).
 | a directory holding `hirsel.hcfg` | nothing; it must be a listed member | `alias = { package, major, path = "<relative to the declaring manifest>" }` |
 
 The package and major come from the fetched head, or the member's manifest. The alias is the
-last component of the package name (`json` for `acme.dev/json`) unless `--as ALIAS`<!-- doc-ref: planned -->
+last component of the package name (`json` for `acme.dev/json`) unless `--as ALIAS`
 gives another, which must be a module path component; an alias the manifest already uses for
 another identity is refused (`add, alias taken`), so two packages named `json` from two hosts
-are bound side by side by giving one of them `--as`<!-- doc-ref: planned -->. A head with a local name is refused
-(`add, local`). `--root`<!-- doc-ref: planned --> names the head
+are bound side by side by giving one of them `--as`. A head with a local name is refused
+(`add, local`). `--root` names the head
 root the archive must have (`Root::of` its head bytes, section 1), or the root the commit
 must pack to, and applies only to the URL, archive, `git+https://` and `github:` forms: it is
-a second witness for first use. `--plan`<!-- doc-ref: planned --> does
+a second witness for first use. `--plan` does
 everything before publication; verified archives may still enter the store. `--json` prints one
 object. `--locked` and `--frozen` refuse.
 
 **Which manifest.** The nearest `hirsel.hcfg` with a package record, walking up from the working
-directory, or the workspace root when it has none (then `--workspace`<!-- doc-ref: planned --> is required).
+directory, or the workspace root when it has none (then `--workspace` is required).
 
 For a registry name, the source key is (routed origin, identity). In the transaction below
 replace bundle acquisition with the [registry selection](registry.md#5-client-selection-and-transport)
@@ -1615,7 +1615,7 @@ rename. A version inside the default 72-hour wait requires its exact SemVer.
 **Bindings already present.** `add` binds what it is given and never moves a binding it was
 not given. The same URL or archive already bound to another root is refused, printing both
 roots: other bytes behind one locator are a moved tag or tampering, and taking them is
-`hirsel update`<!-- doc-ref: planned -->'s job (below), which shows the change before it writes. The same git
+`hirsel update`'s job (below), which shows the change before it writes. The same git
 source, the pair (`git`, `dir`), resolving to another commit is refused the same way and says
 whether a tag moved or a branch now names another commit (GIT-11). Another `REF` or a commit
 id for the same pair, or a different source for an alias already bound, replaces the binding
@@ -1626,7 +1626,7 @@ declares it (section 2). A member at `apps/ui` adding `vendor/pkg.hpkg` at the w
 writes `../../vendor/pkg.hpkg` in its own manifest, or `vendor/pkg.hpkg` in the root's
 dependency map.
 
-| Context | Without `--workspace`<!-- doc-ref: planned --> | With it |
+| Context | Without `--workspace` | With it |
 |---|---|---|
 | listed member | the member's `dependencies` | the workspace dependency map, then the member's `Inherit`: two operations |
 | root that is also a package | its `dependencies` | both tables in the one root manifest: one operation |
@@ -1635,7 +1635,7 @@ dependency map.
 | directory not listed, or nested under another root | refused by discovery | refused |
 
 A member that already binds the alias to the same package, root and source and asks for
-`--workspace`<!-- doc-ref: planned --> has its local binding replaced with `Inherit`;
+`--workspace` has its local binding replaced with `Inherit`;
 one that binds it differently is refused naming both bindings (`add, local and workspace`).
 `--workspace` changes a workspace dependency entry for every member that inherits it, and
 prints those members. A plain `add` at a member that inherits the alias is `unchanged` when
@@ -1656,10 +1656,10 @@ a member never drifts from the shared binding by accident.
    store already holds. A failure refuses with the store untouched. One buffer and one decode
    serve verification, resolution and admission; a body over the limit stops at the cap with
    nothing admitted.
-5. With `--root`<!-- doc-ref: planned -->, a head root that differs refuses with the store untouched. Then the
+5. With `--root`, a head root that differs refuses with the store untouched. Then the
    same-source check, keyed on the URL, the archive, or the pair (`git`, `dir`), not on the
    fetched name: the same source bound to another root or commit refuses and names
-   `hirsel update`<!-- doc-ref: planned --> (GIT-11).
+   `hirsel update` (GIT-11).
 6. Admit those same bytes to the store (section 7, including its I/O case).
 7. Build the edited manifests in memory and resolve the workspace through the real resolver on
    that overlay. Every refusal of section 5 refuses here, with nothing written. Roots the
@@ -1668,13 +1668,13 @@ a member never drifts from the shared binding by accident.
    contact (GIT-6). A displaced exact edge or a floor the new root does not meet refuses
    here as the build would (section 9); `add` never writes `selections`. If every target
    manifest already has the same alias, package, root and source, the result is `unchanged`: derive and commit the lock if it is missing or stale, and
-   exit 0. `--plan`<!-- doc-ref: planned --> prints and exits 0 here.
+   exit 0. `--plan` prints and exits 0 here.
 8. Capture each target manifest again; bytes or file identity that differ from step 2 refuse
-   (`changed while hirsel add ran`<!-- doc-ref: planned -->), never merge.
+   (`changed while hirsel add ran`), never merge.
 9. **Publish one manifest:** write it to a temporary file beside it, fsync, rename over it,
    fsync the directory. Then derive `hirsel.lock` from the committed manifests, never from the
    overlay, and commit it as section 8 does.
-10. For `--workspace`<!-- doc-ref: planned --> at a listed member, publish the second manifest the same way, then the
+10. For `--workspace` at a listed member, publish the second manifest the same way, then the
     lock again.
 
 **Split operations.** Each operation changes exactly one manifest and leaves a valid workspace
@@ -1723,16 +1723,16 @@ Exit 0 means the requested plan or edit succeeded. Exit 1 means a definitive ref
 publication failure. Exit 2 means invalid or stale input. Exit 75 means a blocked edit.
 A proposed authority expansion within the declared ceiling holds an ordinary edit before
 publication. Save its JSON receipt and pass it to
-`hirsel op decide @RECEIPT.json --decision FILE`<!-- doc-ref: planned -->. The
+`hirsel op decide @RECEIPT.json --decision FILE`. The
 `host_v1.Decision` supplies the exact `plan_digest` and an `Approve` or `Refuse` verdict
 with `entries: []` and no `all` field. The publisher resolves the edit again and checks the digest before
 writing. A ceiling violation is a refusal.
 
 ### Updating dependencies
 
-`hirsel update [ALIAS|ID[@VERSION]] [--plan] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
+`hirsel update [ALIAS|ID[@VERSION]] [--plan] [--package-store DIR] [--json]`
 
-`hirsel update`<!-- doc-ref: planned --> is the only command, with `add`, that moves a published root, and the only one
+`hirsel update` is the only command, with `add`, that moves a published root, and the only one
 that writes `selections` (section 4). A build never solves: it reads the manifests' roots and
 selections and refuses what they do not settle (section 5). `update` settles it, in the
 workspace transaction of `add` (the workspace lock, captures before and after, one manifest
@@ -1749,7 +1749,7 @@ rename at a time, the lock derived from committed manifests).
    (section 5), the candidates are the roots those edges name plus eligible verified releases for registry rows, members aside. The selected root
    is the candidate of highest version that every edge accepts; for major 0 it stays within the
    least minor any floor names, unless `ID@VERSION` names another version exactly. `ID@VERSION`
-   selects the candidate of that version, and is refused when no eligible candidate has that version. An exact version bypasses only the registry age wait.
+   selects the candidate of that version, and is refused when no eligible candidate has that version. An exact version bypasses only the [registry selection age policy](registry.md#5-client-selection-and-transport).
    A retired pin with a sole otherwise eligible young fix refuses and prints its exact upgrade command. No candidate
    accepted by every edge is the `diamond` refusal, naming the exact edges whose binders must
    be republished. An identity a member provides is never selected: the member is its root.
@@ -1771,7 +1771,7 @@ refuse. Update uses the same operator receipt and exit codes as add.
 
 ### Auditing dependencies
 
-`hirsel audit [DIR] [--json]`<!-- doc-ref: planned --> resolves the workspace as `check` does
+`hirsel audit [DIR] [--json]` resolves the workspace as `check` does
 and prints, for every package of the closure other than toolchain packages: its identity,
 version, root and source; the row that binds it and that row's `authority`; every edge whose
 recorded root differs from the effective one, as `tested` in the lock shows it (section 8);

@@ -129,26 +129,28 @@ designates a set of launch profiles. A profile has these parts:
 - environment rules;
 - a set of **cwd labels**, each mapping to an absolute host directory.
 
-A profile file is UTF-8 text in TOML, one table per profile:
+A profile file is an `exec_v1.Policy` containing named `Profile` records.
 
-```text
-[git]
-image = "/usr/bin/git"
-sha256 = "<64 lowercase hex digits>"
-argv0 = "git"
-args = [["status", "--porcelain"], ["log", "-n", "{any}", "{rest}"]]
-env = { LANG = "C.UTF-8", GIT_AUTHOR_NAME = "{any}" }
-dirs = { work = "/srv/repo" }
+```hcfg
+exec_v1.Policy(profiles: [
+    ("git", Profile(
+        image: "/usr/bin/git",
+        sha256: "<64 lowercase hex digits>",
+        argv0: "git",
+        args: [[Lit("status"), Lit("--porcelain")], [Lit("log"), Lit("-n"), Any, Rest]],
+        env: [("LANG", Fixed("C.UTF-8")), ("GIT_AUTHOR_NAME", Caller)],
+        dirs: [("work", "/srv/repo")],
+    )),
+])
 ```
 
-An argument form is a list of tokens. A literal string token matches exactly those bytes,
-`{any}` matches any one argument, and `{rest}`, allowed only last, matches zero or more
-further arguments. A literal token cannot be spelled `{any}` or `{rest}`. The empty form `[]`
-admits only the empty argument list. Environment rules come in two kinds. A **fixed** key
-(`LANG`) is always passed with its value and cannot be overridden. A **caller-settable** key,
-marked `{any}`, takes the caller's value, or is absent when the caller gives none. Keys are
-non-empty and hold no `=` or NUL. `argv0`, every literal token and every fixed value hold no
-NUL. Every profile has at least one cwd label.
+An argument form is a list of tokens. `Lit(s)` matches exactly the bytes of `s`.
+`Any` matches one argument. `Rest` matches zero or more further arguments and is
+valid only at the end of the form. The empty form admits only the empty argument
+list. The profile always passes a `Fixed` environment value. A `Caller` key takes
+the caller's value and is absent when the caller gives none. Keys are non-empty
+and hold no `=` or NUL. `argv0`, literal arguments and fixed values hold no NUL.
+Every profile has at least one cwd label.
 
 The launcher reads the profile file before the run starts. A missing file, a malformed or
 non-absolute path, a value with a NUL, a malformed profile, an unknown name, or an image that

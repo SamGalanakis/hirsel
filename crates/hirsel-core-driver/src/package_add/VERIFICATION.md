@@ -162,7 +162,7 @@ no single root satisfies every edge; the exact edges of local/a@1, local/b@1 mus
 
 `local/app@1` is the only top member, and `a` sorts before `b`. Two exact edges accept only
 their own roots, so no selection could settle them and the refusal does not offer
-`hirsel update`<!-- doc-ref: planned -->. With `b` changed to bind `<X>` and
+`hirsel update`. With `b` changed to bind `<X>` and
 `jx.hpkg`, the check passes and the lock has exactly one `fixture.test/json@1` row, with root X. That is the
 coalesce. With `b` binding `json` major 2 to the root of a `fixture.test/json@2` fixture, the lock has a
 `fixture.test/json@1` row and a `fixture.test/json@2` row, and the check passes: majors stay distinct.
@@ -193,7 +193,7 @@ hirsel: fixture.test/json@1 is bound to more than one root:
 to choose one root for every edge, run: hirsel update fixture.test/json@1
 ```
 
-Then `hirsel update fixture.test/json@1`<!-- doc-ref: planned --> selects Y, the only candidate
+Then `hirsel update fixture.test/json@1` selects Y, the only candidate
 both edges accept (`jy` is 1.0.1, at least the floor), adds to `app/hirsel.hcfg` the table
 `selections` with the one row
 `"fixture.test/json@1" = { root = "<Y>", archive = "vendor/jy.hpkg" }`, prints
@@ -202,7 +202,7 @@ writes a lock whose `fixture.test/wrap@1` row has
 `tested = ["fixture.test/json@1 sha256:9158205f94d44b9e04d00980842459973c2ea442a48b183097ad9d46fe13a7f7"]`. Now `hirsel check app --locked` passes. With the
 direct row changed to bind root `sha256:1ad0b7636d8b0df47998006c9c53324001ceba7c99cbdd1d7658f2adb191107b`,
 the `C` of `jy`'s files under `version = "1.0.0"`, packed into `vendor/jz.hpkg`, and the
-selection removed, both `hirsel check app` and `hirsel update`<!-- doc-ref: planned --> exit 2 with exactly
+selection removed, both `hirsel check app` and `hirsel update` exit 2 with exactly
 
 ```text
 hirsel: fixture.test/json@1 1.0.0 is two roots:
@@ -257,7 +257,7 @@ with `(source archive:vendor/jx.hpkg)`, and the harness's open has not returned 
 command exits, so the command never opened the archive. (The harness then opens the read end
 itself to release its thread.)
 
-**L4. A symlink escaping the package.** Package `p` lists `"a.hirsel" = "a"`, where `a.hirsel`
+**L4. A symlink escaping the package.** Package `p` lists `sources: [("a.hirsel", "a")]`, where `a.hirsel`
 is a symbolic link to `../outside.hirsel`, a regular file beside `p`, and `p` has no lock.
 Run from `p`'s parent, `hirsel check p` and `hirsel pack p --output p.hpkg` both exit 2, create no
 `hirsel.lock` and no archive, and write exactly this to stderr. The refusal is in resolution step
@@ -272,7 +272,7 @@ holding the same bytes. The law catches a walker that follows links out of the p
 encoder that hashes the link target's text instead of the file's bytes.
 
 **L5. A test-only file is excluded from the root.** This is `jx` with
-`tests`, `limit = 67108864` and `[tests.sources] "json_laws.hirsel" = "json"`, where
+`Tests.limit` of `67108864` and `Tests.sources` containing `("json_laws.hirsel", "json")`, where
 `json_laws.hirsel` holds an `@test` function in module `json`, the library's own module.
 `hirsel pack` prints `fixture.test/json@1 1.0.0 <X>`, the root of `jx` without any test. `hirsel test` on it runs
 the test, so the test file did join module `json` for its own run. The law catches an
@@ -320,7 +320,7 @@ real indexed archive built from the FFI law adapter, with its pin). Every step b
 with one private cache and one code store kept across the steps, and is compared with the
 same command run cold, with an empty cache and an empty code store, on the same files.
 
-- `hirsel check app` passes. Delete `[foreign.native]` from `math/hirsel.hcfg` and leave every
+- `hirsel check app` passes. Delete the `native` entry in `Package.foreign` from `math/hirsel.hcfg` and leave every
   `.hirsel` file unchanged: the warm `hirsel check app` is refused, as the cold one is,
   because `native`'s bodyless headers now stand in an ordinary module.
 - Restore the table and change only the prefix to `hn_`: the warm `hirsel build app --emit recipe --code-store DIR` prints
@@ -429,24 +429,24 @@ X and Y are `jx`'s and `jy`'s roots and W is `fixture.test/wrap@1`'s (L6). Each 
 whose `hirsel.hcfg` and `hirsel.lock` bytes the law records before it starts.
 
 **L15 (L6.1). A refused add changes no file.** The workspace resolves `fixture.test/json@1` at X through
-member `a`. Package `app` runs `hirsel add`<!-- doc-ref: planned --> on an archive whose closure holds `fixture.test/json@1` at Y
+member `a`. Package `app` runs `hirsel add` on an archive whose closure holds `fixture.test/json@1` at Y
 (`fixture.test/wrap@1` rebuilt over `jy`). It exits 2 with the diamond refusal, and every manifest and
 `hirsel.lock` is byte-identical afterwards. The law catches Cargo's order: writing the manifest
 before resolving it.
 
-**L16 (L6.2). `--root`<!-- doc-ref: planned --> stops a substituted archive.** `vendor/jx.hpkg` holds `jy`'s archive;
-`hirsel add vendor/jx.hpkg --root <X>`<!-- doc-ref: planned --> exits 2 with
-`fetched root differs from --root`<!-- doc-ref: planned --> naming Y and X, writes nothing, and the store holds no entry
+**L16 (L6.2). `--root` stops a substituted archive.** `vendor/jx.hpkg` holds `jy`'s archive;
+`hirsel add vendor/jx.hpkg --root <X>` exits 2 with
+`fetched root differs from --root` naming Y and X, writes nothing, and the store holds no entry
 named Y.
 
-**L17 (L6.3). The written binding builds offline, warm and cold.** After `hirsel add`<!-- doc-ref: planned --> of
+**L17 (L6.3). The written binding builds offline, warm and cold.** After `hirsel add` of
 `vendor/jx.hpkg`, `hirsel build --frozen` passes with no network, and passes again over an
 empty store after `hirsel fetch` from the written source alone.
 
 **L18 (L6.4). The same source with other bytes is refused.** After adding `vendor/jx.hpkg`,
-replace the file with `jy`'s archive: `hirsel add vendor/jx.hpkg`<!-- doc-ref: planned --> exits 2 naming X and Y,
+replace the file with `jy`'s archive: `hirsel add vendor/jx.hpkg` exits 2 naming X and Y,
 with the last line `to take the fetched root, run: hirsel update json`, and changes nothing.
-Then `hirsel update json`<!-- doc-ref: planned --> binds Y, printing the version change
+Then `hirsel update json` binds Y, printing the version change
 1.0.0 to 1.0.1 and an empty authority diff: `jy` changes one body and reaches no kind.
 
 **L19 (L6.5). Comments and order are kept.** A manifest with comments and a sorted
@@ -495,14 +495,14 @@ and nothing under `/r1/info/refs`. The law catches a source that is sniffed and 
 that picks one of two meanings.
 
 **L25 (L8.1). Two members share one binding.** Two members adding `vendor/jx.hpkg` with
-`--workspace`<!-- doc-ref: planned --> end with one workspace dependency entry and two
+`--workspace` end with one workspace dependency entry and two
 `Inherit` bindings.
 
 **L26 (L8.2). Paths are relative to the declaring manifest.** A member at `apps/ui` adding
 `vendor/jx.hpkg` writes `../../vendor/jx.hpkg` locally and `vendor/jx.hpkg` in the root, and a
 cold fetch from each succeeds.
 
-**L27 (L8.3). A virtual root only declares.** `--workspace`<!-- doc-ref: planned --> at a
+**L27 (L8.3). A virtual root only declares.** `--workspace` at a
 virtual root leaves `hirsel.lock` byte-identical.
 
 **L28 (L8.4). Partial completion.** A crash between the root and member operations leaves a
@@ -534,7 +534,7 @@ Repository r1 holds five files, each ending in one line feed:
 
 - `hirsel.hcfg` contains `pkg_v1.Workspace(members: ["json", "wrap"])`.
 - `json/hirsel.hcfg` contains `pkg_v1.Package(name: "fixture.test/json", version: "1.0.0", charge: ChargeV1, sources: [("json.hirsel", "json")], dependencies: [])`.
-- `json/json.hirsel` contains the source of `jx` (section 13, **Known roots**).
+- `json/json.hirsel` contains the source of `jx` (see **Known roots**).
 - `wrap/hirsel.hcfg` contains the following bytes.
 
 ```hcfg
@@ -594,7 +594,7 @@ wrap/wrap.hirsel export-ignore
 
 r6 = `48dc7934b5ac1c3f8b65be96ba996dfe67f922b5` (time `1700000000 +0000`, message `v1`, no
 parent; its own commit is `refs/tags/v1`, `refs/heads/main` and `HEAD`'s target) is `fixture.test/demo@1`
-of section 13 at the top of the tree. Its `hirsel.hcfg` is:
+listed under **Known roots** at the top of the tree. Its `hirsel.hcfg` is:
 
 ```hcfg
 pkg_v1.Package(
@@ -636,7 +636,7 @@ pkg_v1.Package(
 `api.hirsel` is `pub opaque type A {}` and `pub opaque type B {}`, `aa.hirsel` is
 `pub fn ping(f: Foreign[api.A]) -> u64`, `b.hirsel` is `pub fn pong(f: Foreign[api.B]) -> u64`,
 `native/aa-x86.a` is `abc` and `native/aa-arm.a` is empty, each source line ending in a line
-feed, as in section 13. `native/b.a` is the 126-byte Git LFS pointer below, whose SHA-256 is
+feed, as under **Known roots**. `native/b.a` is the 126-byte Git LFS pointer below, whose SHA-256 is
 `70edffc238bc4d1e48b82fd69143269662f8daf7556f399d76669f3976dad323`:
 
 ```text
@@ -683,7 +683,7 @@ whose only `want` is C1. `hirsel pack wrap --output w.hpkg`, run in a checkout o
 prints `fixture.test/wrap@1 1.0.0 <W>` then `fixture.test/json@1 1.0.0 <X>`: the same roots. Three variants keep W:
 
 - the server sends the same objects as a pack with `OFS_DELTA` and `REF_DELTA` entries;
-- r1 with a third member `broken` listed, whose `broken/hirsel.hcfg` is not TOML: `broken`
+- r1 with a third member `broken` listed, whose `broken/hirsel.hcfg` is invalid: `broken`
   is never reached, so it is never read;
 - `wrap` binds `json = { package = "fixture.test/json", major = 1, root = "<X>", archive = "../vendor/jx.hpkg" }` and the
   commit holds `vendor/jx.hpkg`, `jx`'s archive: X is read from the snapshot, and the request
@@ -792,7 +792,7 @@ hirsel: https://alpha.test/r1 refs/tags/v1 moved:
 to take it, run: hirsel update wrap
 ```
 
-`hirsel update wrap`<!-- doc-ref: planned --> then writes `rev = "a9bad28634316d4b90052da470a735871d764838"`
+`hirsel update wrap` then writes `rev = "a9bad28634316d4b90052da470a735871d764838"`
 and root W2, keeps `ref = "refs/tags/v1"`, and prints
 `hirsel: updated wrap = fixture.test/wrap@1 1.0.0 sha256:c469ba7bc32d09ebf7461d8f075f6cb53ae9009432441da1ab6707229dae69f5 -> 1.0.0 sha256:f9ce1f7be3bb0142c589e371080224a62b625a483bba4347f9e3df47483146c5`. The same
 version under two roots on one tag is reported, not refused, because the old root is no longer
@@ -836,7 +836,7 @@ bound, a delta whose result is built before its size is checked, and nesting wit
 
 **Laws for Phase 0 identity, selection and authority.** L38 to L42 are the gate laws of the
 packages blueprint: L38 is G7, L39 is G8, L40 is G10, L41 is G9 and L42 is G1. Their
-fixtures' roots are computed by the reference encoder of section 13's known roots from the
+fixtures' roots are computed by the reference encoder of this document's known roots from the
 bytes stated, never by the implementation; a law writes `<R name>` for such a root.
 
 **L38. Scoped names and aliases.** Packages `a.test/json` and `b.test/json`, both version
@@ -859,8 +859,8 @@ of `p1.T` is a `p2.T`. The lock has one row for each of `a.test/json@1`, `b.test
   are read back as the identity, module and item they name, each split at the first `@`;
 - a run's failure site in `a.test/json` is named `a.test/json@1/json.hirsel`, and PROG-9's
   path component for the package is `a%2Etest%2Fjson@1`;
-- `hirsel add` of `b.test/json`'s archive without `--as`<!-- doc-ref: planned --> in a fresh `app` that already binds
-  `json` to `a.test/json` refuses with `add, alias taken`, and with `--as bjson`<!-- doc-ref: planned --> writes
+- `hirsel add` of `b.test/json`'s archive without `--as` in a fresh `app` that already binds
+  `json` to `a.test/json` refuses with `add, alias taken`, and with `--as bjson` writes
   `bjson = { package = "b.test/json", major = 1, root = "<R b>", archive = "…" }`.
 
 The law catches a name split at the first `/` instead of the first `@`, an identity that drops
@@ -875,17 +875,17 @@ binds `num` as a floor on 0.3.1, its tested root `<R 0.3.1>`; its archive is wri
 reference encoder, as L1b's is. A single-package workspace `app` binds `reader` and binds
 `num` exactly to `<R 0.3.4>`:
 
-1. `hirsel check app` refuses as a diamond and offers `hirsel update fixture.test/num@0`<!-- doc-ref: planned -->.
-2. `hirsel update fixture.test/num@0`<!-- doc-ref: planned --> selects 0.3.4 and writes one
+1. `hirsel check app` refuses as a diamond and offers `hirsel update fixture.test/num@0`.
+2. `hirsel update fixture.test/num@0` selects 0.3.4 and writes one
    selection row. `hirsel check app --frozen` then passes and leaves the lock byte-identical.
 3. With `app`'s exact row on `<R 0.4.0>` instead, step 1's refusal names both edges and ends
    with `no single root satisfies every edge; the exact edges of local/app@1 must name one root`,
-   because 0.4.0 is outside the floor's minor, and `hirsel update`<!-- doc-ref: planned --> refuses with the same block.
+   because 0.4.0 is outside the floor's minor, and `hirsel update` refuses with the same block.
 4. With `app`'s exact row removed and `hirsel.hcfg` holding the step 2 selection rewritten by
    hand to `<R 0.3.0>`, a 0.3.0 whose `n` is `30u64`, the build refuses as
    `selection below a floor` (`requires 0.3.1 or a later 0.3.x`).
 5. `fixture.test/num` 0.3.9, whose `num.hirsel` has no `n`, is bound exactly by `app` in place
-   of 0.3.4: `hirsel update`<!-- doc-ref: planned --> selects 0.3.9, its overlay check of `reader` fails on the missing
+   of 0.3.4: `hirsel update` selects 0.3.9, its overlay check of `reader` fails on the missing
    `num.n`, it exits 2 with that check diagnostic, and `app/hirsel.hcfg` and `hirsel.lock` are
    byte-identical to their state before it ran.
 
@@ -932,7 +932,7 @@ The law catches a `pack` that publishes a package the toolchain would refuse.
 8. Every case's refusal also holds on a warm build from an image and on `hirsel check` and
    `hirsel pack`.
 9. After case 1 passes with `["Net"]`, rebinding `netpkg` to a version whose `ping` also reads
-   the environment makes `hirsel update`<!-- doc-ref: planned --> print the per-export diff `ping: + Env` and exit 2 with
+   the environment makes `hirsel update` print the per-export diff `ping: + Env` and exit 2 with
    `authority exceeded`, leaving the manifest and lock as they were.
 
 The unresolved case has no CLI fixture, because no checked program the front end accepts leaves

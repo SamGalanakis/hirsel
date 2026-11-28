@@ -616,54 +616,98 @@ pub fn separator(left: Bytes, right: Bytes) -> Result[Bytes, Error] {
     Ok(clone(list.slice(right, 0, common_prefix(left, right) + 1)))
 }
 
-// The `width` (at most eight) bytes ending at `end` as a big-endian word with
-// zero bytes after them; `end` is at least eight. Two runs of at most eight bytes
-// order as these words do, and on equal words as their widths do.
+// Pack up to eight bytes ending at end into a big-endian, zero-padded word.
 fn head_word(b: Bytes, end: u64, width: u64) -> u64 {
     if width == 0 {
         return 0
     }
-    let w: u64 = list.word_be(b, end - 8)
-    int.wrapping_shl(w, int.narrow(64 - 8 * width))
+    let padding = 64 - 8 * width
+    if end >= 8 {
+        let word: u64 = list.word_be(b, end - 8)
+        return word << padding
+    }
+    let mut at = end - width
+    if list.len(b) >= 8 {
+        let word: u64 = list.word_be(b, 0)
+        return ((word << (8 * at)) >> padding) << padding
+    }
+    let mut word = 0u64
+    if width >= 4 {
+        let part: u32 = list.word_be(b, at)
+        word = int.widen(part)
+        at += 4
+    }
+    if end - at >= 2 {
+        let part: u16 = list.word_be(b, at)
+        word = (word << 16) | int.widen(part)
+        at += 2
+    }
+    if at < end {
+        word = (word << 8) | int.widen(b[at])
+    }
+    word << padding
 }
 
-// `search`'s bisection over u16 slots [first, n) when key[p, len(key)) has at most
-// eight bytes and the key at least eight: the suffix is compared as one word.
-fn search_word(raw: Bytes, start: u64, first: u64, n: u64, key: Bytes, p: u64) -> (u64, bool) {
+// Return the first unequal words or an equal pair. The final word may overlap.
+fn probe_words(a: Bytes, at: u64, b: Bytes, bt: u64, width: u64, matched: u64) -> (u64, u64) {
+    if width <= 8 {
+        return (head_word(a, at + width, width), head_word(b, bt + width, width))
+    }
+    let mut offset = matched
+    loop {
+        let i = order.min(offset, width - 8)
+        let left: u64 = list.word_be(a, at + i)
+        let right: u64 = list.word_be(b, bt + i)
+        if left != right || i == width - 8 {
+            return (left, right)
+        }
+        offset += 8
+    }
+}
+
+fn search_slots(raw: Bytes, key: Bytes, fields: u64) -> (u64, bool) {
+    let mut hi = (fields >> 16) & 65535
+    let mut lo = first_key_slot(int.truncate(fields))
+    if lo >= hi {
+        return (hi, false)
+    }
+    let p = (fields >> 32) & 65535
     let key_width = list.len(key)
+    let (prefix, needle) = probe_words(raw, HEADER, key, 0, order.min(p, key_width), 0)
+    if prefix < needle {
+        return (hi, false)
+    }
+    if prefix > needle || key_width < p {
+        return (lo, false)
+    }
+    let start = list.len(raw) - 2 * hi
     let tail = key_width - p
-    let word = head_word(key, key_width, tail)
-    let mut lo = first
-    let mut hi = n
+    let query_width = order.min(tail, 8)
+    let word = head_word(key, p + query_width, query_width)
     while lo < hi {
-        let mid = int.wrapping_add(lo, hi) / 2
-        let at = u16_at(raw, start + 2 * mid)
-        // Even the shortest entry has seven bytes left including its slot.
-        // Start one byte earlier to load the width and five suffix bytes together.
+        let mid = (lo + hi) / 2
+        let slot: u16 = list.word_le(raw, start + 2 * mid)
+        let at: u64 = int.widen(slot)
+        // The entry and its slot leave at least seven bytes from at onward.
         let packed: u64 = list.word_le(raw, at - 1)
         let width = (packed >> 8) & 65535
-        let probe = if width <= 8 {
-            let cell = if width <= 5 {
-                int.swap_bytes((packed >> 24) & ((1u64 << (8 * width)) - 1))
-            } else {
-                head_word(raw, at + 2 + width, width)
-            }
-            if cell != word {
-                order.compare(cell, word)
-            } else {
-                order.compare(width, tail)
-            }
+        let cell = if width <= 5 {
+            int.swap_bytes((packed >> 24) & ((1u64 << (8 * width)) - 1))
         } else {
-            list.compare_bytes(list.slice(raw, at + 2, at + 2 + width), list.slice(key, p, key_width))
+            let head_width = order.min(width, 8)
+            head_word(raw, at + 2 + head_width, head_width)
         }
-        match probe {
-            Less => {
-                lo = mid + 1
-            },
-            Greater => {
-                hi = mid
-            },
-            Equal => return (mid, true),
+        let (left, right) = if cell == word && width > 8 && tail > 8 {
+            probe_words(raw, at + 2, key, p, order.min(width, tail), 8)
+        } else {
+            (cell, word)
+        }
+        if left < right || (left == right && width < tail) {
+            lo = mid + 1
+        } else if left > right || (left == right && width > tail) {
+            hi = mid
+        } else {
+            return (mid, true)
         }
     }
     (lo, false)
@@ -671,67 +715,21 @@ fn search_word(raw: Bytes, start: u64, first: u64, n: u64, key: Bytes, p: u64) -
 
 /// In a leaf, the first slot at or above key and whether it equals key.
 pub fn search(image: Image, key: Bytes) -> (u64, bool) {
-    let n = count(image)
-    if n == 0 {
-        return (0, false)
-    }
-    let first = first_key_slot(level(image))
-    let p = u16_at(image.raw, 4)
-    let key_width = list.len(key)
-    let common = order.min(p, key_width)
-    if common != 0 {
-        let head = if common <= 8 && key_width >= 8 {
-            let key_head: u64 = list.word_be(key, 0)
-            let gone = 64 - 8 * common
-            order.compare(head_word(image.raw, HEADER + common, common), (key_head >> gone) << gone)
-        } else {
-            list.compare_bytes(list.slice(image.raw, HEADER, HEADER + common), list.slice(key, 0, common))
-        }
-        match head {
-            Less => return (n, false),
-            Greater => return (first, false),
-            Equal => (),
-        }
-    }
-    if key_width < p {
-        return (first, false)
-    }
-    let start = list.len(image.raw) - 2 * n
-    let tail = key_width - p
-    if tail <= 8 && key_width >= 8 {
-        return search_word(image.raw, start, first, n, key, p)
-    }
-    let suffix = list.slice(key, p, key_width)
-    let mut lo = first
-    let mut hi = n
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2
-        let at = u16_at(image.raw, start + 2 * mid)
-        let width = u16_at(image.raw, at)
-        match list.compare_bytes(list.slice(image.raw, at + 2, at + 2 + width), suffix) {
-            Less => {
-                lo = mid + 1
-            },
-            Greater => {
-                hi = mid
-            },
-            Equal => return (mid, true),
-        }
-    }
-    (lo, false)
+    search_slots(image.raw, key, list.word_le(image.raw, 0))
 }
 
 /// In a branch, the last slot at or below key. Slot zero is below every key.
 pub fn descend(image: Image, key: Bytes) -> Option[u64] {
-    if level(image) == 0 || count(image) == 0 {
+    let fields: u64 = list.word_le(image.raw, 0)
+    if fields & 255 == 0 {
         return None
     }
-    let (at, hit) = search(image, key)
-    Some(if hit {
-        at
-    } else {
-        at - 1
-    })
+    let (at, hit) = search_slots(image.raw, key, fields)
+    match (at, hit) {
+        (0, _) => None,
+        (_, true) => Some(at),
+        _ => Some(at - 1),
+    }
 }
 
 fn compare_leaf_suffixes(a: Bytes, b: Bytes, a_prefix: Bytes, b_prefix: Bytes) -> Order {

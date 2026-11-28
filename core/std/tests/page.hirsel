@@ -100,6 +100,31 @@ fn search_short_suffixes() -> bool {
     bisects(image, stored, hex("6b6b6b6b6b6b6b")) && bisects(image, stored, hex("6b6b6b6b6b6b6b6a")) && bisects(image, stored, hex("6b6b6b6b6b6b6b6c")) && bisects(image, stored, hex("6b6b6b6b6b6b6b6aff"))
 }
 
+// The ten-byte keys disagree in both bytes after the first word. The first of
+// those bytes decides their order. Trailing zeroes still distinguish widths.
+// expect: run search_word_boundaries() = true
+fn search_word_boundaries() -> bool {
+    let fixtures =["", "0001", "0100", "010000", "010203040506070809ff", "01020304050607080a00"]
+    let mut rows: List[page.Entry] = list.new()
+    let mut stored: List[Bytes] = list.new()
+    for s in fixtures {
+        let key = hex(string.from(s))
+        list.push(mut rows, inline_row(clone(key), list.new()))
+        list.push(mut stored, take key)
+    }
+    let encoded = result.unwrap(page.encode(rows, 0, 1, Unprefixed))
+    let image = result.unwrap(page.decode(clone(page.payload(encoded)), Unprefixed))
+    let probes =["", "00", "0001", "000100", "010000", "01000000", "01020304050607",
+        "010203040506070809fe", "010203040506070809ff", "010203040506070809ff00",
+        "01020304050607080a00", "01020304050607080a01"]
+    for key in probes {
+        if !bisects(image, stored, hex(string.from(key))) {
+            return false
+        }
+    }
+    true
+}
+
 fn branch_ok(image: page.Image, slot: u64, key: Bytes, ptr: page.PagePtr) -> bool {
     let row = option.unwrap(page.entry(image, slot))
     match row.cell {

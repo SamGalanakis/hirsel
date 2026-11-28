@@ -1,0 +1,18 @@
+pkg_v1.Package(
+    name: "hirsel.ai/blob",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [("upload.hirsel", "http"), ("download.hirsel", "http")],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("store", Path(package: "store", major: 1, path: "../store", authority: [Dir, Clock, Random, Tasks])),
+        ("runner", Path(package: "runner", major: 1, path: "../runner", authority: [Dir, Net, Clock, Random, Stderr, Process, Tasks, Args, Secret, Cred])),
+        ("auth", Path(package: "auth", major: 1, path: "../auth", authority: [Dir, Net, Clock, Random, Stderr, Process, Tasks, Args, Secret, Cred])),
+    ],
+    tests: Some(Tests(
+        sources: [("http-law.hirsel", "laws")],
+        limit: 134217728,
+        runs: [],
+        grants: [Clock, Random, Tasks, Net(Listen(cidr: "127.0.0.0/8", first_port: 0, last_port: 65535)), Net(Connect(cidr: "127.0.0.0/8", first_port: 0, last_port: 65535))],
+    )),
+)

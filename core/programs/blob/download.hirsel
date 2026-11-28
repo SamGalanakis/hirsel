@@ -1,0 +1,118 @@
+/// The route's access decision. Bound uses both the expiry and release guard
+/// supplied by an authenticated binding. Denied reaches no Store rows.
+pub type Access: send = Denied | Public | Bound(runner.LiveBinding)
+
+pub opaque type ReadJob[K: send]: send {
+    reader: store.Reader,
+    snapshot: store.Snapshot,
+    collection: store.Blobs[K],
+    info: store.BlobInfo,
+    pulls: Receiver[std.stream.Read],
+}
+
+fn read_span[K: send](job: ReadJob[K], offset: u64, length: u64) -> Result[Bytes, ()] waits {
+    let Some(span) = store.blob_span(job.info, offset, length) else {
+        return Error(())
+    }
+    let Some(take chunk) = (store.blob_read(job.reader, job.snapshot, job.collection, job.info, span.first) ?=> |_| ()) else {
+        return Error(())
+    }
+    let end = span.skip + order.min(span.len, list.len(chunk) - span.skip)
+    if span.skip == 0 && end == list.len(chunk) {
+        return Ok(take chunk)
+    }
+    Ok(std.http.copy_bytes(list.slice(chunk, span.skip, end)))
+}
+
+fn read_blob[K: send](job: ReadJob[K]) waits {
+    while let Ok(std.stream.Read(offset, length, reply: take reply)) = channel.receive(job.pulls) {
+        let item = read_span(job, offset, length)
+        if let Error(_) = channel.send(reply, take item) {
+            break
+        }
+    }
+}
+
+type Worker[K: send]: send {
+    idle: Sender[Sender[ReadJob[K]]],
+    to: Sender[ReadJob[K]],
+    from: Receiver[ReadJob[K]],
+}
+
+fn read_worker[K: send](take worker: Worker[K]) waits {
+    loop {
+        if let Error(_) = channel.send(worker.idle, channel.sender(worker.to)) {
+            return
+        }
+        let Ok(take job) = channel.receive(worker.from) else {
+            return
+        }
+        read_blob(job)
+    }
+}
+
+/// Runs a bounded pool of Store readers. Start it in the listener's owner
+/// scope and give routes a sender for its bounded job queue. Each worker
+/// holds a snapshot through the transfer and releases it when pulls close.
+/// The byte budget must cover one Store read and one sliced chunk.
+pub fn serve_reads[K: send](take jobs: Receiver[ReadJob[K]], tasks: Tasks, workers: u64, bytes_per_worker: u64) waits {
+    if workers == 0 {
+        return
+    }
+    let (idle, available): (Sender[Sender[ReadJob[K]]], Receiver[Sender[ReadJob[K]]]) = channel.new(workers)
+    let mut active: List[Task[()]] = list.with_capacity(workers)
+    for _ in 0u64 .. workers {
+        let (to, from): (Sender[ReadJob[K]], Receiver[ReadJob[K]]) = channel.new(1)
+        let worker = Worker(idle: channel.sender(idle), to: take to, from: take from)
+        list.push(mut active, task.spawn(tasks, bytes bytes_per_worker, take worker, read_worker))
+    }
+    while let Ok(take job) = channel.receive(jobs) {
+        let Ok(take worker) = channel.receive(available) else {
+            break
+        }
+        if let Error(_) = channel.send(worker, take job) {
+            break
+        }
+    }
+    while let Some(take worker) = list.pop(mut active) {
+        let _ = std.task.cancel_join(take worker)
+    }
+}
+
+fn tag(info: store.BlobInfo) -> Bytes {
+    let mut quoted = std.http.copy_bytes(b"\"")
+    list.extend(mut quoted, string.as_bytes(std.hex.encode(info.digest)))
+    list.push(mut quoted, b'"')
+    take quoted
+}
+
+fn refusal(status: u16, expiry: Option[u64], take guard: Option[std.stream_watch.Guard]) -> Result[std.http.Outcome, std.http.HandlerError] {
+    let mut reply = std.http.response(status, b"", false)?
+    std.http.guard_read(mut reply, take guard, expiry)
+    Ok(Reply(take reply))
+}
+
+/// Serves the attached value at snapshot. Transfer work starts only for a
+/// body-bearing response and fails closed if the read queue is full.
+pub fn serve[K: send](req: std.http.Request, take reader: store.Reader, take snapshot: store.Snapshot, collection: store.Blobs[K], key: K, take filename: Option[Bytes], room: std.stream.Bounds, random: Random, take access: Access, jobs: Sender[ReadJob[K]]) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+    let (expiry, take guard): (Option[u64], Option[std.stream_watch.Guard]) = match take access {
+        Denied => return refusal(403, None, None),
+        Public => (None, None),
+        Bound(runner.LiveBinding(binding, guard: take guard)) => (binding.expires_at_ms, take guard),
+    }
+    let info = match store.blob_info(reader, snapshot, collection, key) {
+        Ok(Some(take found)) => take found,
+        Ok(None) => return refusal(404, expiry, take guard),
+        Error(_) => return refusal(503, expiry, take guard),
+    }
+    let (pull, pulls): (Sender[std.stream.Read], Receiver[std.stream.Read]) = channel.new(1)
+    let src = std.http_object.Source(size: info.size, etag: tag(info), filename: take filename, pull: take pull)
+    let outcome = std.http_object.serve_source(req, take src, room, random, expiry, take guard)?
+    if let Stream(_) = outcome {
+        let job: ReadJob[K] = ReadJob(reader: take reader, snapshot: take snapshot, collection: clone(collection), info: take info, pulls: take pulls)
+        if let Error(_) = channel.try_send(jobs, take job) {
+            return refusal(503, None, None)
+        }
+    }
+    Ok(take outcome)
+}

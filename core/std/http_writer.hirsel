@@ -1,3 +1,23 @@
+pub fn chunk_prefix(mut out: Bytes, length: u64) {
+    list.clear(mut out)
+    let mut digits: Inline[u8, 64] =[0; 64]
+    let start = int.radix_digits(length, 16, mut digits)
+    for i in start .. 64 {
+        let _ = list.push(mut out, digits[i])
+    }
+    let _ = list.append(mut out, string.as_bytes("\r\n"))
+}
+
+pub fn stream_data(mut socket: WriteHalf, mut scratch: Bytes, data: Bytes, chunked: bool, clock: Clock, deadline: u64, signal: Option[http.DrainSignal], check: Option[stream_watch.Guard]) -> Result[(), NetError] waits {
+    if chunked {
+        chunk_prefix(mut scratch, list.len(data))
+        write_guarded(mut socket, scratch, data, clock, deadline, signal, check)?
+        write_guarded(mut socket, string.as_bytes("\r\n"), string.as_bytes(""), clock, deadline, signal, check)
+    } else {
+        write_guarded(mut socket, data, string.as_bytes(""), clock, deadline, signal, check)
+    }
+}
+
 // Writes fixed HTTP bodies with one deadline and a committed-prefix cursor.
 pub fn write_until(mut w: WriteHalf, prefix: Bytes, body: Bytes, c: Clock, deadline: u64, signal: Option[http.DrainSignal]) -> Result[(), NetError] waits {
     write_guarded(mut w, prefix, body, c, deadline, signal, None)

@@ -1,0 +1,73 @@
+/// A decoded upload route. The listener rejects both fixed and chunked bodies
+/// beyond this route's maximum before they can reach attach.
+pub fn upload_route[S: send](handler: fn(std.http.Request, Region, mut std.http.Responder, S) -> Result[std.http.Outcome, std.http.HandlerError] waits, body_max: u64) -> std.router.Route[S] {
+    std.router.Route(handler: handler, body_max: Some(body_max), upgrade_bytes: None, stream_bytes: None, steps: None)
+}
+
+/// Each operation belongs in its own writer transaction. A protected route
+/// can check authority before Begin and inside the transaction for Attach.
+pub type Write[K]: codec + send = Begin | Append(store.BlobUpload, Bytes) | Attach(store.BlobUpload, K) | Abort(store.BlobUpload)
+
+pub type Receipt: codec + send = Begun(store.BlobUpload) | Appended | Attached(store.BlobInfo) | Aborted
+
+pub type UploadError[E] = Body(std.http.BodyError) | Writer(E) | Cleanup(E) | Buffer(Capacity) | WriterProtocol
+
+/// Applies one upload operation in the caller's transaction. An Attach and
+/// any handler writes made in that transaction commit or roll back together.
+pub fn apply[K: codec + send](mut tx: store.Tx, collection: store.Blobs[K], take operation: Write[K]) -> Result[Receipt, store.Error] {
+    match take operation {
+        Begin => Ok(Begun(store.blob_begin(mut tx, collection)?)),
+        Append(id, chunk) => {
+            let _ = store.blob_append(mut tx, collection, id, chunk)?
+            Ok(Appended)
+        },
+        Attach(id, key) => Ok(Attached(store.blob_attach(mut tx, collection, key, id)?)),
+        Abort(id) => {
+            let _ = store.blob_abort(mut tx, collection, id)?
+            Ok(Aborted)
+        },
+    }
+}
+
+fn upload_staged[K: codec + send, E](mut body: std.http.Responder, mut chunk: Bytes, id: store.BlobUpload, take key: K, write: scoped fn(take Write[K]) -> Result[Receipt, E] waits) -> Result[store.BlobInfo, UploadError[E]] waits {
+    loop {
+        let n = runner.http_fill_chunk(mut body, mut chunk) ?=> Body
+        if n == 0 {
+            break
+        }
+        let data = (bound bytes ((n + 7) / 8 * 8) {
+            std.http.copy_bytes(chunk)
+        }) ?=> Buffer
+        let Appended = (write(Append(id, take data)) ?=> Writer) else {
+            return Error(WriterProtocol)
+        }
+        if n < list.capacity(chunk) {
+            break
+        }
+    }
+    let Attached(take info) = (write(Attach(id, take key)) ?=> Writer) else {
+        return Error(WriterProtocol)
+    }
+    Ok(take info)
+}
+
+/// Fills the collection's fixed-size chunks until decoded body EOF, then
+/// attaches exactly once. On a body or writer error, calls Abort before
+/// returning. Use a writer that returns settled results and permits cleanup
+/// after an expired or rejected user authorization.
+pub fn upload[K: codec + send, E](mut body: std.http.Responder, collection: store.Blobs[K], take key: K, write: scoped fn(take Write[K]) -> Result[Receipt, E] waits) -> Result[store.BlobInfo, UploadError[E]] waits {
+    let width: u64 = int.widen(store.blob_limits(collection).chunk)
+    let mut chunk: Bytes = (bound bytes ((width + 7) / 8 * 8) {
+        list.with_capacity(width)
+    }) ?=> Buffer
+    let Begun(id) = (write(Begin) ?=> Writer) else {
+        return Error(WriterProtocol)
+    }
+    let outcome = upload_staged(mut body, mut chunk, id, take key, write)
+    if let Error(_) = outcome {
+        let Aborted = (write(Abort(id)) ?=> Cleanup) else {
+            return Error(WriterProtocol)
+        }
+    }
+    take outcome
+}

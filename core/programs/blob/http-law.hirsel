@@ -1,0 +1,508 @@
+@test
+fn content_disposition_sanitizes_filename() -> Result[(), ()] {
+    if std.http_object.attachment(Some(b"..\\part/name\"\r\nX-Test: yes")) != b"attachment; filename=\"_part_name___X-Test_ yes\"" || std.http_object.attachment(None) != b"attachment" {
+        fail("unsafe or missing Content-Disposition")
+    }
+    Ok(())
+}
+
+const WIDTH: u64 = 512
+
+const BODY_MAX: u64 = 49152
+
+type Tables: shareable + send {
+    blobs: store.Blobs[String],
+    sessions: auth.Tables,
+}
+
+fn declarations(mut schema: store.Declare) -> Result[Tables, store.Error] {
+    let blobs = store.declare_blobs(mut schema, "blobs", std.codec.key_string(), store.BlobLimits(chunk: 512, max: BODY_MAX))?
+    let sessions = auth.declare(mut schema)?
+    Ok(Tables(blobs: take blobs, sessions: take sessions))
+}
+
+type WriteError: codec + send = Forbidden | StoreFailure
+
+type WriteInput: send {
+    tables: Tables,
+    cookie: String,
+    operation: http.Write[String],
+}
+
+fn write_blob(mut tx: store.Tx, input: WriteInput) -> Result[http.Receipt, WriteError] {
+    let protected = match input.operation {
+        Begin => true,
+        Attach(_, _) => true,
+        _ => false,
+    }
+    if protected {
+        return Ok(auth.with_session(mut tx, input.tables.sessions, input.cookie, scoped fn(mut draft: store.Tx, proof: auth.Proof) -> Result[http.Receipt, auth.Error] {
+            if auth.subject(proof) != b"writer" {
+                return Error(Rejected)
+            }
+            if let Attach(_, key) = input.operation {
+                if key == "refused" {
+                    return Error(Rejected)
+                }
+            }
+            Ok(http.apply(mut draft, input.tables.blobs, clone(input.operation)) ?=> |_| Unavailable)
+        }) ?=> |_| Forbidden)
+    }
+    Ok(http.apply(mut tx, input.tables.blobs, clone(input.operation)) ?=> |_| StoreFailure)
+}
+
+type Opened: send {
+    reader: store.Reader,
+    snapshot: store.Snapshot,
+    access: runner.LiveBinding,
+}
+
+type Command: send = Save(String, http.Write[String], Sender[Result[http.Receipt, WriteError]]) | Open(String, Sender[Option[Opened]])
+
+type ServerState: send {
+    blobs: store.Blobs[String],
+    store: Sender[Command],
+    reads: Sender[http.ReadJob[String]],
+    random: Random,
+}
+
+type Writer: send {
+    clock: Clock,
+    random: Random,
+    tasks: Tasks,
+    commands: Receiver[Command],
+    ready: Sender[(store.Blobs[String], String)],
+    aborted: Sender[bool],
+    appended: Sender[()],
+}
+
+fn run_writer(take job: Writer) waits {
+    let Writer(clock, random, tasks, commands: take incoming, ready: take ready, aborted: take aborts, appended: take progress) = take job
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 67108864)))
+    let tables = result.unwrap(store.bind_declaration(mut db, Migrate, declarations))
+    let (take initial_cookie, take registration) = auth.fresh(random)
+    let registration_input: (auth.Tables, auth.Registration) = (clone(tables.sessions), take registration)
+    let saved: store.Outcome[(), auth.Error] = result.unwrap(store.run(mut db, None, take registration_input, fn(mut tx: store.Tx, input: (auth.Tables, auth.Registration)) -> Result[(), auth.Error] {
+        auth.create(mut tx, input.0, input.1, b"writer", 60000)
+    }))
+    if let Committed(_) = saved {} else {
+        fail("persist test session")
+    }
+    let branch = store.main_branch(db)
+    let head = result.unwrap(store.follow(mut db, branch))
+    let (monitor, take monitor_task) = result.unwrap(auth.monitor(tasks, clock, result.unwrap(store.reader(db, 0)), head, tables.sessions, 8, 1048576))
+    result.unwrap(channel.send(ready, (clone(tables.blobs), take initial_cookie)))
+    while let Ok(take command) = channel.receive(incoming) {
+        match take command {
+            Save(take cookie, take operation, take to) => {
+                let abandoned = match operation {
+                    Abort(id) => Some(id),
+                    _ => None,
+                }
+                let input = WriteInput(tables: clone(tables), cookie: take cookie, operation: take operation)
+                let result_write: Result[store.Outcome[http.Receipt, WriteError], store.Error] = store.run(mut db, None, take input, write_blob)
+                let written: Result[http.Receipt, WriteError] = match take result_write {
+                    Ok(Committed(store.Done(value: take receipt, ..))) => Ok(take receipt),
+                    Ok(Aborted(rejected)) => Error(rejected.value),
+                    _ => Error(StoreFailure),
+                }
+                if let Ok(Appended) = written {
+                    let _ = channel.try_send(progress, ())
+                }
+                if let Some(id) = abandoned {
+                    let staged_input: (store.Blobs[String], store.BlobUpload) = (clone(tables.blobs), id)
+                    let staged: store.Outcome[bool, store.Error] = result.unwrap(store.run(mut db, None, take staged_input, fn(mut tx: store.Tx, args: (store.Blobs[String], store.BlobUpload)) -> Result[bool, store.Error] {
+                        let gone = store.blob_staged(tx, args.0, args.1)? == None
+                        let _ = store.blob_sweep(mut tx, args.0, 0, BODY_MAX / WIDTH + 2)?
+                        Ok(gone)
+                    }))
+                    let gone = match staged {
+                        Committed(store.Done(value, ..)) => value,
+                        _ => false,
+                    }
+                    result.unwrap(channel.send(aborts, gone))
+                }
+                let _ = channel.send(to, take written)
+            },
+            Open(take cookie, take to) => {
+                let reader = result.unwrap(store.reader(db, 0))
+                let snap = store.snapshot(db)
+                let access = auth.bind_session(reader, snap, tables.sessions, cookie, 7, clock, monitor)
+                let opened = match take access {
+                    Ok(take binding) => Some(Opened(reader: take reader, snapshot: take snap, access: take binding)),
+                    Error(_) => None,
+                }
+                let _ = channel.send(to, take opened)
+            },
+        }
+    }
+    let _ = std.task.cancel_join(take monitor_task)
+}
+
+fn reply(code: u16) -> Result[std.http.Outcome, std.http.HandlerError] {
+    Ok(Reply(std.http.response(code, b"", true)?))
+}
+
+fn upload_route(req: std.http.Request, _scratch: Region, mut body: std.http.Responder, state: ServerState) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+    let Some(key) = std.http.capture(req, "key") else {
+        return reply(400)
+    }
+    let Some(raw) = std.http.field(req, b"authorization") else {
+        return reply(401)
+    }
+    let cookie = result.unwrap(string.from_utf8(std.http.copy_bytes(raw)))
+    let dispatch = scoped fn(take operation: http.Write[String]) -> Result[http.Receipt, WriteError] waits {
+        let (to, from): (Sender[Result[http.Receipt, WriteError]], Receiver[Result[http.Receipt, WriteError]]) = channel.new(1)
+        channel.send(state.store, Save(string.from(cookie), take operation, take to)) ?=> |_| StoreFailure
+        (channel.receive(from) ?=> |_| StoreFailure)
+    }
+    match http.upload(mut body, state.blobs, string.from(key), dispatch) {
+        Ok(_) => reply(201),
+        Error(Body(e)) => reply(e.status),
+        Error(Writer(Forbidden)) => reply(403),
+        Error(_) => reply(503),
+    }
+}
+
+fn download_route(req: std.http.Request, _scratch: Region, mut _body: std.http.Responder, state: ServerState) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+    let Some(key) = std.http.capture(req, "key") else {
+        return reply(400)
+    }
+    let Some(raw) = std.http.field(req, b"authorization") else {
+        return reply(401)
+    }
+    let cookie = result.unwrap(string.from_utf8(std.http.copy_bytes(raw)))
+    let (to, from): (Sender[Option[Opened]], Receiver[Option[Opened]]) = channel.new(1)
+    result.unwrap(channel.send(state.store, Open(take cookie, take to)))
+    let Some(Opened(reader: take reader, snapshot: take snap, access: take access)) = result.unwrap(channel.receive(from)) else {
+        return reply(403)
+    }
+    let bounds = std.stream.Bounds(event_max: 4096, producer_bytes: 32768, producer_steps: 1000000)
+    http.serve(req, take reader, take snap, state.blobs, key, Some(b"../sample.bin"), bounds, state.random, Bound(take access), state.reads)
+}
+
+type ListenerJob: send {
+    listener: Listener,
+    clock: Clock,
+    tasks: Tasks,
+    state: ServerState,
+    stop: Receiver[u64],
+}
+
+fn serve_http(take job: ListenerJob) waits {
+    let ListenerJob(listener: take socket, clock, tasks, state: take state, stop: take stop) = take job
+    let mut routes: std.router.Builder[ServerState] = std.router.builder()
+    result.unwrap(std.router.add(mut routes, "POST", "/{key}", http.upload_route(upload_route, BODY_MAX)))
+    result.unwrap(std.router.add(mut routes, "POST", "/quota/{key}", http.upload_route(upload_route, BODY_MAX + WIDTH)))
+    result.unwrap(std.router.add(mut routes, "GET", "/{key}", std.router.Route(handler: download_route, body_max: None, upgrade_bytes: None, stream_bytes: Some(131072), steps: None)))
+    let mut cfg = std.http.defaults()
+    cfg.sockets_max = 8
+    cfg.conns_max = 4
+    cfg.http_max = 4
+    cfg.ip_sockets_max = 8
+    cfg.streams_max = 2
+    cfg.heartbeat_ms = 1000
+    cfg.body_max = 128
+    cfg.handler_bytes = 16384
+    cfg.lease_ms = 8000
+    let mut sockets: List[Listener] = list.with_capacity(1)
+    list.push(mut sockets, take socket)
+    let make: scoped[view] fn() -> ServerState = fn() -> ServerState {
+        ServerState(blobs: clone(state.blobs), store: channel.sender(state.store), reads: channel.sender(state.reads), random: state.random)
+    }
+    result.unwrap(std.http.serve_with_factory(take sockets, clock, tasks, take cfg, result.unwrap(std.router.build(take routes)), 4096, make, Some(take stop)))
+}
+
+fn serve_reads(take work: (Receiver[http.ReadJob[String]], Tasks)) waits {
+    let (take incoming, tasks) = take work
+    http.serve_reads(take incoming, tasks, 2, 32768)
+}
+
+type TestServer {
+    address: Addr,
+    cookie: String,
+    server: Task[()],
+    reader: Task[()],
+    writer: Task[()],
+    stop: Sender[u64],
+    aborted: Receiver[bool],
+    appended: Receiver[()],
+}
+
+fn start_server(clock: Clock, random: Random, tasks: Tasks, net: Net) -> TestServer waits {
+    let (commands, incoming): (Sender[Command], Receiver[Command]) = channel.new(8)
+    let (ready, initialized): (Sender[(store.Blobs[String], String)], Receiver[(store.Blobs[String], String)]) = channel.new(1)
+    let (aborts, aborted): (Sender[bool], Receiver[bool]) = channel.new(4)
+    let (progress, appended): (Sender[()], Receiver[()]) = channel.new(1)
+    let writer = task.spawn(tasks, bytes 50331648, Writer(clock, random, tasks, commands: take incoming, ready: take ready, aborted: take aborts, appended: take progress), run_writer)
+    let (take blobs, take cookie) = result.unwrap(channel.receive(initialized))
+    let (read, reads): (Sender[http.ReadJob[String]], Receiver[http.ReadJob[String]]) = channel.new(2)
+    let reader = task.spawn(tasks, bytes 1048576, (take reads, tasks), serve_reads)
+    let (take listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(2130706433), port: 0), 8))
+    let (stop, stopped): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let state = ServerState(blobs: take blobs, store: take commands, reads: take read, random)
+    let server = task.spawn(tasks, bytes 16777216, ListenerJob(listener: take listener, clock, tasks, state: take state, stop: take stopped), serve_http)
+    TestServer(address, cookie: take cookie, server: take server, reader: take reader, writer: take writer, stop: take stop, aborted: take aborted, appended: take appended)
+}
+
+fn finish_server(take test: TestServer) waits {
+    let TestServer(server: take server, reader: take reader, writer: take writer, stop: take stop, ..) = take test
+    result.unwrap(channel.send(stop, 0))
+    result.unwrap(task.join(take server))
+    result.unwrap(task.join(take reader))
+    result.unwrap(task.join(take writer))
+}
+
+fn deadline(c: Clock) -> u64 {
+    std.clock.deadline_after_ms(host.mono_ns(c), 8000)
+}
+
+fn dial(n: Net, c: Clock, address: Addr, method: String, target: String, cookie: String, extra: Option[(String, String)], take framing: std.http_client.RequestBody) -> std.http_client.Connection waits {
+    let mut fields: List[std.http_client.Header] = list.with_capacity(2)
+    list.push(mut fields, std.http_client.Header(name: "Authorization", value: Public(std.http.copy_bytes(string.as_bytes(cookie)))))
+    if let Some((name, value)) = view extra {
+        list.push(mut fields, std.http_client.Header(name: string.from(name), value: Public(std.http.copy_bytes(string.as_bytes(value)))))
+    }
+    result.unwrap(std.http_client.dial(n, address, "a", c, std.http_client.Request(method: string.from(method), target: string.from(target), headers: take fields, body: take framing), deadline(c)))
+}
+
+fn status(client: std.http_client.Connection) -> u16 {
+    std.http_client.status(std.http_client.head(client))
+}
+
+fn field(client: std.http_client.Connection, name: Bytes) -> Bytes {
+    let head = std.http_client.head(client)
+    for i in 0u64 .. std.http_client.field_count(head) {
+        let (key, value) = option.unwrap(std.http_client.field_at(head, i))
+        if std.http1.equal_ascii(key, name) {
+            return std.http.copy_bytes(value)
+        }
+    }
+    list.new()
+}
+
+fn request(n: Net, c: Clock, test: TestServer, method: String, target: String, extra: Option[(String, String)]) -> std.http_client.Connection waits {
+    let mut client = dial(n, c, test.address, method, target, test.cookie, extra, Fixed(0))
+    result.unwrap(std.http_client.finish_request(mut client, BODY_MAX + 4096))
+    take client
+}
+
+fn payload_byte(at: u64) -> u8 {
+    int.narrow((at * 7 + 3) % 251)
+}
+
+fn block(first: u64, len: u64) -> Bytes {
+    let mut data: Bytes = list.with_capacity(len)
+    for at in first .. first + len {
+        list.push(mut data, payload_byte(at))
+    }
+    take data
+}
+
+fn send_blob(mut client: std.http_client.Connection, total: u64) waits {
+    let mut at = 0u64
+    while at < total {
+        let n = order.min(193, total - at)
+        result.unwrap(std.http_client.write(mut client, block(at, n)))
+        at += n
+    }
+}
+
+fn expect_span(mut client: std.http_client.Connection, first: u64, end: u64) waits {
+    let mut at = first
+    let mut data: Bytes = list.with_capacity(379)
+    loop {
+        list.clear(mut data)
+        if result.unwrap(std.http_client.read(mut client, mut data)) == 0 {
+            break
+        }
+        for b in data {
+            if at >= end || b != payload_byte(at) {
+                fail("download bytes")
+            }
+            at += 1
+        }
+    }
+    if at != end {
+        fail("download length")
+    }
+}
+
+fn expect_status(take client: std.http_client.Connection, want: u16) {
+    if status(client) != want {
+        fail("download status")
+    }
+    std.http_client.close(take client)
+}
+
+fn expect_multipart(mut client: std.http_client.Connection) waits {
+    let media = field(client, b"content-type")
+    let prefix = b"multipart/byteranges; boundary="
+    if status(client) != 206 || list.len(media) <= list.len(prefix) || list.slice(media, 0, list.len(prefix)) != prefix || list.len(field(client, b"content-range")) != 0 {
+        fail("multipart head")
+    }
+    let boundary = list.slice(media, list.len(prefix), list.len(media))
+    let mut expected = std.http.copy_bytes(b"--")
+    list.extend(mut expected, boundary)
+    list.extend(mut expected, b"\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes 510-514/49152\r\n\r\n")
+    list.extend(mut expected, block(510, 5))
+    list.extend(mut expected, b"\r\n--")
+    list.extend(mut expected, boundary)
+    list.extend(mut expected, b"\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes 49149-49151/49152\r\n\r\n")
+    list.extend(mut expected, block(BODY_MAX - 3, 3))
+    list.extend(mut expected, b"\r\n--")
+    list.extend(mut expected, boundary)
+    list.extend(mut expected, b"--\r\n")
+    let mut actual: Bytes = list.with_capacity(1024)
+    while result.unwrap(std.http_client.read(mut client, mut actual)) != 0 {}
+    if actual != expected {
+        fail("multipart bytes")
+    }
+}
+
+@test
+fn blob_http_round_trip(c: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    let test = start_server(c, random, tasks, net)
+    let mut upload = dial(net, c, test.address, "POST", "/data", test.cookie, None, Chunked)
+    send_blob(mut upload, WIDTH + 17)
+    result.unwrap(channel.receive_until(test.appended, At(c, deadline(c))))
+    expect_status(request(net, c, test, "GET", "/data", None), 404)
+    let mut at = WIDTH + 17
+    while at < BODY_MAX {
+        let len = order.min(997, BODY_MAX - at)
+        result.unwrap(std.http_client.write(mut upload, block(at, len)))
+        at += len
+    }
+    result.unwrap(std.http_client.finish_request(mut upload, 0))
+    expect_status(take upload, 201)
+    let mut whole = request(net, c, test, "GET", "/data", None)
+    let tag = result.unwrap(string.from_utf8(field(whole, b"etag")))
+    if status(whole) != 200 || field(whole, b"content-length") != b"49152" || field(whole, b"x-content-type-options") != b"nosniff" || field(whole, b"accept-ranges") != b"bytes" || field(whole, b"content-disposition") != b"attachment; filename=\"_sample.bin\"" || field(whole, b"content-security-policy") != b"default-src 'none'; sandbox" {
+        fail("whole-download head")
+    }
+    expect_span(mut whole, 0, BODY_MAX)
+    std.http_client.close(take whole)
+    let mut single = request(net, c, test, "GET", "/data", Some(("Range", "bytes=510-514")))
+    if status(single) != 206 || field(single, b"content-length") != b"5" || field(single, b"content-range") != b"bytes 510-514/49152" || field(single, b"etag") != string.as_bytes(tag) {
+        fail("single range")
+    }
+    expect_span(mut single, 510, 515)
+    std.http_client.close(take single)
+    let mut multi = request(net, c, test, "GET", "/data", Some(("Range", "bytes=510-514, -3")))
+    expect_multipart(mut multi)
+    std.http_client.close(take multi)
+    let beyond = request(net, c, test, "GET", "/data", Some(("Range", "bytes=49152-, -0")))
+    if field(beyond, b"content-range") != b"bytes */49152" {
+        fail("unsatisfiable size")
+    }
+    expect_status(take beyond, 416)
+    let mut weak = string.from("W/")
+    string.push(mut weak, tag)
+    expect_status(request(net, c, test, "GET", "/data", Some(("If-None-Match", take weak))), 304)
+    expect_status(request(net, c, test, "GET", "/data", Some(("If-Match", "\"other\""))), 412)
+    let mut head = request(net, c, test, "HEAD", "/data", Some(("Range", "bytes=0-5")))
+    if status(head) != 200 || field(head, b"content-length") != b"49152" || field(head, b"etag") != string.as_bytes(tag) {
+        fail("HEAD metadata")
+    }
+    expect_span(mut head, 0, 0)
+    std.http_client.close(take head)
+    finish_server(take test)
+    Ok(())
+}
+
+@test
+fn blob_http_aborts_and_checks_authority(c: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    let test = start_server(c, random, tasks, net)
+    let mut denied = dial(net, c, test.address, "POST", "/denied", "invalid", None, Fixed(0))
+    result.unwrap(std.http_client.finish_request(mut denied, 0))
+    expect_status(take denied, 403)
+    let mut forbidden = dial(net, c, test.address, "GET", "/data", "invalid", None, Fixed(0))
+    result.unwrap(std.http_client.finish_request(mut forbidden, 0))
+    expect_status(take forbidden, 403)
+    let mut over = dial(net, c, test.address, "POST", "/over", test.cookie, None, Chunked)
+    send_blob(mut over, BODY_MAX + 1)
+    result.unwrap(std.http_client.finish_request(mut over, 0))
+    expect_status(take over, 413)
+    if !result.unwrap(channel.receive_until(test.aborted, At(c, deadline(c)))) {
+        fail("over-limit upload remains staged")
+    }
+    while let Ok(()) = channel.try_receive(test.appended) {}
+    let mut incomplete = dial(net, c, test.address, "POST", "/incomplete", test.cookie, None, Chunked)
+    send_blob(mut incomplete, WIDTH + 12)
+    result.unwrap(channel.receive_until(test.appended, At(c, deadline(c))))
+    std.http_client.close(take incomplete)
+    if !result.unwrap(channel.receive_until(test.aborted, At(c, deadline(c)))) {
+        fail("disconnected upload remains staged")
+    }
+    let mut quota = dial(net, c, test.address, "POST", "/quota/quota", test.cookie, None, Chunked)
+    send_blob(mut quota, BODY_MAX + 1)
+    result.unwrap(std.http_client.finish_request(mut quota, 0))
+    expect_status(take quota, 503)
+    if !result.unwrap(channel.receive_until(test.aborted, At(c, deadline(c)))) {
+        fail("Store quota refused without cleanup")
+    }
+    let mut refused = dial(net, c, test.address, "POST", "/refused", test.cookie, None, Chunked)
+    send_blob(mut refused, WIDTH + 12)
+    result.unwrap(std.http_client.finish_request(mut refused, 0))
+    expect_status(take refused, 403)
+    if !result.unwrap(channel.receive_until(test.aborted, At(c, deadline(c)))) {
+        fail("Attach proof refusal left a staged upload")
+    }
+    expect_status(request(net, c, test, "GET", "/quota", None), 404)
+    expect_status(request(net, c, test, "GET", "/refused", None), 404)
+    expect_status(request(net, c, test, "GET", "/over", None), 404)
+    expect_status(request(net, c, test, "GET", "/incomplete", None), 404)
+    finish_server(take test)
+    Ok(())
+}
+
+fn serve_test_net(take job: (Clock, Served[NetOp])) waits {
+    let (c, take port) = take job
+    let cfg = std.sim.net.Config(queue_bytes: 2048, fragment_bytes: 512, latency_ns: 0)
+    let mut plan = std.sim.world.plan(3475)
+    let _ = std.sim.net.serve(std.sim.net.new(cfg), mut plan, c, take port)
+}
+
+@test
+fn blob_http_expiry_cuts_off_open_body(random: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let (c, take initial) = provide.clock(0, 1000)
+    let mut manual = take initial
+    let (net, take port) = provide.net(bytes 65536)
+    let net_task = task.spawn(tasks, bytes 4194304, (c, take port), serve_test_net)
+    let test = start_server(c, random, tasks, net)
+    let mut upload = dial(net, c, test.address, "POST", "/expiring", test.cookie, None, Chunked)
+    send_blob(mut upload, BODY_MAX)
+    result.unwrap(std.http_client.finish_request(mut upload, 0))
+    expect_status(take upload, 201)
+    let mut download = request(net, c, test, "GET", "/expiring", None)
+    if status(download) != 200 || field(download, b"content-length") != b"49152" {
+        fail("protected download did not open")
+    }
+    let mut data: Bytes = list.with_capacity(WIDTH)
+    let mut got = result.unwrap(std.http_client.read(mut download, mut data))
+    if got == 0 || data != block(0, got) {
+        fail("protected download did not release its first bytes")
+    }
+    clock.set_wall(mut manual, 61000)
+    loop {
+        list.clear(mut data)
+        match std.http_client.read(mut download, mut data) {
+            Ok(0) => fail("expiry completed the advertised representation"),
+            Ok(n) => {
+                if data != block(got, n) {
+                    fail("expiry changed the preceding bytes")
+                }
+                got += n
+            },
+            Error(_) => break,
+        }
+    }
+    if got >= BODY_MAX {
+        fail("stream handed out all bytes after expiry")
+    }
+    std.http_client.close(take download)
+    expect_status(request(net, c, test, "GET", "/expiring", None), 403)
+    finish_server(take test)
+    let _ = std.task.cancel_join(take net_task)
+    Ok(())
+}

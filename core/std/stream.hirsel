@@ -6,6 +6,7 @@ pub type Bounds: send {
 
 pub opaque type Spec: send {
     status: u16,
+    length: Option[u64],
     fields: List[(Bytes, Bytes)],
     block: Bytes,
     state_at: u64,
@@ -15,7 +16,7 @@ pub opaque type Spec: send {
     guard: Option[stream_watch.Guard],
 }
 
-type Source: send = Encoded(fn(take Seed) waits) | Owned(own[send] fn(take Seed, Clock, Option[Dir]) waits, Option[Dir]) | Relayed(Box[http_client.Connection], u64) | Managed | Contextual
+type Source: send = Encoded(fn(take Seed) waits) | Owned(own[send] fn(take Seed, Clock, Option[Dir]) waits, Option[Dir]) | Relayed(Box[http_client.Connection], u64) | Fixed(own[send] fn(take Seed, take Sender[Read]) waits, Sender[Read]) | Managed | Contextual
 
 pub fn spec[P: codec + send](req: http.Request, response_status: u16, room: Bounds, state: P, driver: fn(take Seed) waits) -> Result[Spec, http.HandlerError] {
     if response_status < 200 || response_status > 599 || response_status == 204 || response_status == 304 || room.event_max == 0 {
@@ -53,7 +54,7 @@ fn encode_spec[P: codec + send](spec_status: u16, room: Bounds, state: P, out_ca
         }
     }
     match take made {
-        Ok(Ok(take block)) => Ok(Spec(status: spec_status, fields: list.new(), block: take block, state_at: out_cap, room, source: take source, expires_at_ms: None, guard: None)),
+        Ok(Ok(take block)) => Ok(Spec(status: spec_status, length: None, fields: list.new(), block: take block, state_at: out_cap, room, source: take source, expires_at_ms: None, guard: None)),
         Ok(Error(_)) => Error(InvalidStream),
         Error(e) => Error(Allocation(e)),
     }
@@ -92,8 +93,29 @@ pub fn spec_owned(req: http.Request, response_status: u16, room: Bounds, directo
     held_spec(req, response_status, room, list.new(), Owned(take driver, directory))
 }
 
-/// Relays an upstream body whose head the handler has read: status, `fields` (often
-/// `http_client.relay_fields`), then its bytes as they arrive, each read under idle_ms.
+/// Reads a nonempty prefix of up to length bytes at offset.
+pub type Read: send {
+    offset: u64,
+    length: u64,
+    reply: Sender[Result[Bytes, ()]],
+}
+
+fn run_fixed(take job: (Seed, own[send] fn(take Seed, take Sender[Read]) waits, Sender[Read])) waits {
+    let (take seed, take run, take pull) = take job
+    run(take seed, take pull)
+}
+
+pub fn spec_fixed(req: http.Request, response_status: u16, length: u64, room: Bounds, take pull: Sender[Read], take driver: own[send] fn(take Seed, take Sender[Read]) waits) -> Result[Spec, http.HandlerError] {
+    let mut fixed = held_spec(req, response_status, room, list.new(), Fixed(take driver, take pull))?
+    fixed.length = Some(length)
+    Ok(take fixed)
+}
+
+pub fn content_length(s: Spec) -> Option[u64] {
+    s.length
+}
+
+/// Relays an upstream body after its head, bounding each read by idle_ms.
 pub fn spec_relay(req: http.Request, response_status: u16, room: Bounds, take head_fields: List[(Bytes, Bytes)], take upstream: http_client.Connection, idle_ms: u64) -> Result[Spec, http.HandlerError] {
     if room.event_max < 8 || !http_client.fresh_response(upstream) {
         return Error(InvalidStream)
@@ -116,7 +138,7 @@ fn held_spec(req: http.Request, response_status: u16, room: Bounds, take head_fi
         take block
     }
     match take made {
-        Ok(take block) => Ok(Spec(status: response_status, fields: take head_fields, block: take block, state_at: out_cap, room, source: take source, expires_at_ms: None, guard: None)),
+        Ok(take block) => Ok(Spec(status: response_status, length: None, fields: take head_fields, block: take block, state_at: out_cap, room, source: take source, expires_at_ms: None, guard: None)),
         Error(e) => Error(Allocation(e)),
     }
 }
@@ -174,6 +196,7 @@ pub type Offer: send {
     room: Bounds,
     source: Source,
     chunked: bool,
+    length: Option[u64],
     heartbeat: bool,
     suppress: bool,
     at: u64,
@@ -183,13 +206,13 @@ pub type Offer: send {
 }
 
 pub fn prepare(take s: Spec, head: Bytes, chunked: bool, heartbeat: bool, suppress: bool, at: u64, pre_head: u64) -> Offer {
-    let Spec(status: _, fields: _, block: take owned, state_at, room, source: take source, expires_at_ms, guard: take guard) = take s
+    let Spec(status: _, length, fields: _, block: take owned, state_at, room, source: take source, expires_at_ms, guard: take guard) = take s
     let mut block = take owned
     for i in 0u64 .. list.len(head) {
         block[i] = head[i]
     }
-    let beat = heartbeat && !relayed(source)
-    Offer(block: take block, head_len: list.len(head), state_at, room, source: take source, chunked, heartbeat: beat, suppress, at, pre_head, expires_at_ms, guard: take guard)
+    let beat = heartbeat && length == None && !relayed(source)
+    Offer(block: take block, head_len: list.len(head), state_at, room, source: take source, chunked, length, heartbeat: beat, suppress, at, pre_head, expires_at_ms, guard: take guard)
 }
 
 pub type Delivery: send = Item(Bytes) | Staged(Bytes, u64) | Committed(u64) | Sent(SentUnit) | WriteFailed | UnitDropped | Expiry | UnitExpired | ReadEnd | Tick | SourceEnded | SourceFailed | Stop
@@ -324,6 +347,7 @@ type Writer[E: send]: send {
     state_at: u64,
     out_cap: u64,
     chunked: bool,
+    length: Option[u64],
     suppressed: bool,
     clock: Clock,
     pre_head: u64,
@@ -334,26 +358,6 @@ type Writer[E: send]: send {
     inbox: Sender[E],
     units: Receiver[Unit],
     notify: fn(take Delivery) -> E
-}
-
-fn chunk_prefix(mut out: Bytes, length: u64) {
-    list.clear(mut out)
-    let mut digits: Inline[u8, 64] =[0; 64]
-    let start = int.radix_digits(length, 16, mut digits)
-    for i in start .. 64 {
-        let _ = list.push(mut out, digits[i])
-    }
-    let _ = list.append(mut out, string.as_bytes("\r\n"))
-}
-
-fn send_data(mut socket: WriteHalf, mut scratch: Bytes, data: Bytes, chunked: bool, clock: Clock, deadline: u64, signal: Option[http.DrainSignal], check: Option[stream_watch.Guard]) -> Result[(), NetError] waits {
-    if chunked {
-        chunk_prefix(mut scratch, list.len(data))
-        http_writer.write_guarded(mut socket, scratch, data, clock, deadline, signal, check)?
-        http_writer.write_guarded(mut socket, string.as_bytes("\r\n"), string.as_bytes(""), clock, deadline, signal, check)
-    } else {
-        http_writer.write_guarded(mut socket, data, string.as_bytes(""), clock, deadline, signal, check)
-    }
 }
 
 fn write_head[E: send](mut socket: WriteHalf, head: Bytes, c: Clock, deadline: u64, ms: u64, inbox: Sender[E], notify: fn(take Delivery) -> E, signal: Option[http.DrainSignal], check: Option[stream_watch.Guard], expires: Option[u64]) -> Result[SentUnit, NetError] waits {
@@ -386,13 +390,14 @@ fn write_head[E: send](mut socket: WriteHalf, head: Bytes, c: Clock, deadline: u
 }
 
 fn writer[E: send](take job: Writer[E]) -> WriteHalf waits {
-    let Writer(half: take half, block: take block, size, state_at, out_cap: capacity, chunked, suppressed, clock: c, pre_head, write_ms: ms, expires_at_ms, guard: take guard, stop: take signal, inbox: take inbox, units: take units, notify) = take job
+    let Writer(half: take half, block: take block, size, state_at, out_cap: capacity, chunked, length, suppressed, clock: c, pre_head, write_ms: ms, expires_at_ms, guard: take guard, stop: take signal, inbox: take inbox, units: take units, notify) = take job
     let mut socket = take half
     let mut scratch: Bytes = list.with_capacity(capacity)
     let _ = list.append(mut scratch, list.slice(block, 0, size))
     if let Error(_) = channel.send(inbox, notify(Staged(take block, state_at))) {
         return take socket
     }
+    let mut remaining = length
     let mut committed = false
     let mut expired = false
     while let Ok(take unit) = channel.receive(units) {
@@ -434,15 +439,22 @@ fn writer[E: send](take job: Writer[E]) -> WriteHalf waits {
         let wrote: Result[SentUnit, NetError] = match take unit {
             Head => write_head(mut socket, scratch, c, pre_head, ms, inbox, notify, signal, guard, expires_at_ms),
             Data(take data, cap) => {
+                if let Some(available) = remaining {
+                    let Some(left) = int.checked_sub(available, list.len(data)) else {
+                        let _ = channel.send(inbox, notify(WriteFailed))
+                        break
+                    }
+                    remaining = Some(left)
+                }
                 let deadline = release_deadline(c, expires_at_ms, order.min(cap, clock.deadline_after_ms(host.mono_ns(c), ms)))
-                match send_data(mut socket, mut scratch, data, chunked, c, deadline, signal, guard) {
+                match http_writer.stream_data(mut socket, mut scratch, data, chunked, c, deadline, signal, guard) {
                     Ok(()) => Ok(ItemSent),
                     Error(e) => Error(e),
                 }
             },
             Heartbeat => {
                 let deadline = release_deadline(c, expires_at_ms, clock.deadline_after_ms(host.mono_ns(c), ms))
-                match send_data(mut socket, mut scratch, string.as_bytes(":\n\n"), chunked, c, deadline, signal, guard) {
+                match http_writer.stream_data(mut socket, mut scratch, string.as_bytes(":\n\n"), chunked, c, deadline, signal, guard) {
                     Ok(()) => Ok(ControlSent),
                     Error(e) => Error(e),
                 }
@@ -587,7 +599,7 @@ fn write_reset_refusal(mut socket: WriteHalf, suppressed: bool, c: Clock, ms: u6
 
 fn send_measured(mut socket: WriteHalf, mut scratch: Bytes, event: MeasuredEvent, chunked: bool, c: Clock, deadline: u64, signal: Option[http.DrainSignal], check: Option[stream_watch.Guard], expires: Option[u64]) -> Result[SentUnit, NetError] waits {
     if chunked {
-        chunk_prefix(mut scratch, event.length)
+        http_writer.chunk_prefix(mut scratch, event.length)
         http.write_wire_until(mut socket, scratch, b"", c, deadline, signal)?
     }
     let capacity = list.capacity(scratch)
@@ -643,11 +655,11 @@ pub fn start_managed[E: send](take work: Work, to: Sender[E], notify: fn(take De
     if buffered > allowance {
         return None
     }
-    let Offer(block: take block, head_len, state_at, room: _, source: _, chunked, heartbeat: _, suppress, at, pre_head, expires_at_ms, guard: take guard) = take offer
+    let Offer(block: take block, head_len, state_at, room: _, source: _, chunked, length, heartbeat: _, suppress, at, pre_head, expires_at_ms, guard: take guard) = take offer
     let signal = http.stream_signal(control)
     let (units, writes): (Sender[Unit], Receiver[Unit]) = channel.new(1u64)
     let check_bytes = stream_watch.probe_bytes(guard)
-    let writing = Writer(half: take output, block: take block, size: head_len, state_at, out_cap: capacity, chunked, suppressed: suppress, clock: c, pre_head, write_ms: ms, expires_at_ms, guard: stream_watch.copy_guard(guard), stop: http.stream_signal(control), inbox: channel.sender(to), units: take writes, notify)
+    let writing = Writer(half: take output, block: take block, size: head_len, state_at, out_cap: capacity, chunked, length, suppressed: suppress, clock: c, pre_head, write_ms: ms, expires_at_ms, guard: stream_watch.copy_guard(guard), stop: http.stream_signal(control), inbox: channel.sender(to), units: take writes, notify)
     let write: fn(take Writer[E]) -> WriteHalf waits = writer
     let expiry = stream_watch.guard_alarm(tasks, c, expires_at_ms, guard, to, notify(Expiry))
     Some(ManagedWriter(units: take units, writer: task.spawn(tasks, bytes ((capacity + 7u64) / 8u64 * 8u64 + 1024u64 + check_bytes), take writing, write), reader: stream_watch.spawn_monitor(tasks, take input, allowance - buffered, channel.sender(to), notify), timer: stream_watch.spawn_alarm(tasks, c, at, period, pre_head, channel.sender(to), notify), expiry: take expiry, signal: take signal, clock: c, linger: linger))
@@ -771,7 +783,7 @@ fn drive_stream[P: send](take job: Work, take initial: Option[P], run: fn(take S
     if buffered > allowance {
         return
     }
-    let Offer(block: take block, head_len, state_at, room, source: take offered_source, chunked, heartbeat, suppress, at, pre_head, expires_at_ms, guard: take guard) = take offer
+    let Offer(block: take block, head_len, state_at, room, source: take offered_source, chunked, length, heartbeat, suppress, at, pre_head, expires_at_ms, guard: take guard) = take offer
     // A relayed body is whole only when upstream ends it (§2 Ending).
     let relay = relayed(offered_source)
     let mut source = Some(take offered_source)
@@ -789,7 +801,7 @@ fn drive_stream[P: send](take job: Work, take initial: Option[P], run: fn(take S
     let _ = channel.try_send(give, ())
     let mut queue: List[Bytes] = list.with_capacity(2)
     let check_bytes = stream_watch.probe_bytes(guard)
-    let writing = Writer(half: take output, block: take block, size: head_len, state_at, out_cap: capacity, chunked, suppressed: suppress, clock: c, pre_head, write_ms: ms, expires_at_ms, guard: stream_watch.copy_guard(guard), stop: http.stream_signal(control), inbox: channel.sender(tx), units: take writes, notify: same_delivery)
+    let writing = Writer(half: take output, block: take block, size: head_len, state_at, out_cap: capacity, chunked, length, suppressed: suppress, clock: c, pre_head, write_ms: ms, expires_at_ms, guard: stream_watch.copy_guard(guard), stop: http.stream_signal(control), inbox: channel.sender(tx), units: take writes, notify: same_delivery)
     let mut write_task = task.spawn(tasks, bytes ((capacity + 7) / 8 * 8 + check_bytes), take writing, writer)
     let mut read_task = stream_watch.spawn_monitor(tasks, take input, allowance - buffered, channel.sender(tx), same_delivery)
     let mut alarm_task = stream_watch.spawn_alarm(tasks, c, at, period, pre_head, channel.sender(tx), same_delivery)
@@ -867,6 +879,7 @@ fn drive_stream[P: send](take job: Work, take initial: Option[P], run: fn(take S
                                     let body = http_client.BodyRelay(seed: take seed, upstream: box.unbox(take upstream), idle_ms, size: room.event_max / 8 * 8)
                                     Some(task.spawn(tasks, bytes room.producer_bytes, take body, http_client.relay_body))
                                 },
+                                Fixed(take driver, take pull) => Some(task.spawn(tasks, bytes room.producer_bytes, (take seed, take driver, take pull), run_fixed)),
                                 Contextual => {
                                     let state = option.unwrap(replace(mut context, None))
                                     let producer_run: fn(take (Seed, Clock, P, fn(take Seed, Clock, take P) waits)) waits = run_contextual

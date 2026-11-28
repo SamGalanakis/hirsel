@@ -38,6 +38,12 @@ source = "member:av1"
 edges = []
 
 [[package]]
+id = "hirsel.ai/blob@1"
+version = "1.0.0"
+source = "member:blob"
+edges = ["auth@1", "runner@1", "std@1", "store@1"]
+
+[[package]]
 id = "hirsel.ai/checkbox@1"
 version = "1.0.0"
 source = "member:checkbox"

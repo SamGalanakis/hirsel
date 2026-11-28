@@ -3,6 +3,7 @@ pkg_v1.Workspace(
         "archive",
         "auth",
         "av1",
+        "blob",
         "checkbox",
         "cli",
         "compute",

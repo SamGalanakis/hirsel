@@ -47,8 +47,12 @@ pub fn parse_range(value: Bytes) -> Option[object.Want] {
     if n < 6 || !http1.equal_ascii(list.slice(value, 0, 6), b"bytes=") {
         return None
     }
-    let mut start = 6u64
-    let mut end = n
+    range_member(value, 6, n)
+}
+
+fn range_member(value: Bytes, begin: u64, limit: u64) -> Option[object.Want] {
+    let mut start = begin
+    let mut end = limit
     while start < end && blank(value[start]) {
         start += 1
     }
@@ -153,14 +157,7 @@ fn relay(req: http.Request, part: object.Part, take upstream: Box[http_client.Co
     }
     list.push(mut fields, (http.copy_bytes(b"accept-ranges"), http.copy_bytes(b"bytes")))
     if part.status == 206 {
-        let mut range: Bytes = list.with_capacity(64)
-        list.extend(mut range, b"bytes ")
-        decimal(mut range, part.first)
-        list.push(mut range, b'-')
-        decimal(mut range, part.end - 1)
-        list.push(mut range, b'/')
-        decimal(mut range, part.size)
-        list.push(mut fields, (http.copy_bytes(b"content-range"), take range))
+        list.push(mut fields, (b"content-range", source_content_range(part.size, Some((part.first, part.end)))))
     }
     Ok(Stream(stream.spec_relay(req, part.status, limits.room, take fields, box.unbox(take upstream), limits.idle_ms)?))
 }
@@ -195,10 +192,7 @@ pub fn serve(req: http.Request, objects: object.Opener, take access: Access, lim
                 }
                 if current(req, meta.etag) {
                     let mut reply = http.response(416, list.new(), false)?
-                    let mut range: Bytes = list.with_capacity(32)
-                    list.extend(mut range, b"bytes */")
-                    decimal(mut range, meta.size)
-                    http.header(mut reply, http.copy_bytes(b"content-range"), take range)?
+                    http.header(mut reply, b"content-range", source_content_range(meta.size, None))?
                     return Ok(Reply(take reply))
                 }
             },
@@ -208,4 +202,343 @@ pub fn serve(req: http.Request, objects: object.Opener, take access: Access, lim
         // whole object is served (RFC 9110 §13.1.5).
         want = Whole
     }
+}
+
+/// Default download disposition. An optional filename is an ASCII basename
+/// of at most 128 bytes, with separators and unsafe bytes replaced by "_".
+pub fn attachment(filename: Option[Bytes]) -> Bytes {
+    let Some(name) = view filename else {
+        return b"attachment"
+    }
+    let mut first = 0u64
+    let end = list.len(name)
+    while first < end && (name[first] == b'.' || name[first] == b' ') {
+        first += 1
+    }
+    if first == end {
+        return b"attachment"
+    }
+    let mut value = http.copy_bytes(b"attachment; filename=\"")
+    for i in first .. first + order.min(128u64, end - first) {
+        let b = name[i]
+        let safe = b >= b'a' && b <= b'z' || b >= b'A' && b <= b'Z' || int.is_ascii_digit(b) || b == b'.' || b == b'-' || b == b'_' || b == b' '
+        list.push(mut value, if safe {
+            b
+        } else {
+            b'_'
+        })
+    }
+    list.push(mut value, b'"')
+    take value
+}
+
+/// An authorized representation with metadata and a pull endpoint. Keep
+/// its underlying representation fixed until the endpoint closes.
+pub type Source: send {
+    size: u64,
+    etag: Bytes,
+    filename: Option[Bytes],
+    pull: Sender[stream.Read],
+}
+
+type SourcePlan: send {
+    spans: List[(u64, u64)],
+    size: u64,
+    boundary: Bytes,
+    item_max: u64,
+}
+
+type SourceBody: send {
+    plan: SourcePlan,
+    pull: Sender[stream.Read],
+    index: u64,
+    offset: u64,
+    prefix: bool,
+}
+
+fn tag_end(value: Bytes, start: u64) -> Option[u64] {
+    let end = list.len(value)
+    if start >= end || value[start] != b'"' {
+        return None
+    }
+    let mut i = start + 1
+    while i < end {
+        let b = value[i]
+        if b == b'"' {
+            return Some(i + 1)
+        }
+        if b < 33 || b == 127 {
+            return None
+        }
+        i += 1
+    }
+    None
+}
+
+fn blanks(value: Bytes, start: u64) -> u64 {
+    let mut at = start
+    while at < list.len(value) && blank(value[at]) {
+        at += 1
+    }
+    at
+}
+
+// A comma inside an opaque tag is data, not a list delimiter.
+fn match_tags(value: Bytes, tag: Bytes, strong: bool) -> Option[bool] {
+    let n = list.len(value)
+    let mut at = blanks(value, 0)
+    if at < n && value[at] == b'*' {
+        return if blanks(value, at + 1) == n {
+            Some(true)
+        } else {
+            None
+        }
+    }
+    let mut matched = false
+    loop {
+        if at == n {
+            return Some(matched)
+        }
+        if value[at] == b',' {
+            at = blanks(value, at + 1)
+            continue
+        }
+        let weak = n - at >= 2 && value[at] == b'W' && value[at + 1] == b'/'
+        let start = if weak {
+            at + 2
+        } else {
+            at
+        }
+        let end = tag_end(value, start)?
+        matched = matched || ((!strong || !weak) && list.slice(value, start, end) == tag)
+        at = blanks(value, end)
+        if at < n && value[at] != b',' {
+            return None
+        }
+    }
+}
+
+fn tag_conditions(req: http.Request, name: Bytes, tag: Bytes, strong: bool) -> Option[bool] {
+    let mut found = false
+    let mut matched = false
+    let mut i = 0u64
+    while let Some(value) = http.field_at(req, name, i) {
+        found = true
+        if match_tags(value, tag, strong) == Some(true) {
+            matched = true
+        }
+        i += 1
+    }
+    if found {
+        Some(matched)
+    } else {
+        None
+    }
+}
+
+fn source_ranges(req: http.Request, size: u64, tag: Bytes) -> Option[List[(u64, u64)]] {
+    if http.method(req) != b"GET" || http.field_at(req, b"range", 1) != None || http.field_at(req, b"if-range", 1) != None {
+        return None
+    }
+    if let Some(value) = http.field(req, b"if-range") {
+        if value != tag {
+            return None
+        }
+    }
+    let value = http.field(req, b"range")?
+    let n = list.len(value)
+    if n <= 6 || !http1.equal_ascii(list.slice(value, 0, 6), b"bytes=") {
+        return None
+    }
+    let mut spans: List[(u64, u64)] = list.new()
+    let mut start = 6u64
+    for i in 6u64 .. n {
+        if value[i] == b',' {
+            let want = range_member(value, start, i)?
+            if let Some(span) = object.range_span(want, size) {
+                list.push(mut spans, span)
+            }
+            start = i + 1
+        }
+    }
+    let want = range_member(value, start, n)?
+    if let Some(span) = object.range_span(want, size) {
+        list.push(mut spans, span)
+    }
+    Some(take spans)
+}
+
+fn source_content_range(size: u64, span: Option[(u64, u64)]) -> Bytes {
+    let mut field: Bytes = list.with_capacity(64)
+    list.extend(mut field, b"bytes ")
+    if let Some((start, end)) = span {
+        decimal(mut field, start)
+        list.push(mut field, b'-')
+        decimal(mut field, end - 1)
+    } else {
+        list.push(mut field, b'*')
+    }
+    list.push(mut field, b'/')
+    decimal(mut field, size)
+    take field
+}
+
+fn part_header(boundary: Bytes, size: u64, span: (u64, u64), first: bool) -> Bytes {
+    let mut out: Bytes = list.with_capacity(160)
+    if !first {
+        list.extend(mut out, b"\r\n")
+    }
+    list.extend(mut out, b"--")
+    list.extend(mut out, boundary)
+    list.extend(mut out, b"\r\nContent-Type: application/octet-stream\r\nContent-Range: ")
+    list.extend(mut out, source_content_range(size, Some(span)))
+    list.extend(mut out, b"\r\n\r\n")
+    take out
+}
+
+fn part_end(boundary: Bytes) -> Bytes {
+    let mut out = http.copy_bytes(b"\r\n--")
+    list.extend(mut out, boundary)
+    list.extend(mut out, b"--\r\n")
+    take out
+}
+
+fn range_length(size: u64, spans: List[(u64, u64)], boundary: Bytes) -> Option[u64] {
+    if list.len(spans) == 1 {
+        return Some(spans[0].1 - spans[0].0)
+    }
+    let mut length = list.len(part_end(boundary))
+    for i in 0u64 .. list.len(spans) {
+        let (first, end) = spans[i]
+        length = int.checked_add(length, end - first)?
+        length = int.checked_add(length, list.len(part_header(boundary, size, (first, end), i == 0)))?
+    }
+    Some(length)
+}
+
+fn source_next(mut body: SourceBody) -> Result[Option[Bytes], ()] waits {
+    let multipart = list.len(body.plan.spans) > 1
+    if body.index == list.len(body.plan.spans) {
+        if multipart && body.prefix {
+            body.prefix = false
+            return Ok(Some(part_end(body.plan.boundary)))
+        }
+        return Ok(None)
+    }
+    let span = body.plan.spans[body.index]
+    if multipart && body.prefix {
+        body.prefix = false
+        return Ok(Some(part_header(body.plan.boundary, body.plan.size, span, body.index == 0)))
+    }
+    let want = order.min(body.plan.item_max, span.1 - body.offset)
+    let (reply, incoming): (Sender[Result[Bytes, ()]], Receiver[Result[Bytes, ()]]) = channel.new(1)
+    channel.send(body.pull, stream.Read(offset: body.offset, length: want, reply: take reply)) ?=> |_| ()
+    let data = (channel.receive(incoming) ?=> |_| ())?
+    let n = list.len(data)
+    if n == 0 || n > want {
+        return Error(())
+    }
+    body.offset += n
+    if body.offset == span.1 {
+        body.index += 1
+        body.prefix = true
+        if body.index < list.len(body.plan.spans) {
+            body.offset = body.plan.spans[body.index].0
+        }
+    }
+    Ok(Some(take data))
+}
+
+fn metadata(tag: Bytes, filename: Option[Bytes]) -> List[(Bytes, Bytes)] {
+    let mut fields: List[(Bytes, Bytes)] = list.with_capacity(7)
+    list.push(mut fields, (b"ETag", http.copy_bytes(tag)))
+    list.push(mut fields, (b"Accept-Ranges", b"bytes"))
+    list.push(mut fields, (b"X-Content-Type-Options", b"nosniff"))
+    list.push(mut fields, (b"Content-Disposition", attachment(filename)))
+    list.push(mut fields, (b"Content-Security-Policy", b"default-src 'none'; sandbox"))
+    take fields
+}
+
+fn no_body(mut _out: Bytes, _write: scoped fn(Bytes) -> bool waits) -> bool {
+    true
+}
+
+fn source_reply(status: u16, length: u64, fields: List[(Bytes, Bytes)], expires_at_ms: Option[u64], take guard: Option[stream_watch.Guard]) -> Result[http.Outcome, http.HandlerError] {
+    let mut reply = http.response_measured(status, length, no_body)?
+    for (name, value) in fields {
+        http.header(mut reply, http.copy_bytes(name), http.copy_bytes(value))?
+    }
+    http.guard_read(mut reply, take guard, expires_at_ms)
+    Ok(Reply(take reply))
+}
+
+/// Serves an authorized, opened source. GET supports single and multipart byte
+/// ranges. HEAD exposes the full representation's metadata without reading it.
+/// The stream writer applies the expiration and optional revocation guard.
+pub fn serve_source(req: http.Request, take source: Source, room: stream.Bounds, random: Random, expires_at_ms: Option[u64], take guard: Option[stream_watch.Guard]) -> Result[http.Outcome, http.HandlerError] {
+    let Source(size, etag: take etag, filename: take filename, pull: take pull) = take source
+    if tag_end(etag, 0) != Some(list.len(etag)) {
+        return Error(HeaderInvalid)
+    }
+    let mut fields = metadata(etag, filename)
+    if tag_conditions(req, b"if-match", etag, true) == Some(false) {
+        return source_reply(412, 0, fields, expires_at_ms, take guard)
+    }
+    if tag_conditions(req, b"if-none-match", etag, false) == Some(true) {
+        return source_reply(304, 0, fields, expires_at_ms, take guard)
+    }
+    let selected = source_ranges(req, size, etag)
+    let status = if selected == None {
+        200u16
+    } else {
+        206u16
+    }
+    let spans = match take selected {
+        Some(take ranges) => take ranges,
+        None => {
+            let mut full: List[(u64, u64)] = list.with_capacity(1)
+            list.push(mut full, (0u64, size))
+            take full
+        },
+    }
+    let count = list.len(spans)
+    if count == 0 {
+        list.push(mut fields, (b"Content-Range", source_content_range(size, None)))
+        return source_reply(416, 0, fields, expires_at_ms, take guard)
+    }
+    let mut boundary: Bytes = list.new()
+    if count > 1 {
+        let mut entropy: Bytes = list.with_capacity(16)
+        host.random(random, mut entropy)
+        boundary = string.into_bytes(hex.encode(entropy))
+        let mut value = http.copy_bytes(b"multipart/byteranges; boundary=")
+        list.extend(mut value, boundary)
+        list.push(mut fields, (b"Content-Type", take value))
+    } else {
+        list.push(mut fields, (b"Content-Type", b"application/octet-stream"))
+        if status == 206 {
+            list.push(mut fields, (b"Content-Range", source_content_range(size, Some(spans[0]))))
+        }
+    }
+    let Some(length) = range_length(size, spans, boundary) else {
+        return Error(InvalidStream)
+    }
+    if http.method(req) == b"HEAD" || length == 0 {
+        return source_reply(status, length, fields, expires_at_ms, take guard)
+    }
+    let offset = spans[0].0
+    let plan = SourcePlan(spans: take spans, size, boundary: take boundary, item_max: room.event_max)
+    let driver = fn(take seed: stream.Seed, take reader: Sender[stream.Read]) waits {
+        let body = SourceBody(plan: clone(plan), pull: take reader, index: 0, offset, prefix: true)
+        stream.produce_owned(take seed, take body, source_next)
+    }
+    let mut spec = stream.spec_fixed(req, status, length, room, take pull, take driver)?
+    for (name, value) in fields {
+        stream.header(mut spec, http.copy_bytes(name), http.copy_bytes(value))?
+    }
+    stream.expire_at(mut spec, expires_at_ms)
+    if let Some(take check) = take guard {
+        stream.guard_release(mut spec, take check)
+    }
+    Ok(Stream(take spec))
 }

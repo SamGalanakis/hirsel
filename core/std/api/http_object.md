@@ -51,3 +51,33 @@ fn blob(req: std.http.Request, scratch: Region, mut out: std.http.Responder, s: 
     std.http_object.serve(req, s.opener, take access, std.http_object.Limits(room, open_ms: 2000, idle_ms: 10000))
 }
 ```
+
+## Serving a local body source
+
+`serve_source(request, take source, room, random, expires_at_ms, take guard)`
+serves an authorized, opened representation. Supply its length, strong ETag,
+optional filename and pull endpoint in `Source`. Keep the same representation
+available for the lifetime of the endpoint. A pull requests a byte offset and
+a maximum length. Reply with a nonempty prefix or a failure. Treat closure of
+the endpoint as the end of the transfer.
+
+A matching strong `If-Match` permits the request. A false one returns 412.
+A matching `If-None-Match`, using weak comparison, returns 304. Both fields
+accept a tag list or `*`. A single satisfiable byte range returns 206 with
+`Content-Range`. Several satisfiable ranges return a fixed-length
+`multipart/byteranges` body in request order. A valid range set with no
+satisfiable bytes returns 416 with the representation size. Invalid ranges
+and ranges with a false `If-Range` receive the full representation. HEAD
+sends the full representation's metadata without requesting bytes.
+
+Body-bearing responses carry `Content-Length`. Every response about the
+opened representation carries its ETag, `Accept-Ranges: bytes`,
+`X-Content-Type-Options: nosniff`, `Content-Disposition: attachment` and
+`Content-Security-Policy: default-src 'none'; sandbox`. The optional
+disposition filename is limited to 128 ASCII bytes. The helper strips leading
+dots and spaces and replaces path separators, quotes, controls and other
+unsafe bytes with underscores.
+
+The stream admits one read per credit. It closes on read failure, expiry or
+revocation. When a stream stops early, the bytes sent fall short of its
+advertised length.

@@ -57,3 +57,11 @@ connection is at a fresh response head and `event_max` is at least 8. On an
 upstream failure before its head, answer `http_client.gateway_status(error)`
 (502, or 504 for `Deadline`) instead
 ([HTTP response outcomes](../../../docs/spec/http.md#http-10-outcomes)).
+
+`spec_fixed(request, status, length, bounds, take pull, take driver)`
+gives a stream an explicit `Content-Length`. The driver receives the pull
+endpoint as a resource argument and can call `produce_owned`. The writer
+sends raw bytes, refuses any item that would overrun the length, and
+suppresses heartbeat comments. A read failure or fence can close this
+response before its advertised length is delivered. `content_length`
+returns the explicit length when one was set.

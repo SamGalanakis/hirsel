@@ -1,0 +1,76 @@
+pub type Mark: codec + key + send {
+    epoch: u64,
+    seq: u64
+}
+
+pub type Change[K: codec, V: codec]: codec = Upsert(K, V) | Retract(K)
+
+pub type Push[K: codec, V: codec]: codec {
+    previous: Mark,
+    at: Mark,
+    change: Change[K, V]
+}
+
+pub type ApplyResult: codec = Applied | Ignored | Gap(Mark)
+
+pub type Read[V: codec]: codec = Fresh(Option[V]) | Stale(Mark)
+
+/// Each index consumes one authenticated producer's sequence.
+pub opaque type Index[K, V]: shareable + send {
+    rows: store.Table[K, V],
+    marks: store.Table[u64, Mark]
+}
+
+pub fn declare[K, V](mut d: store.Declare, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Index[K, V], store.Error] {
+    let mut marks = string.from(name)
+    string.push(mut marks, ".coverage")
+    let decl = store.declare_table(mut d, name, take key, take value)?
+    let rows = store.finish(mut d, take decl)?
+    let codec: std.codec.Codec[Mark] = std.codec.of()
+    let water = store.declare_table(mut d, marks, std.codec.key_u64(), codec)?
+    Ok(Index(rows: take rows, marks: store.finish(mut d, take water)?))
+}
+
+fn coverage[K, V](tx: store.Tx, i: Index[K, V]) -> Result[Mark, store.Error] {
+    match store.fetch(tx, i.marks, 0)? {
+        Some(mark) => Ok(mark),
+        None => Ok(Mark(epoch: 0, seq: 0)),
+    }
+}
+
+fn before(a: Mark, b: Mark) -> bool {
+    a.epoch < b.epoch || a.epoch == b.epoch && a.seq < b.seq
+}
+
+pub fn apply[K: codec, V: codec](mut tx: store.Tx, i: Index[K, V], push: Push[K, V]) -> Result[ApplyResult, store.Error] {
+    let mark = coverage(tx, i)?
+    if !before(mark, push.at) {
+        return Ok(Ignored)
+    }
+    let follows = if push.at.epoch == mark.epoch {
+        int.checked_add(mark.seq, 1u64) == Some(push.at.seq)
+    } else {
+        int.checked_add(mark.epoch, 1u64) == Some(push.at.epoch) && push.at.seq == 1
+    }
+    if push.previous != mark || !follows {
+        return Ok(Gap(mark))
+    }
+    match push.change {
+        Upsert(k, v) => store.put(mut tx, i.rows, k, v)?,
+        Retract(k) => {
+            let _ = store.delete(mut tx, i.rows, k)?
+        },
+    }
+    store.put(mut tx, i.marks, 0, push.at)?
+    Ok(Applied)
+}
+
+pub fn get[K, V: codec](tx: store.Tx, i: Index[K, V], key: K, need: Option[Mark]) -> Result[Read[V], store.Error] {
+    if let Some(minimum) = need {
+        let mark = coverage(tx, i)?
+        if before(mark, minimum) {
+            return Ok(Stale(mark))
+        }
+    }
+    Ok(Fresh(store.fetch(tx, i.rows, key)?))
+}

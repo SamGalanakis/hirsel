@@ -1,0 +1,38 @@
+/// A granted Runner entry that performs one durable, keyed outside step.
+pub opaque type Op[A] {
+    target: runner.triggers.Entry[A]
+}
+
+pub fn operation[G, A: codec, R](f: StaticFn[fn(G, runner.Caller, take A) -> Result[R, Capacity] waits]) -> Result[Op[A], std.codec.EncodeError] {
+    Ok(Op(target: runner.triggers.granted(f)?))
+}
+
+pub fn allow[A](mut entries: runner.triggers.Entries, op: Op[A]) -> Result[(), runner.triggers.Error] {
+    runner.triggers.allow(mut entries, op.target)
+}
+
+pub fn emit[A](mut tx: store.Tx, t: runner.steps.Tables, entries: runner.triggers.Entries, op: Op[A], arg: A) -> Result[runner.triggers.Id, runner.triggers.Error] {
+    runner.steps.schedule(mut tx, t, entries, op.target, arg, 1, AfterCommit)
+}
+
+pub fn deliver[G: send, A: codec, R: codec, E: codec](route: runner.TriggerContext, grant: G, take arg: A, send: StaticFn[fn(G, Bytes, take A) -> Option[Result[R, E]] waits], horizon_ms: Option[u64]) -> Result[R, runner.steps.StepError[E]] waits {
+    runner.steps.deliver(route, grant, take arg, send, horizon_ms)
+}
+
+pub type Status: send = Pending | Parked(runner.triggers.Hold) | Finished(runner.triggers.Terminal) | Inherited | Unknown
+
+pub fn status(reader: store.Reader, snap: store.Snapshot, tables: runner.triggers.Tables, id: runner.triggers.Id) -> Result[Status, store.Error] waits {
+    if let Some(take terminal) = runner.triggers.outcome(reader, snap, tables, id)? {
+        return Ok(Finished(take terminal))
+    }
+    let Some(take row) = runner.triggers.pending_at(reader, snap, tables, id)? else {
+        return Ok(Unknown)
+    }
+    if !runner.triggers.serving_origin(id, store.snapshot_identity(snap)) {
+        return Ok(Inherited)
+    }
+    match runner.triggers.parked_by(row) {
+        Some(take hold) => Ok(Parked(take hold)),
+        None => Ok(Pending),
+    }
+}

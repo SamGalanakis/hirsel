@@ -1,0 +1,85 @@
+pub type PlaceRef: codec + key + send {
+    place: String,
+    operation: String
+}
+
+pub opaque type Command: codec + send {
+    to: PlaceRef,
+    body: Bytes
+}
+
+type Route: send {
+    endpoint: std.http_client.Endpoint,
+    path: String,
+    credential: Secret
+}
+
+pub opaque type Resolver: send {
+    routes: Map[PlaceRef, Route],
+    clock: Clock,
+    timeout_ms: u64
+}
+
+pub fn resolver(clock: Clock, timeout_ms: u64) -> Resolver {
+    Resolver(routes: map.new(), clock, timeout_ms)
+}
+
+/// Installed by the attempt grant mint. Only the logical reference goes in Store.
+pub fn grant(mut r: Resolver, take name: PlaceRef, take endpoint: std.http_client.Endpoint, take path: String, take credential: Secret) {
+    map.insert(mut r.routes, take name, Route(endpoint: take endpoint, path: take path, credential: take credential))
+}
+
+pub type Ack: codec {
+    status: u16,
+    body: Bytes
+}
+
+pub type Error: codec = NoRoute | InvalidKey | Refused(Ack)
+
+/// Encode the typed request once. A resend uses the bytes committed by emit.
+pub fn command[A](take to: PlaceRef, format: std.json.Format[A], value: A) -> Result[Command, std.json.TypedWriteError] {
+    let mut binary: Bytes = list.new()
+    let mut body: Bytes = list.new()
+    let _ = std.json.push_typed(format, value, mut body, mut binary)?
+    Ok(Command(to: take to, body: take body))
+}
+
+pub fn send(r: Resolver, key: Bytes, take request_body: Command) -> Option[Result[Ack, Error]] waits {
+    let Command(to: take to, body: take body) = take request_body
+    let Some(route) = map.get(r.routes, to) else {
+        return Some(Error(NoRoute))
+    }
+    let mut headers: List[std.http_client.Header] = list.new()
+    if let Error(_) = std.http_client.idempotency_key(mut headers, key) {
+        return Some(Error(InvalidKey))
+    }
+    list.push(mut headers, std.http_client.Header(name: "Content-Type", value: Public(b"application/json")))
+    list.push(mut headers, std.http_client.Header(name: "Authorization", value: Protected(b"Bearer ", secret.share(route.credential))))
+    let mut segments: List[std.http_client.Segment] = list.new()
+    list.push(mut segments, Plain(take body))
+    let request = std.http_client.Call(method: "POST", target: clone(route.path), headers: take headers, body: take segments)
+    let end = std.clock.deadline_after_ms(host.mono_ns(r.clock), r.timeout_ms)
+    let Ok(take reply) = std.http_client.call(route.endpoint, request, end) else {
+        return None
+    }
+    let mut response = take reply
+    let status = std.http_client.status(std.http_client.fetch_head(response))
+    if status >= 500 {
+        return None
+    }
+    let mut ack: Bytes = list.new()
+    loop {
+        let mut chunk: Bytes = list.with_capacity(4096)
+        match std.http_client.fetch_read(mut response, mut chunk) {
+            Ok(0) => {
+                let outcome = Ack(status, body: take ack)
+                if status >= 200 && status < 300 {
+                    return Some(Ok(take outcome))
+                }
+                return Some(Error(Refused(take outcome)))
+            },
+            Ok(_) => list.append(mut ack, chunk),
+            Error(_) => return None,
+        }
+    }
+}

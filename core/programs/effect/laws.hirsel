@@ -1,0 +1,155 @@
+@test
+fn sequenced_push(c: Clock, r: Random) -> Result[(), ()] waits {
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let mut d = result.unwrap(store.declare(db, Migrate))
+    let idx = result.unwrap(index.declare(mut d, "sample", std.codec.key_u64(), std.codec.of_u64()))
+    let _ = result.unwrap(store.seal(mut db, take d))
+    let before = store.snapshot(db)
+    let written = result.unwrap(store.run(mut db, None, idx, fn(mut tx, i) -> Result[(), store.Error] {
+        let start = index.Mark(epoch: 0, seq: 0)
+        let first = index.Mark(epoch: 0, seq: 1)
+        let second = index.Mark(epoch: 0, seq: 2)
+        let third = index.Mark(epoch: 1, seq: 1)
+        let put = index.Push(previous: start, at: first, change: Upsert(9u64, 17u64))
+        let erase: index.Push[u64, u64] = index.Push(previous: first, at: second, change: Retract(9u64))
+        let next = index.Push(previous: second, at: third, change: Upsert(8u64, 41u64))
+        if let Gap(mark) = index.apply(mut tx, i, erase)? {
+            if mark != start {
+                fail("gap changed coverage")
+            }
+        } else {
+            fail("accepted a missing predecessor")
+        }
+        if let Stale(_) = index.get(tx, i, 9, Some(first))? {} else {
+            fail("false freshness")
+        }
+        if let Applied = index.apply(mut tx, i, put)? {} else {
+            fail("first push")
+        }
+        if let Fresh(Some(17)) = index.get(tx, i, 9, Some(first))? {} else {
+            fail("missing upsert")
+        }
+        if let Gap(_) = index.apply(mut tx, i, next)? {} else {
+            fail("epoch hid a gap")
+        }
+        if let Applied = index.apply(mut tx, i, erase)? {} else {
+            fail("missing retraction")
+        }
+        if let Ignored = index.apply(mut tx, i, put)? {} else {
+            fail("stale upsert resurrected row")
+        }
+        if let Ignored = index.apply(mut tx, i, erase)? {} else {
+            fail("duplicate reapplied")
+        }
+        if let Fresh(None) = index.get(tx, i, 9, Some(second))? {} else {
+            fail("old row visible")
+        }
+        if let Applied = index.apply(mut tx, i, next)? {} else {
+            fail("epoch handoff")
+        }
+        if let Fresh(Some(41)) = index.get(tx, i, 8, None)? {} else {
+            fail("unconditional lookup")
+        }
+        Ok(())
+    }))
+    let Committed(_) = written else {
+        fail("index commit")
+    }
+    let after = store.snapshot(db)
+    let reader = result.unwrap(store.reader(db, store.READER_PIN_MIN))
+    let lookup = fn(tx: store.Tx, i: index.Index[u64, u64]) -> Result[index.Read[u64], store.Error] {
+        index.get(tx, i, 8, Some(index.Mark(epoch: 1, seq: 1)))
+    }
+    if let Seen(old) = result.unwrap(store.look(reader, before, None, idx, lookup)) {
+        if let Ok(Stale(mark)) = old.value {
+            if mark != index.Mark(epoch: 0, seq: 0) {
+                fail("old snapshot moved")
+            }
+        } else {
+            fail("old snapshot reported fresh")
+        }
+    } else {
+        fail("old snapshot lookup")
+    }
+    if let Seen(current) = result.unwrap(store.look(reader, after, None, idx, lookup)) {
+        if let Ok(Fresh(Some(41))) = current.value {
+            return Ok(())
+        }
+    }
+    fail("committed watermark and row")
+}
+
+type Tables: shareable + send {
+    steps: runner.steps.Tables,
+    triggers: runner.triggers.Tables
+}
+
+fn schema(mut d: store.Declare) -> Result[Tables, store.Error] {
+    let pending = runner.triggers.declare_tables(mut d)?
+    Ok(Tables(steps: runner.steps.declare_tables(mut d, clone(pending))?, triggers: take pending))
+}
+
+fn sink(_grant: (), _author: runner.Caller, take _arg: u64) -> Result[u64, Capacity] {
+    fail("inherited work ran")
+}
+
+fn scratch(d: Dir) -> Dir waits {
+    let mut name = string.with_capacity(64)
+    string.push(mut name, "origin-")
+    result.unwrap(host.mkdtemp(d, mut name))
+}
+
+@test
+fn restored_op_is_inert(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let parent = scratch(d)
+    let backup = scratch(d)
+    let child = scratch(d)
+    let options = result.unwrap(store.sized(Directory, 268435456))
+    let mut db = store.open(tasks, parent, c, r, options)?
+    let h = store.bind_declaration(mut db, Migrate, schema)?
+    let emission = store.run(mut db, None, h, fn(mut tx, tables) -> Result[runner.triggers.Id, runner.triggers.Error] {
+        let op = result.unwrap(effect.operation(code.describe(sink)))
+        let mut allowed = runner.triggers.empty_entries()
+        effect.allow(mut allowed, op)?
+        effect.emit(mut tx, tables.steps, allowed, op, 91u64)
+    })?
+    let Committed(done) = emission else {
+        fail("parent emission")
+    }
+    let id = done.value
+    store.durable(mut db, done.ticket)?
+    if let Pending = effect.status(store.reader(db, store.READER_PIN_MIN)?, store.snapshot(db), h.triggers, id)? {} else {
+        fail("parent status")
+    }
+    let mut attempt: Bytes = list.with_capacity(16)
+    list.fill(mut attempt, 16, 1u8)
+    let job = result.unwrap(store.begin_backup(mut db, backup, clone(attempt)))
+    let _ = result.unwrap(store.export_copy(take job))
+    store.release_export(mut db, attempt)
+    store.close(take db)?
+    let _ = result.unwrap(store.restore(tasks, backup, child, c, r, options, Latest, store.restore_attempt(r)))
+    let mut restored = store.open(tasks, child, c, r, options)?
+    let t = store.bind_declaration(mut restored, Open, schema)?
+    let snap = store.snapshot(restored)
+    let reader = store.reader(restored, store.READER_PIN_MIN)?
+    if let Inherited = effect.status(reader, snap, t.triggers, id)? {} else {
+        fail("inherited status")
+    }
+    if let Some(_) = runner.triggers.next_pending(reader, snap, t.triggers, scoped fn(_id: runner.triggers.Id) -> bool {
+        false
+    })? {
+        fail("inherited trigger runnable")
+    }
+    store.close(take restored)
+}
+
+@test
+fn preview_command_without_grant(c: Clock) -> Result[(), ()] waits {
+    let routes = place.resolver(c, 1000)
+    let input: std.json.Format[u64] = result.unwrap(std.json.typed())
+    let cmd = result.unwrap(place.command(place.PlaceRef(place: "replica", operation: "push"), input, 3u64))
+    match place.send(routes, b"delivery", take cmd) {
+        Some(Error(NoRoute)) => Ok(()),
+        _ => fail("command acquired authority from its durable payload"),
+    }
+}

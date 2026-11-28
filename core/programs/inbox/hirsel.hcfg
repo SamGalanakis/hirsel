@@ -1,0 +1,31 @@
+pkg_v1.Package(
+    name: "inbox",
+    version: "1.0.0",
+    charge: ChargeV1,
+    sources: [
+        ("inbox.hirsel", "inbox"),
+    ],
+    dependencies: [
+        ("std", Toolchain(package: "std", major: 1, authority: [])),
+        ("store", Path(package: "store", major: 1, path: "../store", authority: [Dir, Clock, Random, Tasks])),
+        ("runner", Path(
+            package: "runner",
+            major: 1,
+            path: "../runner",
+            authority: [Dir, Net, Clock, Random, Stderr, Process, Tasks, Args, Secret, Cred],
+        )),
+        ("effect", Path(package: "effect", major: 1, path: "../effect", authority: [Dir, Net, Clock, Random, Stderr, Process, Tasks, Args, Secret, Cred])),
+    ],
+    tests: Some(Tests(
+        sources: [("laws.hirsel", "laws"), ("peer-law.hirsel", "laws")],
+        limit: 134217728,
+        grants: [
+            Clock,
+            Random,
+            Tasks,
+            Net(Listen(cidr: "127.0.0.0/8", first_port: 0, last_port: 65535)),
+            Net(Connect(cidr: "127.0.0.0/8", first_port: 0, last_port: 65535)),
+        ],
+        runs: [],
+    )),
+)

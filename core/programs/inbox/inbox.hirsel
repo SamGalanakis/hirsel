@@ -1,0 +1,31 @@
+pub opaque scoped type Verified {
+    caller: View[runner.Caller]
+}
+
+pub fn subject(proof: Verified) -> View[Bytes] in proof {
+    proof.caller.subject
+}
+
+pub fn issuer(proof: Verified) -> u8 {
+    proof.caller.issuer
+}
+
+type Env[H, A, R, E]: send {
+    verify: StaticFn[fn(store.Tx, H, runner.Caller, A) -> Result[(), E]],
+    handler: StaticFn[fn(mut store.Tx, H, Verified, take A) -> Result[R, E]]
+}
+
+fn adapt[H, A, R, E](mut tx: store.Tx, handles: H, caller: runner.Caller, take input: A, env: Env[H, A, R, E]) -> Result[R, E] {
+    (code.callable(env.verify))(tx, handles, caller, input)?
+    let owner: runner.Caller = clone(caller)
+    (code.callable(env.handler))(mut tx, handles, Verified(caller: view owner), take input)
+}
+
+/// The binding receives the actual entry key of the proof-taking handler.
+pub fn bind[G: send, H: shareable + inert + send, A: codec, R: codec, E: codec](mut reg: runner.Registry[G, H], verify: StaticFn[fn(store.Tx, H, runner.Caller, A) -> Result[(), E]], handler: StaticFn[fn(mut store.Tx, H, Verified, take A) -> Result[R, E]], binding: scoped fn(take Bytes) -> runner.HttpBinding, take rule: runner.KeyedRule[G], bytes_max: u64, steps_max: u64) -> Result[(), runner.RegisterError] {
+    let args: std.codec.Codec[A] = std.codec.of()
+    let reply: std.codec.Codec[Result[R, E]] = std.codec.of()
+    let key = runner.attempt_key(handler, args, reply) ?=> |_| Bounds
+    runner.transact_via(mut reg, handler, Env(verify, handler), adapt, bytes_max, steps_max)?
+    runner.bind_keyed(mut reg, binding(take key), take rule)
+}

@@ -1,0 +1,60 @@
+// The peer sees the TLS name, public HTTP bytes and a host-scoped Secret slot.
+// It returns 503 after receiving the command, leaving its outcome ambiguous.
+fn peer(take port: Served[NetOp]) -> (Bytes, Bytes) waits {
+    let mut service = take port
+    let mut headers: Bytes = list.with_capacity(2048)
+    let mut body: Bytes = list.with_capacity(1024)
+    while let Some(take call) = provide.next(mut service) {
+        let mut c = take call
+        let reply: NetReply = match provide.net_op(c) {
+            Resolve(..) => {
+                let mut name: Bytes = list.with_capacity(128)
+                provide.payload(c, 0, mut name)
+                if name != b"peer.test" {
+                    fail("wrong resolution")
+                }
+                let mut ip: Bytes = list.with_capacity(17)
+                list.fill(mut ip, 13, 0u8)
+                list.put_word_be(mut ip, 0x7f000001u32)
+                let _ = provide.fill(mut service, mut c, ip)
+                Count(1)
+            },
+            Connect(addr, ..) => {
+                if addr.port != 443 {
+                    fail("wrong route port")
+                }
+                Socket(8, addr)
+            },
+            Handshake(..) => {
+                let mut name: Bytes = list.with_capacity(128)
+                provide.payload(c, 1, mut name)
+                if name != b"peer.test" {
+                    fail("wrong TLS origin")
+                }
+                Secured(Handshake(protocol: Some(0), peer: (0, 0, 0, 0)))
+            },
+            SendSecret(secrets: 1, marks: 4, ..) => {
+                provide.payload(c, 1, mut headers)
+                let credential = provide.secret(c, 0)
+                if let Ok(_) = secret.narrow(credential, "tls_send(other.test)") {
+                    fail("unscoped place credential")
+                }
+                Done
+            },
+            Send(prefix, tail, ..) => {
+                provide.payload(c, 1, mut body)
+                provide.payload(c, 2, mut body)
+                Count(prefix + tail)
+            },
+            Recv(..) => {
+                let n = provide.fill(mut service, mut c, b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                result.unwrap(provide.reply(mut service, take c, provide.net_reply(Count(n))))
+                return (take headers, take body)
+            },
+            Released(..) => Done,
+            _ => fail("unexpected peer operation"),
+        }
+        result.unwrap(provide.reply(mut service, take c, provide.net_reply(reply)))
+    }
+    fail("no remote command")
+}

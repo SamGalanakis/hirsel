@@ -1,0 +1,268 @@
+type Handles: shareable + send {
+    rows: store.Table[Bytes, u64],
+    triggers: runner.triggers.Tables,
+    steps: runner.steps.Tables
+}
+
+fn schema(mut d: store.Declare) -> Result[Handles, store.Error] {
+    let table = store.declare_table(mut d, "counts", std.codec.key_bytes(), std.codec.of_u64())?
+    let rows = store.finish(mut d, take table)?
+    let pending = runner.triggers.declare_tables(mut d)?
+    let steps = runner.steps.declare_tables(mut d, clone(pending))?
+    Ok(Handles(rows: take rows, triggers: take pending, steps: take steps))
+}
+
+type Input: codec {
+    value: u32
+}
+
+type Notice: send = Sent(Bytes) | Parked
+
+type Link: send {
+    notices: Sender[Notice],
+    client: std.http_client.Client,
+    clock: Clock
+}
+
+type Grant: send = Front | Attempt(runner.TriggerContext, Delivery)
+
+type Command = effect.place.Command
+
+fn seed(pool: std.http_client.Pool, clock: Clock, notices: Sender[Notice]) -> Link {
+    Link(notices: channel.sender(notices), client: std.http_client.handle(pool), clock)
+}
+
+fn destination() -> effect.place.PlaceRef {
+    effect.place.PlaceRef(place: "replica", operation: "push")
+}
+
+type Delivery: send {
+    routes: effect.place.Resolver,
+    notices: Sender[Notice]
+}
+
+fn send(g: Delivery, key: Bytes, take command: Command) -> Option[Result[effect.place.Ack, effect.place.Error]] waits {
+    result.unwrap(channel.send(g.notices, Sent(clone(key))))
+    effect.place.send(g.routes, key, take command)
+}
+
+fn execute(g: Grant, _caller: runner.Caller, take command: Command) -> Result[u64, Capacity] waits {
+    match g {
+        Front => fail("attempt grant"),
+        Attempt(ctx, delivery) => {
+            match effect.deliver(ctx, delivery, take command, code.describe(send), None) {
+                Error(InDoubt(_)) => result.unwrap(channel.send(delivery.notices, Parked)),
+                _ => fail("unconfirmed send must park"),
+            }
+        },
+    }
+    Ok(0)
+}
+
+fn operation() -> effect.Op[Command] {
+    result.unwrap(effect.operation(code.describe(execute)))
+}
+
+fn entries() -> runner.triggers.Entries {
+    let mut allowed = runner.triggers.empty_entries()
+    result.unwrap(effect.allow(mut allowed, operation()))
+    take allowed
+}
+
+fn verify(tx: store.Tx, h: Handles, author: runner.Caller, _input: Input) -> Result[(), ()] {
+    if author.issuer != 9 || author.subject != b"source" || result.unwrap(store.fetch(tx, h.rows, b"revoked")) != None {
+        return Error(())
+    }
+    Ok(())
+}
+
+fn accept(mut tx: store.Tx, h: Handles, proof: inbox.Verified, take input: Input) -> Result[u64, ()] {
+    let count = match store.fetch(tx, h.rows, inbox.subject(proof)) ?=> |_| () {
+        Some(n) => n + 1,
+        None => 1u64,
+    }
+    if inbox.issuer(proof) != 9 {
+        fail("wrong verified issuer")
+    }
+    store.put(mut tx, h.rows, inbox.subject(proof), count) ?=> |_| ()
+    let change: effect.index.Push[u64, u32] = effect.index.Push(previous: effect.index.Mark(epoch: 0, seq: count - 1), at: effect.index.Mark(epoch: 0, seq: count), change: Upsert(9u64, input.value))
+    let format: std.json.Format[effect.index.Push[u64, u32]] = result.unwrap(std.json.typed())
+    let cmd = result.unwrap(effect.place.command(destination(), format, change))
+    let _ = effect.emit(mut tx, h.steps, entries(), operation(), cmd) ?=> |_| ()
+    if input.value == 0 {
+        return Error(())
+    }
+    Ok(count)
+}
+
+fn claim(_g: Grant, request: runner.ClaimRequest) -> Result[runner.Claimed, ()] {
+    if list.len(request.headers) != 1 {
+        return Error(())
+    }
+    let key = view request.headers[0].1
+    let who: Bytes = if key == b"denied" || key == b"c" {
+        b"other"
+    } else {
+        b"source"
+    }
+    Ok(runner.Claimed(caller: store.Caller(issuer: 9, subject: take who), key: clone(key)))
+}
+
+fn binding(take key: Bytes) -> runner.HttpBinding {
+    let mut fields: List[runner.FieldSource] = list.new()
+    list.push(mut fields, runner.FieldSource(field: "value", source: Body))
+    runner.HttpBinding(op: "deliver", method: Post, path: "/deliver", entry: take key, fields: take fields, mode: Keyed, ok_status: 201, error_status: 422, body_max: 1024, arg_max: 4096, deadline_ms: 1000, steps: runner.DEFAULT_STEPS)
+}
+
+fn register(mut reg: runner.Registry[Grant, Handles]) -> Result[(), runner.RegisterError] {
+    runner.use_trigger_tables(mut reg, fn(h: Handles) -> runner.triggers.Tables {
+        clone(h.triggers)
+    })
+    runner.steps.register(mut reg, fn(h: Handles) -> runner.steps.Tables {
+        clone(h.steps)
+    }, 131072, runner.DEFAULT_STEPS)?
+    runner.granted(mut reg, code.describe(execute), 131072, runner.DEFAULT_STEPS)?
+    let mut headers: List[String] = list.new()
+    list.push(mut headers, "idempotency-key")
+    let check = runner.Claim(f: code.describe(claim), headers: take headers, claim_bytes: 8192, claim_steps: runner.DEFAULT_STEPS)
+    let rule = runner.KeyedRule(claim: take check, retention_ms: 60000, keys_max: 3, principal_keys_max: 2)
+    inbox.bind(mut reg, code.describe(verify), code.describe(accept), binding, take rule, 131072, runner.DEFAULT_STEPS)
+}
+
+fn wire(_g: Grant, _raw: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
+    Error(Rejected)
+}
+
+fn front(_s: Link, _h: Handles, _input: ()) -> Result[Grant, Capacity] {
+    Ok(Front)
+}
+
+fn attempt(s: Link, _h: Handles, ctx: runner.TriggerContext) -> Result[Grant, Capacity] {
+    let endpoint = result.unwrap(std.http_client.endpoint(s.client, "https://peer.test"))
+    let credential = result.unwrap(secret.seal(b"fixture", "tls_send(peer.test)"))
+    let mut routes = effect.place.resolver(s.clock, 4000)
+    effect.place.grant(mut routes, destination(), take endpoint, "/replicate", take credential)
+    Ok(Attempt(runner.share_trigger_context(ctx), Delivery(routes: take routes, notices: channel.sender(s.notices))))
+}
+
+type Server: send {
+    cfg: runner.HttpPlaceConfig[Grant, Handles, Link],
+    stop: Receiver[()]
+}
+
+fn serve(take s: Server) waits {
+    let Server(cfg: take cfg, stop: take stop) = take s
+    result.unwrap(runner.operate_http(take cfg, take stop))
+}
+
+fn response_status(head: std.http_client.ResponseHead) -> (u16, bool) {
+    for i in 0u64 .. std.http_client.field_count(head) {
+        let (name, v) = option.unwrap(std.http_client.field_at(head, i))
+        if std.http1.equal_ascii(name, b"Idempotent-Replayed") {
+            return (std.http_client.status(head), v == b"true")
+        }
+    }
+    (std.http_client.status(head), false)
+}
+
+fn post(n: Net, c: Clock, addr: Addr, key: Bytes, data: Bytes) -> (u16, Bytes, bool) waits {
+    let mut headers: List[std.http_client.Header] = list.new()
+    list.push(mut headers, std.http_client.Header(name: "Content-Type", value: Public(b"application/json")))
+    list.push(mut headers, std.http_client.Header(name: "Idempotency-Key", value: Public(clone(key))))
+    let req = std.http_client.Request(method: "POST", target: "/deliver", headers: take headers, body: Fixed(list.len(data)))
+    let mut client = result.unwrap(std.http_client.dial(n, addr, "a", c, req, std.clock.deadline_after_ms(host.mono_ns(c), 4000)))
+    result.unwrap(std.http_client.write(mut client, data))
+    result.unwrap(std.http_client.finish_request(mut client, 8192))
+    let (status, replayed) = response_status(std.http_client.head(client))
+    let mut body: Bytes = list.with_capacity(8192)
+    while result.unwrap(std.http_client.read(mut client, mut body)) != 0 {}
+    (status, take body, replayed)
+}
+
+@test
+fn keyed_delivery(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    let (take listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0), 8))
+    let (seen, events): (Sender[Notice], Receiver[Notice]) = channel.new(8)
+    let (stop, ending): (Sender[()], Receiver[()]) = channel.new(1)
+    let (peer_net, peer_port) = provide.net(bytes 65536)
+    let remote = task.spawn(tasks, bytes 1048576, take peer_port, peer)
+    let mut limits = std.http_client.limits(4096)
+    limits.redirects = Return
+    limits.conns_max = 1
+    limits.waiters_max = 1
+    let pool = result.unwrap(std.http_client.pool(peer_net, c, tasks, System, limits))
+    let bind = runner.Mint(seed: seed(pool, c, seen), mint: front, mint_bytes: 8192, mint_steps: runner.DEFAULT_STEPS)
+    let claim_mint = runner.Mint(seed: seed(pool, c, seen), mint: front, mint_bytes: 8192, mint_steps: runner.DEFAULT_STEPS)
+    let grants = runner.HttpGrants(check: runner.wire(code.describe(wire), 8192, runner.DEFAULT_STEPS), bind: take bind, claim: Some(take claim_mint))
+    let mint = runner.Mint(seed: seed(pool, c, seen), mint: attempt, mint_bytes: 65536, mint_steps: runner.DEFAULT_STEPS)
+    let drive = runner.TriggerConfig(entries: entries(), author: store.Caller(issuer: 0, subject: list.new()))
+    let triggers = runner.HttpTriggers(drive: take drive, attempt: take mint)
+    let http = std.http.Config(ingress: list.new(), sockets_max: 2u64, http_max: 2u64, upgrades_max: 0u64, conns_max: 2u64, ip_sockets_max: 2u64, refuse_max: 1u64, refuse_ms: 1000u64, inbox_cap: 8u64, head_max: 8192u64, fields_max: 64u64, pipeline_max: 8192u64, body_inline: 16384u64, body_max: 1024, out_cap: 1024u64, handler_bytes: 262144u64, first_head_ms: 1000u64, idle_ms: 2000u64, head_ms: 1000u64, body_ms: 1000u64, handler_ms: 2000u64, write_ms: 1000u64, drain_ms: 100u64, linger_ms: 5u64, drain_max: 1024u64, streams_max: 0u64, state_max: 0u64, reads_max: 0u64, heartbeat_ms: 0u64, lease_ms: 0u64)
+    let cfg = runner.HttpPlaceConfig(backing: Memory, options: result.unwrap(store.sized(Memory, 67108864)), selection: Reopen, place: code.describe(register), schema: code.describe(schema), on_migrate: None, listener: take listener, raw: std.router.builder(), http: take http, relay: runner.RelayConfig(http_max: 2, sends_max: 2, positions_max: 2, arg_max: 4096), grants: Some(take grants), triggers: Some(take triggers), clock: c, tasks, random: r, n_place: 1048576, n_publisher: 8388608, n_server: 16777216, state_bytes: 2097152, request_bytes: 65536, frame_bytes: 65536, stream_queue: 4)
+    let server = task.spawn(tasks, bytes 100663296, Server(cfg: take cfg, stop: take ending), serve)
+    let denied = post(n, c, addr, b"denied", b"{\"value\":7}")
+    let refused = post(n, c, addr, b"a", b"{\"value\":0}")
+    let first = post(n, c, addr, b"b", b"{\"value\":7}")
+    let duplicate = post(n, c, addr, b"b", b"{\"value\":7}")
+    let mismatch = post(n, c, addr, b"b", b"{\"value\":8}")
+    let full = post(n, c, addr, b"c", b"{\"value\":7}")
+    let end = std.clock.deadline_after_ms(host.mono_ns(c), 4000)
+    let sent = channel.receive_until(events, At(c, end))
+    let held = channel.receive_until(events, At(c, end))
+    result.unwrap(channel.send(stop, ()))
+    result.unwrap(task.join(take server))
+    if denied.0 != 422 {
+        fail("writer issued proof to a different source")
+    }
+    if refused.0 != 422 || first.0 != 201 || first.1 != b"\"1\"" || first.2 {
+        fail("write rollback or first acknowledgement")
+    }
+    if duplicate.0 != first.0 || duplicate.1 != first.1 || !duplicate.2 {
+        fail("cached acknowledgement")
+    }
+    if mismatch.0 != 422 || full.0 != 503 {
+        fail("claim mismatch or quota")
+    }
+    let Ok(Sent(key)) = sent else {
+        fail("trigger sent wrong argument")
+    }
+    let codec: std.codec.Codec[runner.steps.StepId] = std.codec.of()
+    let id = result.unwrap(std.codec.decode(codec, key))
+    let (raw, payload) = match task.join(take remote) {
+        Ok(take message) => take message,
+        Error(Failed(causes)) => {
+            for cause in causes {
+                if let Fail(detail) = cause.kind {
+                    fail(string.from(detail))
+                }
+            }
+            fail("peer fault")
+        },
+        Error(Cancelled(_)) => fail("peer cancelled"),
+    }
+    let text = std.string.to_lower(result.unwrap(string.from_utf8(take raw)))
+    let mut expected_key = string.from("idempotency-key: \"")
+    string.push(mut expected_key, std.hex.encode(key))
+    string.push(mut expected_key, "\"\r\n")
+    if !std.string.starts_with(text, "post /replicate http/1.1\r\n") || std.string.find(text, 0, expected_key) == None || std.string.find(text, 0, "authorization: bearer \r\n") == None {
+        fail("cross-place request bytes")
+    }
+    let format: std.json.Format[effect.index.Push[u64, u32]] = result.unwrap(std.json.typed())
+    let received = result.unwrap(std.json.decode_typed(format, take payload, 4096))
+    if received.at != effect.index.Mark(epoch: 0, seq: 1) || received.previous != effect.index.Mark(epoch: 0, seq: 0) {
+        fail("index watermark on wire")
+    }
+    if let Upsert(9, 7) = received.change {} else {
+        fail("index change on wire")
+    }
+    if id.index != 0 || id.run.index != 0 {
+        fail("wrong idempotency key")
+    }
+    if let Ok(Parked) = held {} else {
+        fail("ambiguous effect did not park")
+    }
+    if let Ok(_) = channel.try_receive(events) {
+        fail("duplicate or rolled-back effect ran")
+    }
+    Ok(())
+}

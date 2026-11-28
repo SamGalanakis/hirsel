@@ -253,6 +253,10 @@ pub fn schedule[A](mut tx: store.Tx, t: Tables, entries: triggers.Entries, targe
 pub fn run[G: send, A: codec, R: codec, E: codec](route: runner.TriggerContext, take grants: Map[u64, G], take a: A, body: fn(mut Ctx[G], take A) -> Result[R, StepError[E]] waits) -> Result[R, StepError[E]] waits {
     let mut ctx = Ctx(route: view route, grants: take grants, index: 0u64, in_doubt: false)
     let result = body(mut ctx, take a)
+    finish_run(mut ctx, take result)
+}
+
+fn finish_run[G: send, R: codec, E: codec](mut ctx: Ctx[G], take result: Result[R, StepError[E]]) -> Result[R, StepError[E]] waits {
     if ctx.in_doubt {
         let parked: Result[Reply, StepError[E]] = dispatch(ctx.route, code.describe(control), Park(ctx.index))
         let _ = (take parked)?
@@ -310,33 +314,50 @@ fn keyed_request[G, A: codec, R: codec, E: codec](index: u64, a: A, f: StaticFn[
     outside_request_identity(index, a, code.identity(f), mode, cr, ce)
 }
 
-fn outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, take before: Begin, invoke: scoped fn(G, StepId, take A) -> Result[R, E] waits) -> Result[R, StepError[E]] waits {
-    let copied: Begin = clone(before)
+fn outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, take before: Begin, horizon: Option[u64], invoke: scoped fn(Ctx[G], StepId, take A) -> Option[Result[R, E]] waits) -> Result[R, StepError[E]] waits {
+    let mut request = take before
+    let copied: Begin = clone(request)
     let attempted: Result[Reply, StepError[E]] = dispatch(ctx.route, code.describe(control), Enter(take copied))
-    match (take attempted)? {
+    let mut reply = (take attempted)?
+    if let Doubt = reply {
+        if let Some(ms) = horizon {
+            request.mode = Resend(ms)
+            let retry: Result[Reply, StepError[E]] = dispatch(ctx.route, code.describe(control), Enter(clone(request)))
+            reply = (take retry)?
+        }
+    }
+    match take reply {
         Ready => (),
         other => return reply_value(mut ctx, take other),
     }
-    let value = match map.get(ctx.grants, ctx.index) {
-        Some(grant) => invoke(grant, next_id(ctx), take a),
-        None => fail("step wrapper: no grant for outside step"),
+    let value = invoke(ctx, next_id(ctx), take a)
+    let Some(take confirmed) = take value else {
+        ctx.in_doubt = true
+        return Error(InDoubt(next_id(ctx)))
     }
-    let finished = Finish(step: take before, raw: must(encode(value)))
+    let finished = Finish(step: take request, raw: must(encode(confirmed)))
     let result: Result[Reply, StepError[E]] = dispatch(ctx.route, code.describe(control), Finalize(take finished))
     reply_value(mut ctx, (take result)?)
 }
 
+fn grant_at[G: send](ctx: Ctx[G]) -> View[G] in ctx {
+    let Some(grant) = map.get(ctx.grants, ctx.index) else {
+        fail("step wrapper: no grant for outside step")
+    }
+    grant
+}
+
 fn unkeyed_outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, take request: Begin, f: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
     let invoke = code.callable(f)
-    outside(mut ctx, take a, take request, scoped fn(grant: G, _id: StepId, take arg: A) -> Result[R, E] waits {
-        invoke(grant, take arg)
+    outside(mut ctx, take a, take request, None, scoped fn(active: Ctx[G], _id: StepId, take arg: A) -> Option[Result[R, E]] waits {
+        Some(invoke(grant_at(active), take arg))
     })
 }
 
 fn keyed_outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, take request: Begin, f: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
     let invoke = code.callable(f)
-    outside(mut ctx, take a, take request, scoped fn(grant: G, id: StepId, take arg: A) -> Result[R, E] waits {
-        invoke(grant, must(outside_key(id)), take arg)
+    outside(mut ctx, take a, take request, None, scoped fn(active: Ctx[G], id: StepId, take arg: A) -> Option[Result[R, E]] waits {
+        Some(invoke(grant_at(active), must(outside_key(id)), take arg))
     })
 }
 
@@ -367,6 +388,20 @@ pub fn resolve[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepI
 pub fn keyed[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, f: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
     let request = keyed_request(ctx.index, a, f, First)
     keyed_outside(mut ctx, take a, take request, f)
+}
+
+/// A transport returns None if it cannot establish the outcome. This parks
+/// the durable start. A later attempt may resend within horizon_ms.
+pub fn deliver[G: send, A: codec, R: codec, E: codec](route: runner.TriggerContext, grant: G, take a: A, send: StaticFn[fn(G, Bytes, take A) -> Option[Result[R, E]] waits], horizon_ms: Option[u64]) -> Result[R, StepError[E]] waits {
+    let mut ctx: Ctx[()] = Ctx(route: view route, grants: map.new(), index: 0, in_doubt: false)
+    let cr: std.codec.Codec[R] = std.codec.of()
+    let ce: std.codec.Codec[E] = std.codec.of()
+    let request = outside_request_identity(ctx.index, a, code.identity(send), First, cr, ce)
+    let invoke = code.callable(send)
+    let returned = outside(mut ctx, take a, take request, horizon_ms, scoped fn(_active: Ctx[()], id: StepId, take arg: A) -> Option[Result[R, E]] waits {
+        invoke(grant, must(outside_key(id)), take arg)
+    })
+    finish_run(mut ctx, take returned)
 }
 
 /// Repeats an ambiguous send only within the provider's idempotency horizon,

@@ -14,6 +14,12 @@ source = "member:dtls"
 edges = ["std@1"]
 
 [[package]]
+id = "effect@1"
+version = "1.0.0"
+source = "member:effect"
+edges = ["runner@1", "std@1", "store@1"]
+
+[[package]]
 id = "hirsel.ai/archive@1"
 version = "1.0.0"
 source = "member:archive"
@@ -222,6 +228,12 @@ id = "hirsel.ai/yaml@1"
 version = "1.0.0"
 source = "member:yaml"
 edges = ["std@1"]
+
+[[package]]
+id = "inbox@1"
+version = "1.0.0"
+source = "member:inbox"
+edges = ["effect@1", "runner@1", "std@1", "store@1"]
 
 [[package]]
 id = "mcp@1"

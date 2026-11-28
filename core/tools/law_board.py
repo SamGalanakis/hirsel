@@ -15,6 +15,7 @@ from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -37,6 +38,20 @@ FOREIGN_GRANTS = {
     ),
     "sqlite": ("Foreign=hirsel.ai/sqlite@1/sqlite/Sqlite",),
 }
+# Package IDs renamed by aa5cd037. A pre-cutover baseline still covers these laws.
+SCOPED_LAW_PACKAGES = frozenset((
+    "archive", "ffi_laws", "h264", "image_core", "image_pipeline", "jwtbind",
+    "postgres", "spatial", "sqlite", "toml", "tz", "vector", "video_packager",
+    "xml", "yaml",
+))
+STORE_LAWS_MOVED_TO_MANIFEST = (
+    "disk_test_page_emission",
+    "disk_test_page_location_closure",
+    "disk_test_paged_manifest",
+    "test_l69_lineage_last_holder_ghost_and_adopt",
+)
+OLD_REPLAY_TEST = "srtp@1/srtp/replay_reference_model"
+REPLAY_TEST = "hirsel.ai/replay_receive_laws@1/laws/replay_reference_model"
 # A full check is about 400 s cold, so a general compiler change does not select
 # everything; only the code that computes the lock columns does. A compiler change
 # that moves digests elsewhere is caught by the next check that selects the package.
@@ -112,14 +127,61 @@ def selected_packages(base, compiler):
             if any(path.startswith(tuple(reached_directories(member, compiler))) for path in changed)]
 
 
-def baseline_for(commit, package, destination):
-    if commit is None:
-        return []
-    path = (package / "hirsel.laws").relative_to(ROOT).as_posix()
+def renamed_baseline(text, member, package_name):
+    original = text
+    if member in SCOPED_LAW_PACKAGES and package_name == f"hirsel.ai/{member}":
+        # The first column names the test. A row can also name its owning helper
+        # after '@'. Preserve the remainder of each lock line and every row.
+        old = re.escape(member)
+        text = re.sub(rf"(?m)^{old}(?=@[0-9]+/)|(?<=@){old}(?=@[0-9]+/)", package_name, text)
+    if member == "store" and package_name == "store":
+        for law in STORE_LAWS_MOVED_TO_MANIFEST:
+            old = f"store@1/store/{law}"
+            new = f"store@1/manifest/{law}"
+            text = re.sub(rf"(?m)^{old}(?= )|(?<=@){old}(?=#)", new, text)
+        old = "store@1/store/expired_cutover_keeps_old_serving"
+        new = "store@1/store/test_crash_install_expired_cutover"
+        text = re.sub(rf"(?m)^{old}(?= )|(?<=@){old}(?=#)", new, text)
+    if text == original:
+        return text
+    header, *rows = text.splitlines()
+    return "\n".join((header, *sorted(rows), ""))
+
+
+def read_baseline(commit, member):
+    path = (WORKSPACE / member / "hirsel.laws").relative_to(ROOT).as_posix()
     present = subprocess.check_output(["git", "ls-tree", commit, "--", path], cwd=ROOT)
     if not present:
+        return None
+    return subprocess.check_output(["git", "show", f"{commit}:{path}"], cwd=ROOT, text=True)
+
+
+def moved_replay_row(commit, selected):
+    # a2d3c603 moved the SRTP property to the shared receive-window package.
+    # Transfer its expectation only when the recipient will run this night.
+    if commit is None or not {"srtp", "replay_receive_laws"}.issubset(selected):
+        return None
+    source = read_baseline(commit, "srtp")
+    if source is None:
+        return None
+    rows = [row for row in source.splitlines()[1:] if row.startswith(OLD_REPLAY_TEST + " ")]
+    return rows[0] if len(rows) == 1 else None
+
+
+def baseline_for(commit, member, destination, package_name, replay_row):
+    if commit is None:
         return []
-    destination.write_bytes(subprocess.check_output(["git", "show", f"{commit}:{path}"], cwd=ROOT))
+    text = read_baseline(commit, member)
+    if replay_row and member == "srtp":
+        text = text.replace(replay_row + "\n", "")
+    if replay_row and member == "replay_receive_laws":
+        header, *rows = ("hirsel.laws 1\n" if text is None else text).splitlines()
+        moved = REPLAY_TEST + replay_row[len(OLD_REPLAY_TEST):]
+        moved = moved.replace(f"@{OLD_REPLAY_TEST}#", f"@{REPLAY_TEST}#")
+        text = "\n".join((header, *sorted([*rows, moved]), ""))
+    if text is None:
+        return []
+    destination.write_text(renamed_baseline(text, member, package_name))
     return ["--laws-baseline", str(destination)]
 
 
@@ -137,7 +199,7 @@ def incomplete_lock_rows(package):
     return rows
 
 
-def run_package(args, member, env, commit, compiler_scratch):
+def run_package(args, member, env, commit, compiler_scratch, replay_row=None):
     package = WORKSPACE / member
     inputs = [str(package), "--libraries", str(ROOT / "core")]
     if args.mode in ("check", "seed"):
@@ -159,14 +221,15 @@ def run_package(args, member, env, commit, compiler_scratch):
                "--laws", "--json", "--test-timeout", "300"]
     if compiler_scratch is not None:
         command.extend(["--store", str(compiler_scratch / member)])
-    if hcfg.option(hcfg.read(package / "hirsel.hcfg", "pkg_v1.Package", args.compiler)["tests"]) is None:
+    manifest = hcfg.read(package / "hirsel.hcfg", "pkg_v1.Package", args.compiler)
+    if hcfg.option(manifest["tests"]) is None:
         command += ["--limit", "67108864"]
     for grant in FOREIGN_GRANTS.get(member, ()):
         command += ["--grant", grant]
     if args.mode == "seed":
         command.append("--write-laws")
     else:
-        baseline = baseline_for(commit, package, logs / "baseline.laws")
+        baseline = baseline_for(commit, member, logs / "baseline.laws", manifest["name"], replay_row)
         if not baseline:
             print(f"{member}: no previous lock", flush=True)
         command.extend(baseline)
@@ -226,8 +289,9 @@ def main():
             selected = lock_packages(args.compiler)
         if args.mode == "check":
             print(f"laws check: {len(selected)} package(s)", flush=True)
+        replay_row = moved_replay_row(commit, selected) if args.mode == "nightly" else None
         for member in selected:
-            status |= int(run_package(args, member, env, commit, compiler_scratch) != 0)
+            status |= int(run_package(args, member, env, commit, compiler_scratch, replay_row) != 0)
     return status
 
 

@@ -159,12 +159,36 @@ impl<F: Signature> Slot<F> {
         self.lease.0.version()
     }
 
+    /// Publish a complete installation and issue dispatch permission for exactly
+    /// the version selected under the activation lock.
+    pub fn activate_checkout(&self, expected: u64, code: Code<F>) -> Result<Checkout, Stop> {
+        let version = self.activate(expected, code)?;
+        Ok(Checkout {
+            lease: Arc::clone(&self.lease),
+            version,
+        })
+    }
+
     /// Store `code` when the slot is at version `expected`, and return the new version.
     /// It waits for no call, worker or unit that still uses the old code.
     pub fn activate(&self, expected: u64, code: Code<F>) -> Result<u64, Stop> {
         self.lease
             .0
             .activate(expected, Some(code.image), code.entry)
+    }
+}
+
+/// Dispatch permission for one activation. Its holder can neither replace the
+/// slot nor use bindings from a previous activation of the same image.
+#[derive(Clone)]
+pub struct Checkout {
+    lease: Arc<Lease>,
+    version: u64,
+}
+
+impl Checkout {
+    pub fn version(&self) -> u64 {
+        self.version
     }
 }
 
@@ -251,7 +275,7 @@ impl Worker {
     /// Begin a dispatch through `cell`, borrowing a worker-owned generation on hit
     /// with a single version load and zero shared-line writes or refcount increments.
     /// Returns `None` if the slot is empty.
-    fn begin_cell(&mut self, cell: &Arc<Cell>) -> Option<(usize, BorrowToken)> {
+    fn begin_cell(&mut self, cell: &Arc<Cell>) -> Option<(usize, u64, BorrowToken)> {
         let updates = self.shared.updates.load(Ordering::Relaxed);
         if updates != self.seen {
             self.seen = updates;
@@ -266,7 +290,7 @@ impl Worker {
             let row = self.rows[at].as_mut().unwrap();
             row.used = self.clock;
             row.borrows = row.borrows.checked_add(1).expect("worker borrow overflow");
-            return Some((row.code.1, BorrowToken::Row(at)));
+            return Some((row.code.1, version, BorrowToken::Row(at)));
         }
         // Miss: acquire entry and version together under the slot lock.
         let (version, code) = {
@@ -288,16 +312,16 @@ impl Worker {
                 .is_some_and(|row| Arc::ptr_eq(&row.cell, cell) && row.borrows == 0)
         }) {
             self.rows[at] = Some(new_row);
-            return Some((entry, BorrowToken::Row(at)));
+            return Some((entry, version, BorrowToken::Row(at)));
         }
         if let Some(at) = self.rows.iter().position(Option::is_none) {
             self.rows[at] = Some(new_row);
-            return Some((entry, BorrowToken::Row(at)));
+            return Some((entry, version, BorrowToken::Row(at)));
         }
         if self.rows.len() < Self::ROWS {
             let at = self.rows.len();
             self.rows.push(Some(new_row));
-            return Some((entry, BorrowToken::Row(at)));
+            return Some((entry, version, BorrowToken::Row(at)));
         }
         if let Some(least) = self
             .rows
@@ -312,15 +336,16 @@ impl Worker {
             .map(|(i, _)| i)
         {
             self.rows[least] = Some(new_row);
-            return Some((entry, BorrowToken::Row(least)));
+            return Some((entry, version, BorrowToken::Row(least)));
         }
         // All 64 rows are concurrently borrowed by nested calls: hold an owned pin.
-        Some((entry, BorrowToken::Owned(new_row.code.0)))
+        Some((entry, version, BorrowToken::Owned(new_row.code.0)))
     }
 
     /// Begin a dispatch through an untyped `RawSlot`.
     pub fn begin_dispatch(&mut self, slot: &RawSlot) -> Option<(usize, BorrowToken)> {
         self.begin_cell(&slot.lease.0)
+            .map(|(entry, _, token)| (entry, token))
     }
 
     /// Release one dispatch borrow on return or unwind.
@@ -367,7 +392,7 @@ impl Worker {
         slot: &Slot<F>,
         with: impl FnOnce(F) -> R,
     ) -> Option<R> {
-        self.with_borrow(&slot.lease.0, |entry, _, _| {
+        self.with_borrow(&slot.lease.0, |entry, _, _, _| {
             // SAFETY: the slot admits only F and the worker pins its generation through with.
             with(unsafe { std::mem::transmute_copy(&entry) })
         })
@@ -375,14 +400,20 @@ impl Worker {
 
     /// Call a registration selected from the slot's installation. A replacement
     /// cannot pair an ordinal resolved in the old directory with text in the new one.
-    pub fn dispatch_entry<F: Signature, Root: Signature, R>(
+    pub fn dispatch_entry<F: Signature, R>(
         &mut self,
-        slot: &Slot<Root>,
+        checkout: &Checkout,
         selection: &EntryIndex<F>,
         with: impl FnOnce(F) -> R,
     ) -> Result<Option<R>, Refusal> {
         const { assert!(size_of::<F>() == size_of::<usize>()) };
-        self.with_borrow(&slot.lease.0, |_, worker, token| {
+        if !Arc::ptr_eq(&self.shared, &checkout.lease.0.shared) {
+            return Err(Refusal::NotAdmitted);
+        }
+        self.with_borrow(&checkout.lease.0, |_, version, worker, token| {
+            if version != checkout.version {
+                return Err(Refusal::NoEntry);
+            }
             let image = match token {
                 BorrowToken::Row(at) => worker.rows[*at]
                     .as_ref()
@@ -405,9 +436,9 @@ impl Worker {
     fn with_borrow<R>(
         &mut self,
         cell: &Arc<Cell>,
-        with: impl FnOnce(usize, &Self, &BorrowToken) -> R,
+        with: impl FnOnce(usize, u64, &Self, &BorrowToken) -> R,
     ) -> Option<R> {
-        let (entry, token) = self.begin_cell(cell)?;
+        let (entry, version, token) = self.begin_cell(cell)?;
         struct Guard<'a> {
             worker: &'a mut Worker,
             token: Option<BorrowToken>,
@@ -423,7 +454,12 @@ impl Worker {
             worker: self,
             token: Some(token),
         };
-        Some(with(entry, guard.worker, guard.token.as_ref().unwrap()))
+        Some(with(
+            entry,
+            version,
+            guard.worker,
+            guard.token.as_ref().unwrap(),
+        ))
     }
 
     /// Drop every unborrowed row whose slot has moved on. A worker calls this

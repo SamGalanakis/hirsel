@@ -29,7 +29,7 @@ use host::Access;
 pub use raw::RawCode;
 use retire::Retire;
 use runs::Runs;
-pub use slot::{BorrowToken, CodePin, RawSlot, Slot, Worker};
+pub use slot::{BorrowToken, Checkout, CodePin, RawSlot, Slot, Worker};
 pub use table::Hit;
 use table::{DataRow, Owner, Table};
 

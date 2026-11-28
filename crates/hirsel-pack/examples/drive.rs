@@ -97,7 +97,6 @@ fn main() {
     ))
     .unwrap();
     loader.admit_module(&bytes).unwrap();
-    let pool = hirsel_pack::loader_handle(loader).unwrap();
     let mut worker = loader.worker();
     for round in 0..rounds {
         let image = match loader.image(&bytes, true) {
@@ -120,12 +119,15 @@ fn main() {
                 continue;
             }
         };
-        let slot = loader.slot();
-        let checkout = slot.activate_checkout(0, &registered).unwrap();
-        let execution = Execution::in_pool(pool).unwrap();
-        let outcome = worker
-            .dispatch_entry(&checkout, 0, &entry, |main| {
-                run_main(main, &execution, root_limit)
+        let slot = hirsel_pack::PlaceSlot::new(loader).unwrap();
+        let place = slot
+            .activate(0, |_| {
+                Ok::<_, std::convert::Infallible>((registered, root_limit))
+            })
+            .unwrap();
+        let outcome = place
+            .dispatch(&mut worker, 0, &entry, |main, execution, &limit| {
+                run_main(main, execution, limit)
             })
             .unwrap()
             .unwrap();
@@ -133,7 +135,7 @@ fn main() {
             Ok(status) => println!("round {round}: returned {status}"),
             Err(EndReason::RunStop(stop)) => {
                 let name = String::from_utf8_lossy(stop.as_bytes()).into_owned();
-                let report = hirsel_pack::report(&execution);
+                let report = hirsel_pack::report(place.execution());
                 let span = report.and_then(|report| report.span(&module));
                 println!("round {round}: run stop {name} {report:?} {span:?}");
             }

@@ -146,6 +146,25 @@ impl Execution {
         }
     }
 
+    /// Release registration scratch when a synchronous execution goes dormant.
+    /// Outstanding guest allocations and pins keep their original custody records.
+    pub fn park(&mut self) {
+        if let Some(storage) = self.raw_storage.get_mut()
+            && storage.park()
+            && std::sync::Arc::get_mut(storage).is_some()
+        {
+            self.raw_storage.take();
+        }
+        self.guest_owners.park();
+        if let Some(pins) = self.pins.get() {
+            // A Held can retain its table address until its destructor returns.
+            let mut table = pins.lock().unwrap_or_else(|e| e.into_inner());
+            if table.free.len() == table.slots.len() {
+                *table = PinTable::new();
+            }
+        }
+    }
+
     pub(crate) fn register_pin(
         &self,
         pin: crate::code::CodePin,

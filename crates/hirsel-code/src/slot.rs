@@ -149,6 +149,7 @@ impl<F> Clone for Slot<F> {
 
 /// A launch's selected native adapters in Runner registration order. A release
 /// with a canonical order can activate any number of slots from this one value.
+#[derive(Clone)]
 pub struct Registered<F> {
     code: Code<F>,
     order: Arc<[u32]>,

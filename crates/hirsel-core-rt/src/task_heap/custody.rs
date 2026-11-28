@@ -9,6 +9,15 @@ type Release = unsafe fn(NonNull<u8>, u64);
 pub(crate) struct RawStorage(Mutex<BTreeMap<usize, (u64, Release)>>);
 
 impl RawStorage {
+    pub(crate) fn park(&self) -> bool {
+        let mut owners = self.0.lock().unwrap();
+        if owners.is_empty() {
+            *owners = BTreeMap::new();
+            return true;
+        }
+        false
+    }
+
     pub(super) fn current() -> Option<Weak<Self>> {
         let execution = crate::run_stop::current_execution()?;
         execution

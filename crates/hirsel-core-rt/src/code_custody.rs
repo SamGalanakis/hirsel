@@ -19,6 +19,13 @@ impl GuestOwners {
         Self(Mutex::new(BTreeMap::new()))
     }
 
+    pub(crate) fn park(&mut self) {
+        let owners = self.0.get_mut().unwrap();
+        if owners.is_empty() {
+            *owners = BTreeMap::new();
+        }
+    }
+
     pub(crate) fn release_stopped(&mut self) {
         for ((owner, address), count) in std::mem::take(self.0.get_mut().unwrap()) {
             let pointer = std::ptr::with_exposed_provenance_mut(address);

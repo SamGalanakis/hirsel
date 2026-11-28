@@ -36,12 +36,14 @@ impl<'s, 'b> Layouts<'s, 'b> {
 // A counted repeat has one entry from the paying block, a `<` test and a
 // straight-line latch that stores or copies one element. Only the proved latch
 // edge can be omitted. Every other incoming edge, including a failure edge,
-// invalidates this proof.
+// invalidates this proof. With `refuse`, a recognized repeat without its
+// precharge is an error rather than a cycle left for the graph.
 pub(super) fn paid_repeats(
     m: &Module,
     body: &Body,
     facts: &bulk::Facts<'_>,
     layouts: &mut Layouts<'_, '_>,
+    refuse: bool,
     budget: &Debit<'_>,
 ) -> Result<Vec<bool>, Error> {
     let mut paid = Vec::new();
@@ -57,6 +59,7 @@ pub(super) fn paid_repeats(
                 layouts,
                 bi,
                 &body.edges[edge.index()],
+                refuse,
                 budget,
             )?
         {
@@ -162,6 +165,7 @@ fn repeat(
     layouts: &mut Layouts<'_, '_>,
     pre: usize,
     entry: &Edge,
+    refuse: bool,
     budget: &Debit<'_>,
 ) -> Result<Option<usize>, Error> {
     let head = entry.target.index();
@@ -260,8 +264,11 @@ fn repeat(
         hirsel_core_ids::work_steps::table::COPY,
         budget,
     )? {
-        // Admission refuses every element repeat whose count is unpaid, not
-        // only the cycles the active graph would see.
+        if !refuse {
+            return Ok(None);
+        }
+        // An unpaid element repeat is refused even where the cycle rule in
+        // force would not reach it.
         return Err(Error::Invalid(format!(
             "b{head}: element repeat lacks matching MEM-30 precharge"
         )));

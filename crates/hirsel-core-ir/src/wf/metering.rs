@@ -25,6 +25,8 @@ pub enum Cycles {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Checks {
     pub cycles: Cycles,
+    /// Each counted element repeat follows a COPY precharge of its count.
+    pub repeats: bool,
     /// `rt.zero_bytes` follows a matching COPY precharge.
     pub zero_bytes: bool,
     /// Explicit `copy` and `move` follow a matching COPY precharge.
@@ -45,6 +47,7 @@ impl Checks {
     /// The laws release admission enforces.
     pub const ADMISSION: Self = Self {
         cycles: Cycles::Scalar,
+        repeats: true,
         zero_bytes: true,
         copies: false,
         allocations: false,
@@ -56,6 +59,7 @@ impl Checks {
     /// Every law.
     pub const STRICT: Self = Self {
         cycles: Cycles::Reentrant,
+        repeats: true,
         zero_bytes: true,
         copies: true,
         allocations: true,
@@ -67,6 +71,7 @@ impl Checks {
     /// No law; enable fields one at a time.
     pub const NONE: Self = Self {
         cycles: Cycles::Off,
+        repeats: false,
         zero_bytes: false,
         copies: false,
         allocations: false,
@@ -145,7 +150,8 @@ fn check(module: &Module, budget: &Debit<'_>, checks: Checks) -> Result<(), Erro
             scopes::check(body, &local)?;
         }
         let facts = bulk::Facts::new(body, &local)?;
-        let paid = repeat::paid_repeats(module, body, &facts, &mut layouts, &local)?;
+        let paid =
+            repeat::paid_repeats(module, body, &facts, &mut layouts, checks.repeats, &local)?;
         facts.check_operations(body, checks, &paid, &local)?;
         if checks.cycles == Cycles::Off {
             continue;

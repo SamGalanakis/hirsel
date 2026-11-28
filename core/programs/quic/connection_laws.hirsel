@@ -5,24 +5,30 @@ const SERVER_ADDR: Addr = Addr(ip: V4(0x7f000001u32), port: 24102)
 fn endpoint_config() -> quic.EndpointConfig {
     let reset = result.unwrap(secret.seal(b"QS3 reset key", "mac"))
     let token = result.unwrap(secret.seal(b"QS3 token key", "kdf"))
-    quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: 1200, retry: Never, reset_key: take reset, token_key: take token, limits: quic.EndpointLimits(connections: 4, unvalidated: 4, datagram_bytes: 0))
+    quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: 1200, retry: Never,
+        reset_key: take reset, token_key: take token, limits: quic.EndpointLimits(connections: 4,
+        unvalidated: 4, datagram_bytes: 0))
 }
 
 fn transport_config(take pins: Option[List[handshake.Pin]]) -> quic.TransportConfig {
     let mut alpn: List[String] = list.with_capacity(1)
     list.push(mut alpn, "h3")
-    quic.TransportConfig(max_idle_ms: 5000, initial_max_data: 0, initial_max_stream_data: 0, max_streams_bidi: 0, max_streams_uni: 0, max_datagram_frame: 0, send_bytes: 16384, max_gaps: 32, cc: Cubic, alpn: take alpn, client_pins: take pins)
+    quic.TransportConfig(max_idle_ms: 5000, initial_max_data: 0, initial_max_stream_data: 0,
+        max_streams_bidi: 0, max_streams_uni: 0, max_datagram_frame: 0, send_bytes: 16384,
+        max_gaps: 32, cc: Cubic, alpn: take alpn, client_pins: take pins)
 }
 
 fn qs3_server(take pins: Option[List[handshake.Pin]]) -> quic.Endpoint {
-    result.unwrap(quic.endpoint(provide.random(17), endpoint_config(), Some((p256_identity(false), transport_config(take pins)))))
+    result.unwrap(quic.endpoint(provide.random(17), endpoint_config(), Some((p256_identity(false),
+        transport_config(take pins)))))
 }
 
 fn qs3_client() -> quic.Endpoint {
     result.unwrap(quic.endpoint(provide.random(39), endpoint_config(), None))
 }
 
-fn pipe(mut sender: quic.Endpoint, mut receiver: quic.Endpoint, from: Addr, now: u64, mut events: List[quic.Event]) {
+fn pipe(mut sender: quic.Endpoint, mut receiver: quic.Endpoint, from: Addr, now: u64,
+    mut events: List[quic.Event]) {
     let mut wire: Bytes = list.with_capacity(4096)
     let mut packets: List[quic.Output] = list.with_capacity(4)
     let _ = quic.poll(mut sender, now, mut wire, mut packets)
@@ -55,7 +61,8 @@ fn client_pin_case(take required: List[handshake.Pin], with_identity: bool, expe
     } else {
         None
     }
-    let handle = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), take identity, transport_config(None)))
+    let handle = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(
+        old_digest()), take identity, transport_config(None)))
     let mut at_server: List[quic.Event] = list.new()
     let mut at_client: List[quic.Event] = list.new()
     for now in 1u64 .. 8 {
@@ -74,7 +81,8 @@ fn client_pin_case(take required: List[handshake.Pin], with_identity: bool, expe
             fail("server did not report the authenticated certificate pin")
         }
         let params = option.unwrap(quic.peer_params(client, handle))
-        if digest != rotated_digest() || params.max_idle_ms != 5000 || params.max_udp_payload != 1200 || params.active_cid_limit != 8 {
+        if digest != rotated_digest() || params.max_idle_ms != 5000 || params.max_udp_payload !=
+            1200 || params.active_cid_limit != 8 {
             fail("pin or peer transport parameters")
         }
         quic.timeout(mut server, 5000000001, mut at_server)
@@ -128,13 +136,15 @@ fn connection_client_pins() -> Result[(), ()] {
     Ok(())
 }
 
-fn fixture_initial(dcid: Bytes, scid: Bytes, number: u64, frame: Bytes, total: u64, of: schedule.Side) -> Bytes {
+fn fixture_initial(dcid: Bytes, scid: Bytes, number: u64, frame: Bytes, total: u64,
+    of: schedule.Side) -> Bytes {
     let mut keys = result.unwrap(schedule.quic_initial(of, dcid))
     let mut sealer = result.unwrap(schedule.sealer(mut keys, Initial, 0, number))
     let mask = result.unwrap(schedule.header_mask(keys, Initial, true))
     let mut wire: Bytes = list.with_capacity(total)
     let fixed = 14 + list.len(dcid) + list.len(scid)
-    result.unwrap(codec.write_long_header(Initial, dcid, scid, b"", codec.Number(truncated: number, size: 4), total - fixed, mut wire))
+    result.unwrap(codec.write_long_header(Initial, dcid, scid, b"", codec.Number(truncated: number,
+        size: 4), total - fixed, mut wire))
     let at = list.len(wire)
     list.append(mut wire, frame)
     list.fill(mut wire, total - 16 - list.len(wire), 0)
@@ -175,17 +185,21 @@ fn check_silent_drops() {
     quic.receive_datagram(mut server, 0, CLIENT_ADDR, 0, mut forged, 0, 1200, mut events)
     let mut out: Bytes = list.with_capacity(2400)
     let mut tx: List[quic.Output] = list.with_capacity(4)
-    if quic.poll(mut server, 0, mut out, mut tx) != None || list.len(tx) != 0 || list.len(events) != 0 {
+    if quic.poll(mut server, 0, mut out, mut tx) != None || list.len(tx) != 0 || list.len(events) !=
+        0 {
         fail("silent drop replied or retained connection state")
     }
-    if quic.drop_count(server, SmallInitial) != 1 || quic.drop_count(server, SmallUnsupportedVersion) != 1 || quic.drop_count(server, DatagramTooShort) != 1 || quic.drop_count(server, PacketProtection) != 1 {
+    if quic.drop_count(server, SmallInitial) != 1 || quic.drop_count(server,
+        SmallUnsupportedVersion) != 1 || quic.drop_count(server, DatagramTooShort) != 1 ||
+        quic.drop_count(server, PacketProtection) != 1 {
         fail("classifier chose the wrong first drop reason")
     }
 }
 
 fn check_uncommitted_ack() {
     let mut client = qs3_client()
-    let _ = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, transport_config(None)))
+    let _ = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(old_digest()),
+        None, transport_config(None)))
     let mut first: Bytes = list.with_capacity(1200)
     let mut flight: List[quic.Output] = list.with_capacity(2)
     let _ = quic.poll(mut client, 0, mut first, mut flight)
@@ -195,13 +209,15 @@ fn check_uncommitted_ack() {
     quic.committed(mut client, 0, 1)
     let mut at = 0u64
     let header = result.unwrap(codec.read_header(first, mut at, 1200, 0))
-    let dcid = list.slice(first, header.destination.at, header.destination.at + header.destination.len)
+    let dcid = list.slice(first, header.destination.at, header.destination.at +
+        header.destination.len)
     let local = list.slice(first, header.source.at, header.source.at + header.source.len)
     let mut keys = result.unwrap(schedule.quic_initial(Server, dcid))
     let mut sealer = result.unwrap(schedule.sealer(mut keys, Initial, 0, 0))
     let mask = result.unwrap(schedule.header_mask(keys, Initial, true))
     let mut reply: Bytes = list.with_capacity(80)
-    result.unwrap(codec.write_long_header(Initial, local, b"peer-cid", b"", codec.Number(truncated: 0, size: 4), 21, mut reply))
+    result.unwrap(codec.write_long_header(Initial, local, b"peer-cid", b"", codec.Number(
+        truncated: 0, size: 4), 21, mut reply))
     let body = list.len(reply)
     // ACK of packet zero alone (RFC 9000 §19.3). Only PN 1 was committed.
     list.append(mut reply, b"\x02\x00\x00\x00\x00")
@@ -258,7 +274,8 @@ fn sched_payload(tag: u8, len: u64) -> quic.FramedSlice {
     quic.framed_from(quic.payload_whole(shared.new(take b)))
 }
 
-fn sched_step(mut from: quic.Endpoint, mut to: quic.Endpoint, src: Addr, now: u64, batch: u64, commit_cap: u64, mut events: List[quic.Event]) -> u64 {
+fn sched_step(mut from: quic.Endpoint, mut to: quic.Endpoint, src: Addr, now: u64, batch: u64,
+    commit_cap: u64, mut events: List[quic.Event]) -> u64 {
     let mut wire: Bytes = list.with_capacity(batch * 1200)
     let mut tx: List[quic.Output] = list.with_capacity(batch)
     let _ = quic.poll(mut from, now, mut wire, mut tx)
@@ -291,14 +308,17 @@ fn sched_step(mut from: quic.Endpoint, mut to: quic.Endpoint, src: Addr, now: u6
 /// with direct handle lookup and exact idle/PTO deadlines; active rounds visit O(active) slots.
 @test
 fn scheduler_fairness_partial_batch_and_slot_reuse() -> Result[(), ()] {
-    let mut server = result.unwrap(quic.endpoint(provide.random(17), sched_endpoint_config(16), Some((p256_identity(false), sched_transport(5000)))))
-    let mut client = result.unwrap(quic.endpoint(provide.random(39), sched_endpoint_config(16), None))
+    let mut server = result.unwrap(quic.endpoint(provide.random(17), sched_endpoint_config(16),
+        Some((p256_identity(false), sched_transport(5000)))))
+    let mut client = result.unwrap(quic.endpoint(provide.random(39), sched_endpoint_config(16),
+        None))
     let mut ch: List[quic.ConnectionHandle] = list.with_capacity(8)
     let mut sh: List[quic.ConnectionHandle] = list.with_capacity(8)
     let mut at_server: List[quic.Event] = list.new()
     let mut at_client: List[quic.Event] = list.new()
     for _ in 0u64 .. 8 {
-        let h = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, sched_transport(5000)))
+        let h = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(
+            old_digest()), None, sched_transport(5000)))
         list.push(mut ch, h)
     }
     let mut now = 1000000u64
@@ -318,15 +338,17 @@ fn scheduler_fairness_partial_batch_and_slot_reuse() -> Result[(), ()] {
     if list.len(sh) != 8 {
         fail("all 8 connections must establish")
     }
-    let prio = quic.Priority(urgency: 3, order: 0, then: 0)
+    let prio = quic.Priority(urgency: 3, then_high: 0, order: 0, then: 0)
     // 1. Fairness under a 2-packet batch cap: saturate ch[0] with 8 large datagrams (each
     // fills a 1-RTT packet) and queue 1 datagram on each of ch[1..8]. After ch[0] fills batch
     // 1, ch[1..8] must be served before ch[0] finishes all 8 datagrams, and all 15 must arrive.
     for _ in 0u64 .. 8 {
-        result.unwrap(quic.send_datagram(mut client, ch[0], sched_payload(0x10, 900), prio, quic.DatagramTag(owner: 0, tag: 0)))
+        result.unwrap(quic.send_datagram(mut client, ch[0], sched_payload(0x10, 900), prio,
+            quic.DatagramTag(owner: 0, tag: 0)))
     }
     for i in 1u64 .. 8 {
-        result.unwrap(quic.send_datagram(mut client, ch[i], sched_payload(int.narrow(0x20 + i), 900), prio, quic.DatagramTag(owner: 0, tag: 0)))
+        result.unwrap(quic.send_datagram(mut client, ch[i], sched_payload(int.narrow(0x20 + i),
+            900), prio, quic.DatagramTag(owner: 0, tag: 0)))
     }
     let mut from_zero_before_others = 0u64
     let mut others_seen = 0u64
@@ -362,7 +384,8 @@ fn scheduler_fairness_partial_batch_and_slot_reuse() -> Result[(), ()] {
     // 2. Partial commit: queue 1 datagram on ch[0..4], commit only 1 of 4 staged packets;
     // the 3 abandoned links must stay runnable and deliver all 4 datagrams.
     for i in 0u64 .. 4 {
-        result.unwrap(quic.send_datagram(mut client, ch[i], sched_payload(int.narrow(0x40 + i), 200), prio, quic.DatagramTag(owner: 0, tag: 0)))
+        result.unwrap(quic.send_datagram(mut client, ch[i], sched_payload(int.narrow(0x40 + i),
+            200), prio, quic.DatagramTag(owner: 0, tag: 0)))
     }
     let mut partial_rx = 0u64
     let _ = sched_step(mut client, mut server, CLIENT_ADDR, now, 8, 1, mut at_server)
@@ -389,7 +412,8 @@ fn scheduler_fairness_partial_batch_and_slot_reuse() -> Result[(), ()] {
     }
     // 3. O(active) slot visits: with 8 live links and only ch[7] active, one timeout + poll
     // on server must not scan all 8 slots.
-    result.unwrap(quic.send_datagram(mut client, ch[7], sched_payload(0x77, 100), prio, quic.DatagramTag(owner: 0, tag: 0)))
+    result.unwrap(quic.send_datagram(mut client, ch[7], sched_payload(0x77, 100), prio,
+        quic.DatagramTag(owner: 0, tag: 0)))
     now += 1000000
     let _ = sched_step(mut client, mut server, CLIENT_ADDR, now, 8, 8, mut at_server)
     list.clear(mut at_server)
@@ -405,7 +429,8 @@ fn scheduler_fairness_partial_batch_and_slot_reuse() -> Result[(), ()] {
     // keep ch[4..8] alive at now + 3s, then expire ch[0..4] past their 5s idle deadline.
     let keepalive_at = now + 3000000000
     for i in 4u64 .. 8 {
-        result.unwrap(quic.send_datagram(mut client, ch[i], sched_payload(0x55, 64), prio, quic.DatagramTag(owner: 0, tag: 0)))
+        result.unwrap(quic.send_datagram(mut client, ch[i], sched_payload(0x55, 64), prio,
+            quic.DatagramTag(owner: 0, tag: 0)))
     }
     let _ = sched_step(mut client, mut server, CLIENT_ADDR, keepalive_at, 8, 8, mut at_server)
     list.clear(mut at_server)
@@ -424,16 +449,19 @@ fn scheduler_fairness_partial_batch_and_slot_reuse() -> Result[(), ()] {
         fail("indexed idle timeout did not retire exactly the 4 idle connections")
     }
     for i in 0u64 .. 4 {
-        if let Error(UnknownConnection) = quic.send_datagram(mut server, sh[i], sched_payload(0x99, 32), prio, quic.DatagramTag(owner: 0, tag: 0)) {} else {
+        if let Error(UnknownConnection) = quic.send_datagram(mut server, sh[i], sched_payload(0x99,
+            32), prio, quic.DatagramTag(owner: 0, tag: 0)) {} else {
             fail("expired handle still resolved after release")
         }
     }
     // Admit 4 replacement connections (reusing freed slots) and verify direct handle lookup.
-    let mut new_client = result.unwrap(quic.endpoint(provide.random(51), sched_endpoint_config(8), None))
+    let mut new_client = result.unwrap(quic.endpoint(provide.random(51), sched_endpoint_config(8),
+        None))
     let mut new_ch: List[quic.ConnectionHandle] = list.with_capacity(4)
     let mut new_sh: List[quic.ConnectionHandle] = list.with_capacity(4)
     for _ in 0u64 .. 4 {
-        let h = result.unwrap(quic.connect(mut new_client, expire_at, SERVER_ADDR, "server", cert_pin(old_digest()), None, sched_transport(5000)))
+        let h = result.unwrap(quic.connect(mut new_client, expire_at, SERVER_ADDR, "server",
+            cert_pin(old_digest()), None, sched_transport(5000)))
         list.push(mut new_ch, h)
     }
     let mut t_new = expire_at + 1000000
@@ -453,7 +481,8 @@ fn scheduler_fairness_partial_batch_and_slot_reuse() -> Result[(), ()] {
         fail("replacement connections did not reuse freed slots cleanly")
     }
     // Send from server to a reused-slot handle and verify PTO fires if its packet is dropped.
-    result.unwrap(quic.send_datagram(mut server, new_sh[3], sched_payload(0xaa, 64), prio, quic.DatagramTag(owner: 0, tag: 0)))
+    result.unwrap(quic.send_datagram(mut server, new_sh[3], sched_payload(0xaa, 64), prio,
+        quic.DatagramTag(owner: 0, tag: 0)))
     let mut drop_wire: Bytes = list.with_capacity(2400)
     let mut drop_tx: List[quic.Output] = list.with_capacity(4)
     let pto_wake = quic.poll(mut server, t_new, mut drop_wire, mut drop_tx)

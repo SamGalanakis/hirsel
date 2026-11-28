@@ -1,16 +1,30 @@
 // MOQ-1 & MOQ-2: Session lifecycle, SETUP, control stream, and transport event dispatch.
-fn session(side: schedule.Side, role: Role, link: LinkId, address_mode: AddressMode, limits: Limits) -> Session {
+fn session(side: schedule.Side, role: Role, link: LinkId, address_mode: AddressMode,
+    limits: Limits) -> Session {
     let (next_req, peer_water) = match side {
         Client => (0u64, 1u64),
         Server => (1u64, 0u64),
     }
     let ctrl_lim: u64 = int.widen(limits.control_bytes)
     let _ = ctrl_lim
-    Session(side: side, role: role, link: link, address_mode: address_mode, limits: limits, phase: Connecting, ingress_failure: None, scope: None, setup_authority: b"", setup_path: b"", setup_token: None, setup_sent: false, setup_received: false, goaway_received: false, goaway_sent: false, peer_max_control: codec.DEFAULT_MAX_CONTROL, peer_max_filter_ranges: 0, peer_max_request_updates: 0, local_control: None, peer_control: None, peer_control_buf: list.with_capacity(256), next_req_id: next_req, next_alias: 0, next_tag: 1, peer_watermark: peer_water, peer_seen_ids: std.set.new(), peer_bidi_heads: list.new(), requests: list.new(), uni_heads: list.new(), early_streams: list.new(), dropped_early_datagrams: 0, padding_streams: list.new(), rx_subgroups: list.new(), finished_rx_subgroups: list.new(), rx_fetches: list.new(), tx_subgroups: list.new(), dead_subgroups: list.new(), pub_tracks: list.new(), guards: list.new(), outgoing: list.new(), outgoing_bytes: 0, seen_bytes: 0, timed_out_objects: 0, datagram_payload_copies: 0, timed_out_subgroups: 0, now: 0)
+    Session(side: side, role: role, link: link, address_mode: address_mode, limits: limits,
+        phase: Connecting, ingress_failure: None, scope: None, setup_authority: b"",
+        setup_path: b"", setup_token: None, setup_sent: false, setup_received: false,
+        goaway_received: false, goaway_sent: false, peer_max_control: codec.DEFAULT_MAX_CONTROL,
+        peer_max_filter_ranges: 0, peer_max_request_updates: 0, local_control: None,
+        peer_control: None, peer_control_buf: list.with_capacity(256), next_req_id: next_req,
+        next_alias: 0, next_tag: 1, peer_watermark: peer_water, peer_seen_ids: std.set.new(),
+        peer_bidi_heads: list.new(), requests: list.new(), uni_heads: list.new(),
+        early_streams: list.new(), dropped_early_datagrams: 0, padding_streams: list.new(),
+        rx_subgroups: list.new(), finished_rx_subgroups: list.new(), rx_fetches: list.new(),
+        tx_subgroups: list.new(), dead_subgroups: list.new(), pub_tracks: list.new(),
+        guards: list.new(), outgoing: list.new(), outgoing_bytes: 0, seen_bytes: 0,
+        timed_out_objects: 0, datagram_payload_copies: 0, timed_out_subgroups: 0, now: 0)
 }
 
 /// Optional client SETUP options (AUTHORITY, PATH, AUTHORIZATION TOKEN) before SETUP is sent.
-pub fn configure_setup(mut s: Session, take authority: Bytes, take path: Bytes, take token: Option[Bytes]) {
+pub fn configure_setup(mut s: Session, take authority: Bytes, take path: Bytes, take token: Option[
+    Bytes]) {
     s.setup_authority = take authority
     s.setup_path = take path
     s.setup_token = take token
@@ -75,7 +89,8 @@ fn is_client(s: Session) -> bool {
     }
 }
 
-fn fail_session[D](mut s: Session, mut io: LinkIo[D], code: u64, reason: Bytes, mut out: List[Event]) {
+fn fail_session[D](mut s: Session, mut io: LinkIo[D], code: u64, reason: Bytes, mut out: List[
+    Event]) {
     if s.phase == Ended {
         return
     }
@@ -123,7 +138,8 @@ fn send_setup[D](mut s: Session, mut io: LinkIo[D], mut out: List[Event]) {
             return
         },
     }
-    tx_priority(s.link, mut io, id, quic.Priority(urgency: URGENCY_CONTROL, order: 0, then: 0))
+    tx_priority(s.link, mut io, id, quic.Priority(urgency: URGENCY_CONTROL, then_high: 0, order: 0,
+        then: 0))
     s.local_control = Some(id)
     let mut opts: List[codec.KeyValue] = list.new()
     let in_setup = s.address_mode == InSetup
@@ -142,7 +158,8 @@ fn send_setup[D](mut s: Session, mut io: LinkIo[D], mut out: List[Event]) {
         list.push(mut opts, Data(kind: OPT_AUTHORITY, value: clone(s.setup_authority)))
     }
     if s.limits.filter_ranges > 0 {
-        list.push(mut opts, Number(kind: OPT_MAX_FILTER_RANGES, value: int.widen(s.limits.filter_ranges)))
+        list.push(mut opts, Number(kind: OPT_MAX_FILTER_RANGES, value: int.widen(
+            s.limits.filter_ranges)))
     }
     list.push(mut opts, Data(kind: OPT_MOQT_IMPLEMENTATION, value: b"hirsel-moq/23"))
     list.push(mut opts, Number(kind: OPT_MAX_REQUEST_UPDATES, value: DEFAULT_MAX_REQUEST_UPDATES))
@@ -153,7 +170,8 @@ fn send_setup[D](mut s: Session, mut io: LinkIo[D], mut out: List[Event]) {
         list.push(mut opts, Data(kind: OPT_MAX_CONTROL_MESSAGE_SIZE, value: take mc))
     }
     let mut wire: Bytes = list.new()
-    if let Error(_) = codec.write_message(Setup(options: take opts), codec.DEFAULT_MAX_CONTROL, mut wire) {
+    if let Error(_) = codec.write_message(Setup(options: take opts), codec.DEFAULT_MAX_CONTROL,
+        mut wire) {
         fail_session(mut s, mut io, ERR_INTERNAL_ERROR, b"setup encode failed", mut out)
         return
     }
@@ -182,7 +200,8 @@ pub fn accept_setup[D](mut s: Session, mut io: LinkIo[D], take ok: Result[Scope,
     }
 }
 
-pub fn send_goaway[D](mut s: Session, mut io: LinkIo[D], uri: Bytes, timeout: u64) -> Result[(), MoqError] {
+pub fn send_goaway[D](mut s: Session, mut io: LinkIo[D], uri: Bytes, timeout: u64) -> Result[(),
+    MoqError] {
     if s.phase == Ended || s.goaway_sent {
         return Error(State)
     }
@@ -193,7 +212,8 @@ pub fn send_goaway[D](mut s: Session, mut io: LinkIo[D], uri: Bytes, timeout: u6
         return Error(InvalidParam)
     }
     let mut wire: Bytes = list.new()
-    if let Error(e) = codec.write_message(Goaway(uri: clone(uri), timeout: timeout), s.peer_max_control, mut wire) {
+    if let Error(e) = codec.write_message(Goaway(uri: clone(uri), timeout: timeout),
+        s.peer_max_control, mut wire) {
         return Error(Wire(e))
     }
     s.goaway_sent = true
@@ -201,7 +221,8 @@ pub fn send_goaway[D](mut s: Session, mut io: LinkIo[D], uri: Bytes, timeout: u6
     Ok(())
 }
 
-pub fn receive[D](mut s: Session, mut io: LinkIo[D], now: u64, events: List[AddressedEvent], mut out: List[Event]) {
+pub fn receive[D](mut s: Session, mut io: LinkIo[D], now: u64, events: List[AddressedEvent],
+    mut out: List[Event]) {
     s.now = now
     for ev in events {
         if s.phase == Ended {
@@ -221,7 +242,8 @@ pub fn poll[D](mut s: Session, mut io: LinkIo[D], now: u64) -> Option[u64] {
     poll_subgroup_timeouts(mut s, mut io, now)
 }
 
-fn receive_link[D](mut s: Session, mut io: LinkIo[D], now: u64, ev: LinkEvent, mut out: List[Event]) {
+fn receive_link[D](mut s: Session, mut io: LinkIo[D], now: u64, ev: LinkEvent, mut out: List[
+    Event]) {
     s.now = now
     if s.phase == Ended {
         return
@@ -232,13 +254,15 @@ fn receive_link[D](mut s: Session, mut io: LinkIo[D], now: u64, ev: LinkEvent, m
             clear_session_state(mut s)
             list.push(mut out, Closed(code: code))
         },
-        InvalidProtocol => fail_session(mut s, mut io, ERR_PROTOCOL_VIOLATION, b"wrong transport protocol", mut out),
+        InvalidProtocol => fail_session(mut s, mut io, ERR_PROTOCOL_VIOLATION,
+            b"wrong transport protocol", mut out),
         Ready(max_datagram: max_datagram) => {
             if s.phase != Connecting {
                 return
             }
             if max_datagram == 0 {
-                fail_session(mut s, mut io, ERR_PROTOCOL_VIOLATION, b"datagram extension required", mut out)
+                fail_session(mut s, mut io, ERR_PROTOCOL_VIOLATION, b"datagram extension required",
+                    mut out)
                 return
             }
             s.phase = AwaitingSetup
@@ -256,30 +280,37 @@ fn receive_link[D](mut s: Session, mut io: LinkIo[D], now: u64, ev: LinkEvent, m
 
 fn on_live_event[D](mut s: Session, mut io: LinkIo[D], ev: LinkEvent, mut out: List[Event]) {
     match ev {
-        Opened(stream: stream, bidi: bidi) => on_stream_opened(mut s, mut io, stream, bidi, mut out),
+        Opened(stream: stream, bidi: bidi) => on_stream_opened(mut s, mut io, stream, bidi,
+            mut out),
         Readable(stream) => on_stream_readable(mut s, mut io, stream, mut out),
         Writable(stream) => {
             let _ = flush_outgoing(mut s, mut io, stream)
         },
         Acked(stream) => on_stream_acked(mut s, stream),
-        Reset(stream: stream, code: code, ..) => on_stream_reset(mut s, mut io, stream, code, mut out),
-        Stopped(stream: stream, code: code) => on_stream_stopped(mut s, mut io, stream, code, mut out),
+        Reset(stream: stream, code: code, ..) => on_stream_reset(mut s, mut io, stream, code,
+            mut out),
+        Stopped(stream: stream, code: code) => on_stream_stopped(mut s, mut io, stream, code,
+            mut out),
         Datagram(data) => on_datagram(mut s, mut io, quic.payload_share(data), mut out),
         _ => {},
     }
 }
 
-fn on_stream_opened[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, bidi: bool, mut out: List[Event]) {
+fn on_stream_opened[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, bidi: bool,
+    mut out: List[Event]) {
     if bidi {
-        list.push(mut s.peer_bidi_heads, UniHead(stream: stream, buf: list.with_capacity(128), fin: false))
+        list.push(mut s.peer_bidi_heads, UniHead(stream: stream, buf: list.with_capacity(128),
+            fin: false))
         bidi_head_readable(mut s, mut io, list.len(s.peer_bidi_heads) - 1, mut out)
     } else {
-        list.push(mut s.uni_heads, UniHead(stream: stream, buf: list.with_capacity(128), fin: false))
+        list.push(mut s.uni_heads, UniHead(stream: stream, buf: list.with_capacity(128),
+            fin: false))
         uni_head_readable(mut s, mut io, list.len(s.uni_heads) - 1, mut out)
     }
 }
 
-fn on_stream_readable[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, mut out: List[Event]) {
+fn on_stream_readable[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, mut out: List[
+    Event]) {
     if s.peer_control == Some(stream) {
         control_readable(mut s, mut io, mut out)
         return
@@ -321,7 +352,8 @@ fn on_stream_readable[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, 
     }
 }
 
-fn on_stream_reset[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, code: u64, mut out: List[Event]) {
+fn on_stream_reset[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, code: u64,
+    mut out: List[Event]) {
     if s.peer_control == Some(stream) {
         fail_session(mut s, mut io, ERR_CLOSED_CONTROL_STREAM, b"control stream reset", mut out)
         return
@@ -343,7 +375,8 @@ fn on_stream_reset[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, cod
     remove_rx_stream(mut s, stream)
 }
 
-fn on_stream_stopped[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, code: u64, mut out: List[Event]) {
+fn on_stream_stopped[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, code: u64,
+    mut out: List[Event]) {
     if s.local_control == Some(stream) {
         fail_session(mut s, mut io, ERR_CLOSED_CONTROL_STREAM, b"control stream stopped", mut out)
         return
@@ -399,7 +432,8 @@ fn control_readable[D](mut s: Session, mut io: LinkIo[D], mut out: List[Event]) 
             }
         }
         if fin || reset != None {
-            fail_session(mut s, mut io, ERR_CLOSED_CONTROL_STREAM, b"control stream closed", mut out)
+            fail_session(mut s, mut io, ERR_CLOSED_CONTROL_STREAM, b"control stream closed",
+                mut out)
             return
         }
         if list.len(s.peer_control_buf) < max_cap {
@@ -416,7 +450,8 @@ fn refusal_code(e: codec.WireError) -> u64 {
     }
 }
 
-fn on_control_message[D](mut s: Session, mut io: LinkIo[D], take msg: codec.Message, mut out: List[Event]) {
+fn on_control_message[D](mut s: Session, mut io: LinkIo[D], take msg: codec.Message, mut out: List[
+    Event]) {
     match take msg {
         Setup(options: options) => {
             if s.setup_received {
@@ -443,12 +478,14 @@ fn on_control_message[D](mut s: Session, mut io: LinkIo[D], take msg: codec.Mess
             list.push(mut out, Goaway(uri: uri))
         },
         _ => {
-            fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected control message", mut out)
+            fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected control message",
+                mut out)
         },
     }
 }
 
-fn handle_setup[D](mut s: Session, mut io: LinkIo[D], options: List[codec.KeyValue], mut out: List[Event]) {
+fn handle_setup[D](mut s: Session, mut io: LinkIo[D], options: List[codec.KeyValue], mut out: List[
+    Event]) {
     let mut authority: Bytes = b""
     let mut path: Bytes = b""
     let mut tok: Option[Bytes] = None
@@ -473,7 +510,8 @@ fn handle_setup[D](mut s: Session, mut io: LinkIo[D], options: List[codec.KeyVal
                     path = clone(value)
                 } else if kind == OPT_AUTHORITY {
                     if is_client(s) || !in_setup {
-                        fail_session(mut s, mut io, ERR_INVALID_AUTHORITY, b"authority disallowed", mut out)
+                        fail_session(mut s, mut io, ERR_INVALID_AUTHORITY, b"authority disallowed",
+                            mut out)
                         return
                     }
                     authority = clone(value)
@@ -481,11 +519,13 @@ fn handle_setup[D](mut s: Session, mut io: LinkIo[D], options: List[codec.KeyVal
                     let mut at = 0u64
                     match codec.read_token(value, mut at, list.len(value)) {
                         Ok(Delete(..)) => {
-                            fail_session(mut s, mut io, ERR_ROLE_VIOLATION, b"delete in setup", mut out)
+                            fail_session(mut s, mut io, ERR_ROLE_VIOLATION, b"delete in setup",
+                                mut out)
                             return
                         },
                         Ok(UseAlias(..)) => {
-                            fail_session(mut s, mut io, ERR_ROLE_VIOLATION, b"alias in setup", mut out)
+                            fail_session(mut s, mut io, ERR_ROLE_VIOLATION, b"alias in setup",
+                                mut out)
                             return
                         },
                         Ok(Register(value: v, ..)) => {
@@ -495,7 +535,8 @@ fn handle_setup[D](mut s: Session, mut io: LinkIo[D], options: List[codec.KeyVal
                             tok = Some(v)
                         },
                         Error(e) => {
-                            fail_session(mut s, mut io, refusal_code(e), b"bad setup token", mut out)
+                            fail_session(mut s, mut io, refusal_code(e), b"bad setup token",
+                                mut out)
                             return
                         },
                     }

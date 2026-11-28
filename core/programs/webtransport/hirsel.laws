@@ -1,14 +1,14 @@
 hirsel.laws 1
-webtransport@1/laws/buffered_streams_bounded src=8a87653789f57da1 sig=11578aaf0cdec7ea run=c2c0c6612d4cbb79 bug=96282590340bd27c oracle=76b05a6f342fa887 rows=pending
-webtransport@1/laws/capsule_totality_property src=c86ef8bbf03c7b5c sig=ada457f46119c604 run=c2c0c6612d4cbb79 bug=2efebd89b12e2f7a oracle=90bbe932424ad9d9 rows=pending
-webtransport@1/laws/certificate_rotation_accepts_either src=484dc088d5deca6d sig=ba04a7068823b70a run=c2c0c6612d4cbb79 bug=06b83303e3d1f78e oracle=81b554894f74dcb1 rows=pending
+webtransport@1/laws/buffered_streams_bounded src=08f018e8330a24b2 sig=11578aaf0cdec7ea run=c2c0c6612d4cbb79 bug=96282590340bd27c oracle=76b05a6f342fa887 rows=pending
+webtransport@1/laws/capsule_totality_property src=9a3e1dc1596dbfca sig=ada457f46119c604 run=c2c0c6612d4cbb79 bug=2efebd89b12e2f7a oracle=90bbe932424ad9d9 rows=pending
+webtransport@1/laws/certificate_rotation_accepts_either src=e77974e88df2a59c sig=ba04a7068823b70a run=c2c0c6612d4cbb79 bug=06b83303e3d1f78e oracle=81b554894f74dcb1 rows=pending
 webtransport@1/laws/codepoints_match_draft src=9252e31d486b0442 sig=58c4181dec08a6db run=c2c0c6612d4cbb79 bug=dbd33b71b61e4ef7 oracle=d6234ba3970c4caa rows=pending
 webtransport@1/laws/huffman_round_trip_and_vectors src=50698d3139a1d36e sig=7faa450eb3d30f8a run=c2c0c6612d4cbb79 bug=2099c4d65433dd9e oracle=e3196c115b992313 rows=pending
-webtransport@1/laws/pooled_datagrams_stay_with_their_session src=c086d908a93b4edf sig=27529067397166e1 run=c2c0c6612d4cbb79 bug=7d57224474afafae oracle=1ea01027744cb8dd rows=pending
-webtransport@1/laws/pooled_streams_stay_with_their_session src=a8b1958d6e09b0d3 sig=2f6287b1b7cb3dfd run=c2c0c6612d4cbb79 bug=1fc152d586aca469 oracle=de323e17fc736f13 rows=pending
+webtransport@1/laws/pooled_datagrams_stay_with_their_session src=f67b421f20f909a3 sig=bc124b97b372a381 run=c2c0c6612d4cbb79 bug=7d57224474afafae oracle=1ea01027744cb8dd rows=pending
+webtransport@1/laws/pooled_streams_stay_with_their_session src=9a1e4cac510e4d20 sig=723074ee2e092cd1 run=c2c0c6612d4cbb79 bug=1fc152d586aca469 oracle=de323e17fc736f13 rows=pending
 webtransport@1/laws/qpack_static_vectors src=71c2cbd2718dccd3 sig=ae1bcfe24d4714b2 run=c2c0c6612d4cbb79 bug=8eafda5ca2419c78 oracle=d56e927592378f38 rows=pending
 webtransport@1/laws/refusals src=fc8714747de2a15a sig=2328f73ded233429 run=c2c0c6612d4cbb79 bug=eeaf2246e227b49d oracle=9d77d4929a698335 rows=pending
 webtransport@1/laws/reviewed_qpack src=94151af6312d1b52 sig=6611c8ef430f5453 run=c2c0c6612d4cbb79 bug=fb00c8e4e6e36a99 oracle=a1297070d3a584be rows=pending
-webtransport@1/laws/session_close_resets_its_streams_only src=735be6b75880106b sig=fe60bb2c8f6a4b15 run=c2c0c6612d4cbb79 bug=fe337fcdfb7ae9ac oracle=ffb94aca18273b67 rows=pending
-webtransport@1/laws/session_flow_control src=6911d137a058b54e sig=9750ee627d203d8e run=c2c0c6612d4cbb79 bug=35069726e1940d44 oracle=15147efb11c72879 rows=pending
+webtransport@1/laws/session_close_resets_its_streams_only src=4f48e6bd21cbc7f1 sig=07188dc71aff549f run=c2c0c6612d4cbb79 bug=fe337fcdfb7ae9ac oracle=ffb94aca18273b67 rows=pending
+webtransport@1/laws/session_flow_control src=7f29a67d318fe40b sig=9750ee627d203d8e run=c2c0c6612d4cbb79 bug=35069726e1940d44 oracle=15147efb11c72879 rows=pending
 webtransport@1/laws/wire_decode_totality_property src=9cb1533810c1f2e8 sig=ebfbc47ba927e23e run=c2c0c6612d4cbb79 bug=6cc23aa4581dbc0e oracle=5c7ae2d076d5dec4 rows=pending

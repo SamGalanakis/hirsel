@@ -2,7 +2,8 @@
 /// Read stream `s` into `dst` until QUIC has nothing more or `dst` holds
 /// `MAX_RX_BUFFERED` unread bytes past `at`. Returns true when it stopped at that bound,
 /// so QUIC may still hold bytes and flow control holds the sender back.
-fn fill_rx(mut ep: quic.Endpoint, h: quic.ConnectionHandle, s: quic.StreamId, mut dst: Bytes, at: u64) -> bool {
+fn fill_rx(mut ep: quic.Endpoint, h: quic.ConnectionHandle, s: quic.StreamId, mut dst: Bytes,
+    at: u64) -> bool {
     let mut tmp: Bytes = list.with_capacity(4096)
     loop {
         if list.len(dst) - at >= MAX_RX_BUFFERED {
@@ -95,7 +96,8 @@ fn drain_ctrl(mut hub: LinkHub, i: u64, mut budget: u64, mut out: List[LinkEvent
                 hub.links[i].peer = Some(claimed)
                 list.push(mut out, LinkUp(peer: claimed, handle: h))
             },
-            Ok(Layer(room_num: rn, term: term, seq: seq, layer_num: ln, participant: p, epoch: ep, kind: k, rid: take rid)) => {
+            Ok(Layer(room_num: rn, term: term, seq: seq, layer_num: ln, participant: p, epoch: ep,
+                kind: k, rid: take rid)) => {
                 if hub.links[i].peer == None {
                     fail_link(mut hub, i, ERR_BAD_PEER, b"message before hello")
                     return
@@ -104,7 +106,8 @@ fn drain_ctrl(mut hub: LinkHub, i: u64, mut budget: u64, mut out: List[LinkEvent
                     fail_link(mut hub, i, ERR_MALFORMED_CTRL, b"bad layer")
                     return
                 }
-                list.push(mut out, ControlIn(handle: h, msg: Layer(room_num: rn, term: term, seq: seq, layer_num: ln, participant: p, epoch: ep, kind: k, rid: take rid)))
+                list.push(mut out, ControlIn(handle: h, msg: Layer(room_num: rn, term: term,
+                    seq: seq, layer_num: ln, participant: p, epoch: ep, kind: k, rid: take rid)))
             },
             Ok(take msg) => {
                 // CAS-2: nothing on the control stream counts before a verified `Hello`.
@@ -124,7 +127,8 @@ fn drain_ctrl(mut hub: LinkHub, i: u64, mut budget: u64, mut out: List[LinkEvent
     }
 }
 
-fn record_rx_layer(mut hub: LinkHub, i: u64, room_num: u32, term: u64, layer_num: u32, participant: u64, epoch: u64, kind: sdp.Codec, take rid: Bytes) -> bool {
+fn record_rx_layer(mut hub: LinkHub, i: u64, room_num: u32, term: u64, layer_num: u32,
+    participant: u64, epoch: u64, kind: sdp.Codec, take rid: Bytes) -> bool {
     if count_link_layers(hub.links[i]) >= int.widen(hub.limits.layers) {
         return false
     }
@@ -134,7 +138,8 @@ fn record_rx_layer(mut hub: LinkHub, i: u64, room_num: u32, term: u64, layer_num
             if list.len(hub.links[i].rooms) >= int.widen(hub.limits.rooms) {
                 return false
             }
-            list.push(mut hub.links[i].rooms, new_room(room_num, term, None, list.new(), 0, list.new()))
+            list.push(mut hub.links[i].rooms, new_room(room_num, term, None, list.new(), 0,
+                list.new()))
             list.len(hub.links[i].rooms) - 1
         },
     }
@@ -144,7 +149,8 @@ fn record_rx_layer(mut hub: LinkHub, i: u64, room_num: u32, term: u64, layer_num
         }
     }
     hub.links[i].rooms[ri].last_rx_layer = Some(layer_num)
-    list.push(mut hub.links[i].rooms[ri].rx_layers, LayerInfo(room_num: room_num, term: term, layer_num: layer_num, participant: participant, epoch: epoch, kind: kind, rid: take rid))
+    list.push(mut hub.links[i].rooms[ri].rx_layers, LayerInfo(room_num: room_num, term: term,
+        layer_num: layer_num, participant: participant, epoch: epoch, kind: kind, rid: take rid))
     true
 }
 
@@ -163,7 +169,8 @@ fn serve_room(mut hub: LinkHub, i: u64, ri: u64, mut out: List[LinkEvent]) {
             RoomEnded => return,
             _ => (),
         }
-        let (new_at, moved) = compact_frame_buf(mut hub.links[i].rooms[ri].rx, hub.links[i].rooms[ri].rx_at)
+        let (new_at, moved) = compact_frame_buf(mut hub.links[i].rooms[ri].rx,
+            hub.links[i].rooms[ri].rx_at)
         hub.links[i].rooms[ri].rx_at = new_at
         hub.counts.rx_bytes_shifted += moved
         if budget == 0 {
@@ -179,7 +186,8 @@ fn serve_room(mut hub: LinkHub, i: u64, ri: u64, mut out: List[LinkEvent]) {
 
 /// Drain whole frames from room `ri`'s receive buffer while `budget` lasts. Returns
 /// `RoomEnded` once the room was detached for a malformed frame.
-fn drain_room(mut hub: LinkHub, i: u64, ri: u64, mut budget: u64, mut out: List[LinkEvent]) -> RoomDrain {
+fn drain_room(mut hub: LinkHub, i: u64, ri: u64, mut budget: u64, mut out: List[LinkEvent]) ->
+    RoomDrain {
     let h = hub.links[i].handle
     let rn = hub.links[i].rooms[ri].room_num
     while budget > 0 {
@@ -219,7 +227,8 @@ fn serve_unbound(mut hub: LinkHub, i: u64, ui: u64, mut out: List[LinkEvent]) {
     hub.links[i].unbound_streams[ui].rx_more = more
     let mut at = hub.links[i].unbound_streams[ui].rx_at
     let opened = match take_raw_frame(hub.links[i].unbound_streams[ui].rx, mut at) {
-        Ok(Some((tag, start, end))) => match decode_room_msg(tag, hub.links[i].unbound_streams[ui].rx, start, end) {
+        Ok(Some((tag, start, end))) => match decode_room_msg(tag,
+            hub.links[i].unbound_streams[ui].rx, start, end) {
             Ok(RoomOpen(room_num: rn, term: term, seq: _)) => Some((rn, term)),
             _ => None,
         },
@@ -248,12 +257,14 @@ fn serve_unbound(mut hub: LinkHub, i: u64, ui: u64, mut out: List[LinkEvent]) {
             list.len(hub.links[i].rooms) - 1
         },
     }
-    let _ = quic.priority(mut hub.ep, h, s, quic.Priority(urgency: 1, order: int.widen(rn), then: 0))
+    let _ = quic.priority(mut hub.ep, h, s, quic.Priority(urgency: 1, then_high: 0,
+        order: int.widen(rn), then: 0))
     flush_room(mut hub, i, ri)
     serve_room(mut hub, i, ri, mut out)
 }
 
-fn on_datagram(mut hub: LinkHub, h: quic.ConnectionHandle, take slice: quic.PayloadSlice, mut out: List[LinkEvent]) {
+fn on_datagram(mut hub: LinkHub, h: quic.ConnectionHandle, take slice: quic.PayloadSlice,
+    mut out: List[LinkEvent]) {
     // Media datagrams sit outside `MAX_EVENTS_PER_DRAIN`: each is one QUIC event already
     // bounded by QUIC-7's datagram buffer, and one not routed at once is dropped, never queued.
     let parsed = read_media_datagram(quic.payload_bytes(slice))
@@ -276,7 +287,10 @@ fn on_datagram(mut hub: LinkHub, h: quic.ConnectionHandle, take slice: quic.Payl
                 return
             }
             hub.counts.datagrams_received += 1
-            list.push(mut out, MediaIn(handle: h, room_num: room_num, layer_num: layer_num, layer: LayerInfo(room_num: layer.room_num, term: layer.term, layer_num: layer.layer_num, participant: layer.participant, epoch: layer.epoch, kind: layer.kind, rid: clone(layer.rid)), rtp: take rtp))
+            list.push(mut out, MediaIn(handle: h, room_num: room_num, layer_num: layer_num,
+                layer: LayerInfo(room_num: layer.room_num, term: layer.term,
+                layer_num: layer.layer_num, participant: layer.participant, epoch: layer.epoch,
+                kind: layer.kind, rid: clone(layer.rid)), rtp: take rtp))
             return
         }
     }
@@ -284,7 +298,8 @@ fn on_datagram(mut hub: LinkHub, h: quic.ConnectionHandle, take slice: quic.Payl
     hub.counts.unknown_layer += 1
 }
 
-fn on_closed(mut hub: LinkHub, h: quic.ConnectionHandle, reason: quic.CloseReason, mut out: List[LinkEvent]) {
+fn on_closed(mut hub: LinkHub, h: quic.ConnectionHandle, reason: quic.CloseReason, mut out: List[
+    LinkEvent]) {
     let peer = match link_at(hub, h) {
         Some(i) => {
             let p = hub.links[i].peer

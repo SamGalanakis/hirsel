@@ -41,9 +41,9 @@ fn accept_all_subscribes(mut server: Peer) {
     }
 }
 
-/// Drain one single QUIC packet at a time from server to client (and ACKs back), recording
-/// each object's first payload tag byte in the order the client receives it.
-fn drain_one_by_one(mut server: Peer, mut client: Peer, mut now: u64) -> Bytes {
+/// Deliver each polled batch in packet order before advancing time, dispatching MoQ events
+/// after each packet so the payload tags reflect when the client received each object.
+fn drain_in_order(mut server: Peer, mut client: Peer, mut now: u64) -> Bytes {
     let mut wire: Bytes = list.with_capacity(64 * 1200)
     let mut packets: List[quic.Output] = list.with_capacity(65)
     let mut order_tags: Bytes = list.new()
@@ -53,12 +53,16 @@ fn drain_one_by_one(mut server: Peer, mut client: Peer, mut now: u64) -> Bytes {
         let _ = quic.poll(mut server.io.driver.q, now, mut wire, mut packets)
         let mut sent = 0u64
         for output in packets {
-            if let Transmit(at: at, len: len, ..) = output {
+            if let Transmit(..) = output {
                 sent += 1
-                // Commit and deliver one packet at a time to observe QUIC scheduling order.
-                quic.committed(mut server.io.driver.q, now, 1)
+            }
+        }
+        quic.committed(mut server.io.driver.q, now, sent)
+        for output in packets {
+            if let Transmit(at: at, len: len, ..) = output {
                 let mut qev: List[quic.Event] = list.new()
-                quic.receive_datagram(mut client.io.driver.q, now, MOQ_SERVER_ADDR, 0, mut wire, at, len, mut qev)
+                quic.receive_datagram(mut client.io.driver.q, now, MOQ_SERVER_ADDR, 0, mut wire, at,
+                    len, mut qev)
                 if let Some(mut cs) = client.sess {
                     let mut tevs: List[moq.AddressedEvent] = list.new()
                     moq.native_events(mut client.io.driver, qev, mut tevs)
@@ -72,7 +76,6 @@ fn drain_one_by_one(mut server: Peer, mut client: Peer, mut now: u64) -> Bytes {
                         }
                     }
                 }
-                break
             }
         }
         // Let client send ACKs back so server's cwnd advances smoothly.
@@ -100,8 +103,8 @@ fn drain_one_by_one(mut server: Peer, mut client: Peer, mut now: u64) -> Bytes {
 }
 
 /// bug: MoQ priority mapping mis-orders subscriber priority, publisher priority, group order
-/// (including large groups near 2^32 and 2^47), subgroup ids past 2^16, or datagram vs stream,
-/// or wraps group rank past 2^48 instead of ending with PUBLISH_DONE.
+/// (including large groups near 2^32 and 2^47), bit 63 of object and subgroup ids,
+/// or datagram vs stream, or wraps group rank past 2^48 instead of ending with PUBLISH_DONE.
 /// oracle: moqt-23 §5.1.2 and MOQ-5 worked by hand.
 @test
 fn priority_order() -> Result[(), ()] {
@@ -115,37 +118,53 @@ fn priority_order() -> Result[(), ()] {
     let tr_hi = track(ns1(b"prio"), b"hi")
     let tr_lo = track(ns1(b"prio"), b"lo")
     if let Some(mut cs) = client.sess {
-        let _ = result.unwrap(moq.subscribe_with(mut cs, mut client.io, 10, clone(tr_hi), NoFilter, 10, Descending, 0, 0, None))
-        let _ = result.unwrap(moq.subscribe_with(mut cs, mut client.io, 10, clone(tr_lo), NoFilter, 20, Ascending, 0, 0, None))
+        let _ = result.unwrap(moq.subscribe_with(mut cs, mut client.io, 10, clone(tr_hi), NoFilter,
+            10, Descending, 0, 0, None))
+        let _ = result.unwrap(moq.subscribe_with(mut cs, mut client.io, 10, clone(tr_lo), NoFilter,
+            20, Ascending, 0, 0, None))
     }
     settle_pair(mut client, mut server, 11)
     accept_all_subscribes(mut server)
     settle_pair(mut client, mut server, 12)
     list.clear(mut client.events)
-    // Scripted queue pushed in REVERSE priority order before any packet leaves server:
+    // Queue in reverse priority order before any packet leaves the server.
     // Each payload is ~900 bytes so each object takes its own QUIC packet (MTU 1200).
     // Expected §5.1.2 sending order:
     //   1. tag 1: tr_hi (sub 10), pub 5,  group 2^47 + 5 (desc -> highest), Datagram obj 2 (dg < stream)
-    //   2. tag 2: tr_hi (sub 10), pub 5,  group 2^47 + 5 (desc),             Subgroup 70000
-    //   3. tag 3: tr_hi (sub 10), pub 5,  group 2^47 + 5 (desc),             Subgroup 70001
-    //   4. tag 4: tr_hi (sub 10), pub 5,  group 2^32 + 9 (desc -> lower),    Subgroup 1
-    //   5. tag 5: tr_hi (sub 10), pub 50, group 2^47 + 9 (lower pub prio),   Subgroup 0
-    //   6. tag 6: tr_lo (sub 20), pub 1,  group 2^32 + 1 (asc -> lower grp), Subgroup 0
-    //   7. tag 7: tr_lo (sub 20), pub 1,  group 2^47 + 1 (asc -> higher grp),Subgroup 0
+    //   2. tag 8: same subscriber, publisher and group, Datagram obj 2^63 + 2
+    //   3. tag 2: same subscriber, publisher and group, Subgroup 70000
+    //   4. tag 3: same subscriber, publisher and group, Subgroup 70001
+    //   5. tag 9: same subscriber, publisher and group, Subgroup 2^63 + 70000
+    //   6. tag 4: tr_hi (sub 10), pub 5,  group 2^32 + 9 (desc -> lower),    Subgroup 1
+    //   7. tag 5: tr_hi (sub 10), pub 50, group 2^47 + 9 (lower pub prio),   Subgroup 0
+    //   8. tag 6: tr_lo (sub 20), pub 1,  group 2^32 + 1 (asc -> lower grp), Subgroup 0
+    //   9. tag 7: tr_lo (sub 20), pub 1,  group 2^47 + 1 (asc -> higher grp),Subgroup 0
     let g32: u64 = 1u64 << 32
     let g47: u64 = 1u64 << 47
+    let high_id: u64 = 1u64 << 63
     if let Some(mut ss) = server.sess {
-        result.unwrap(moq.publish_at(mut ss, mut server.io, 20, 20, make_obj(clone(tr_lo), g47 + 1, 0, 0, Subgroup, 1, make_tagged_payload(7, 900)), true))
-        result.unwrap(moq.publish_at(mut ss, mut server.io, 20, 20, make_obj(clone(tr_lo), g32 + 1, 0, 0, Subgroup, 1, make_tagged_payload(6, 900)), true))
-        result.unwrap(moq.publish_at(mut ss, mut server.io, 20, 20, make_obj(clone(tr_hi), g47 + 9, 0, 0, Subgroup, 50, make_tagged_payload(5, 900)), true))
-        result.unwrap(moq.publish_at(mut ss, mut server.io, 20, 20, make_obj(clone(tr_hi), g32 + 9, 1, 0, Subgroup, 5, make_tagged_payload(4, 900)), true))
-        result.unwrap(moq.publish_at(mut ss, mut server.io, 20, 20, make_obj(clone(tr_hi), g47 + 5, 70001, 1, Subgroup, 5, make_tagged_payload(3, 900)), true))
-        result.unwrap(moq.publish_at(mut ss, mut server.io, 20, 20, make_obj(clone(tr_hi), g47 + 5, 70000, 0, Subgroup, 5, make_tagged_payload(2, 900)), true))
-        result.unwrap(moq.publish_at(mut ss, mut server.io, 20, 20, make_obj(clone(tr_hi), g47 + 5, 0, 2, Datagram, 5, make_tagged_payload(1, 900)), true))
+        result.unwrap(moq.publish_at(mut ss, mut server.io, 20, 20, make_obj(clone(tr_lo), g47 + 1,
+            0, 0, Subgroup, 1, make_tagged_payload(7, 900)), true))
+        result.unwrap(moq.publish_at(mut ss, mut server.io, 20, 20, make_obj(clone(tr_lo), g32 + 1,
+            0, 0, Subgroup, 1, make_tagged_payload(6, 900)), true))
+        result.unwrap(moq.publish_at(mut ss, mut server.io, 20, 20, make_obj(clone(tr_hi), g47 + 9,
+            0, 0, Subgroup, 50, make_tagged_payload(5, 900)), true))
+        result.unwrap(moq.publish_at(mut ss, mut server.io, 20, 20, make_obj(clone(tr_hi), g32 + 9,
+            1, 0, Subgroup, 5, make_tagged_payload(4, 900)), true))
+        result.unwrap(moq.publish_at(mut ss, mut server.io, 20, 20, make_obj(clone(tr_hi), g47 + 5,
+            high_id + 70000, 3, Subgroup, 5, make_tagged_payload(9, 900)), true))
+        result.unwrap(moq.publish_at(mut ss, mut server.io, 20, 20, make_obj(clone(tr_hi), g47 + 5,
+            70001, 1, Subgroup, 5, make_tagged_payload(3, 900)), true))
+        result.unwrap(moq.publish_at(mut ss, mut server.io, 20, 20, make_obj(clone(tr_hi), g47 + 5,
+            70000, 0, Subgroup, 5, make_tagged_payload(2, 900)), true))
+        result.unwrap(moq.publish_at(mut ss, mut server.io, 20, 20, make_obj(clone(tr_hi), g47 + 5,
+            0, high_id + 2, Datagram, 5, make_tagged_payload(8, 900)), true))
+        result.unwrap(moq.publish_at(mut ss, mut server.io, 20, 20, make_obj(clone(tr_hi), g47 + 5,
+            0, 2, Datagram, 5, make_tagged_payload(1, 900)), true))
     }
     let mut t_drain = 30 * MS_NS
-    let got = drain_one_by_one(mut server, mut client, mut t_drain)
-    let want: Bytes = b"\x01\x02\x03\x04\x05\x06\x07"
+    let got = drain_in_order(mut server, mut client, mut t_drain)
+    let want: Bytes = b"\x01\x08\x02\x03\x09\x04\x05\x06\x07"
     if got != want {
         let mut msg = "sending order did not match moqt-23 §5.1.2 priority order: got "
         for b in got {
@@ -158,7 +177,8 @@ fn priority_order() -> Result[(), ()] {
     list.clear(mut client.events)
     let overflow_group: u64 = 1u64 << 48
     if let Some(mut ss) = server.sess {
-        result.unwrap(moq.publish(mut ss, mut server.io, 500 * MS_NS, make_obj(clone(tr_lo), overflow_group, 0, 0, Subgroup, 1, b"overflow")))
+        result.unwrap(moq.publish(mut ss, mut server.io, 500 * MS_NS, make_obj(clone(tr_lo),
+            overflow_group, 0, 0, Subgroup, 1, b"overflow")))
     }
     settle_pair(mut client, mut server, 501 * MS_NS)
     let mut saw_done = false
@@ -183,13 +203,15 @@ fn priority_order() -> Result[(), ()] {
 fn delivery_timeouts_start_and_stop_apart() -> Result[(), ()] {
     // 1. OBJECT 50 ms: header arrived 60 ms before handover -> reset with DELIVERY_TIMEOUT;
     //    handed over at 40 ms -> delivered even if ACK arrives 500 ms later.
-    let lim = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 65536, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 500, max_buffered: 8388608)
+    let lim = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 65536,
+        filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 500, max_buffered: 8388608)
     let mut c1 = native_client(901)
     let mut s1 = native_server(902, lim)
     establish_native(mut c1, mut s1, lim, b"to.test", b"/1", None)
     let tr1 = track(ns1(b"to"), b"obj")
     if let Some(mut cs) = c1.sess {
-        let _ = result.unwrap(moq.subscribe_with(mut cs, mut c1.io, 0, clone(tr1), NoFilter, 10, Ascending, 50, 0, None))
+        let _ = result.unwrap(moq.subscribe_with(mut cs, mut c1.io, 0, clone(tr1), NoFilter, 10,
+            Ascending, 50, 0, None))
     }
     settle_pair(mut c1, mut s1, 1 * MS_NS)
     accept_all_subscribes(mut s1)
@@ -198,15 +220,19 @@ fn delivery_timeouts_start_and_stop_apart() -> Result[(), ()] {
     let t0 = 100 * MS_NS
     if let Some(mut ss) = s1.sess {
         // Group 1, obj 0: born at t0, handed over at t0 + 40 ms (< 50 ms) -> MUST succeed!
-        result.unwrap(moq.publish_at(mut ss, mut s1.io, t0 + 40 * MS_NS, t0, make_obj(clone(tr1), 1, 0, 0, Subgroup, 10, b"ok-40ms"), false))
+        result.unwrap(moq.publish_at(mut ss, mut s1.io, t0 + 40 * MS_NS, t0, make_obj(clone(tr1), 1,
+            0, 0, Subgroup, 10, b"ok-40ms"), false))
         // Group 2, obj 0: open subgroup at t0, then obj 1 born at t0 handed over at t0 + 60 ms (>= 50 ms) -> reset!
-        result.unwrap(moq.publish_at(mut ss, mut s1.io, t0, t0, make_obj(clone(tr1), 2, 0, 0, Subgroup, 10, b"first"), false))
-        result.unwrap(moq.publish_at(mut ss, mut s1.io, t0 + 60 * MS_NS, t0, make_obj(clone(tr1), 2, 0, 1, Subgroup, 10, b"late-60ms"), false))
+        result.unwrap(moq.publish_at(mut ss, mut s1.io, t0, t0, make_obj(clone(tr1), 2, 0, 0,
+            Subgroup, 10, b"first"), false))
+        result.unwrap(moq.publish_at(mut ss, mut s1.io, t0 + 60 * MS_NS, t0, make_obj(clone(tr1), 2,
+            0, 1, Subgroup, 10, b"late-60ms"), false))
         if moq.timed_out_objects(ss) != 1 {
             fail("60ms object did not trigger OBJECT_DELIVERY_TIMEOUT (50ms)")
         }
         // Subsequent object on timed-out subgroup (2, 0) must not open a new stream.
-        result.unwrap(moq.publish_at(mut ss, mut s1.io, t0 + 61 * MS_NS, t0 + 61 * MS_NS, make_obj(clone(tr1), 2, 0, 2, Subgroup, 10, b"after-reset"), false))
+        result.unwrap(moq.publish_at(mut ss, mut s1.io, t0 + 61 * MS_NS, t0 + 61 * MS_NS, make_obj(
+            clone(tr1), 2, 0, 2, Subgroup, 10, b"after-reset"), false))
     }
     // Deliver much later (t0 + 500 ms) — group 1 obj 0 was already handed to quic at 40 ms so it arrives!
     settle_pair(mut c1, mut s1, t0 + 500 * MS_NS)
@@ -226,7 +252,8 @@ fn delivery_timeouts_start_and_stop_apart() -> Result[(), ()] {
         }
     }
     if !saw_40 || saw_60 || saw_after {
-        fail("OBJECT_DELIVERY_TIMEOUT did not send 40ms object or failed to suppress 60ms/follow-up")
+        fail(
+            "OBJECT_DELIVERY_TIMEOUT did not send 40ms object or failed to suppress 60ms/follow-up")
     }
     // 2. SUBGROUP 200 ms: never starts before FIN; fires 200 ms after FIN if un-Acked;
     //    does NOT fire if Acked at 190 ms.
@@ -235,14 +262,16 @@ fn delivery_timeouts_start_and_stop_apart() -> Result[(), ()] {
     establish_native(mut c2, mut s2, lim, b"to.test", b"/2", None)
     let tr2 = track(ns1(b"to"), b"sg")
     if let Some(mut cs) = c2.sess {
-        let _ = result.unwrap(moq.subscribe_with(mut cs, mut c2.io, 0, clone(tr2), NoFilter, 10, Ascending, 0, 200, None))
+        let _ = result.unwrap(moq.subscribe_with(mut cs, mut c2.io, 0, clone(tr2), NoFilter, 10,
+            Ascending, 0, 200, None))
     }
     settle_pair(mut c2, mut s2, 1 * MS_NS)
     accept_all_subscribes(mut s2)
     settle_pair(mut c2, mut s2, 2 * MS_NS)
     // Subgroup (10, 0): open without FIN and poll 400 ms later -> timer MUST NOT fire before FIN!
     if let Some(mut ss) = s2.sess {
-        result.unwrap(moq.publish_at(mut ss, mut s2.io, 10 * MS_NS, 10 * MS_NS, make_obj(clone(tr2), 10, 0, 0, Subgroup, 10, b"open"), false))
+        result.unwrap(moq.publish_at(mut ss, mut s2.io, 10 * MS_NS, 10 * MS_NS, make_obj(clone(tr2),
+            10, 0, 0, Subgroup, 10, b"open"), false))
         let _ = moq.poll(mut ss, mut s2.io, 410 * MS_NS)
         if moq.timed_out_subgroups(ss) != 0 {
             fail("SUBGROUP_DELIVERY_TIMEOUT fired before FIN")
@@ -260,7 +289,8 @@ fn delivery_timeouts_start_and_stop_apart() -> Result[(), ()] {
     }
     // Subgroup (11, 0): FIN at 700 ms, Acked at 890 ms (190 ms later), poll at 950 ms -> NOT reset!
     if let Some(mut ss) = s2.sess {
-        result.unwrap(moq.publish_at(mut ss, mut s2.io, 700 * MS_NS, 700 * MS_NS, make_obj(clone(tr2), 11, 0, 0, Subgroup, 10, b"acked-190"), true))
+        result.unwrap(moq.publish_at(mut ss, mut s2.io, 700 * MS_NS, 700 * MS_NS, make_obj(clone(
+            tr2), 11, 0, 0, Subgroup, 10, b"acked-190"), true))
     }
     settle_pair(mut c2, mut s2, 890 * MS_NS)
     if let Some(mut ss) = s2.sess {
@@ -284,10 +314,14 @@ fn delivery_timeouts_start_and_stop_apart() -> Result[(), ()] {
         moq.set_track_timeouts(mut ss, clone(tr_dg), 100, 30)
     }
     if let Some(mut cs) = c3.sess {
-        let _ = result.unwrap(moq.subscribe_with(mut cs, mut c3.io, 0, clone(tr_min), NoFilter, 10, Ascending, 50, 0, None))
-        let _ = result.unwrap(moq.subscribe_with(mut cs, mut c3.io, 0, clone(tr_pub), NoFilter, 10, Ascending, 0, 0, None))
-        let _ = result.unwrap(moq.subscribe_with(mut cs, mut c3.io, 0, clone(tr_cap), NoFilter, 10, Ascending, 0, 0, None))
-        let _ = result.unwrap(moq.subscribe_with(mut cs, mut c3.io, 0, clone(tr_dg), NoFilter, 10, Ascending, 0, 0, None))
+        let _ = result.unwrap(moq.subscribe_with(mut cs, mut c3.io, 0, clone(tr_min), NoFilter, 10,
+            Ascending, 50, 0, None))
+        let _ = result.unwrap(moq.subscribe_with(mut cs, mut c3.io, 0, clone(tr_pub), NoFilter, 10,
+            Ascending, 0, 0, None))
+        let _ = result.unwrap(moq.subscribe_with(mut cs, mut c3.io, 0, clone(tr_cap), NoFilter, 10,
+            Ascending, 0, 0, None))
+        let _ = result.unwrap(moq.subscribe_with(mut cs, mut c3.io, 0, clone(tr_dg), NoFilter, 10,
+            Ascending, 0, 0, None))
     }
     settle_pair(mut c3, mut s3, 1 * MS_NS)
     accept_all_subscribes(mut s3)
@@ -295,29 +329,41 @@ fn delivery_timeouts_start_and_stop_apart() -> Result[(), ()] {
     let base_t = 1000 * MS_NS
     if let Some(mut ss) = s3.sess {
         // pub 80 + sub 50 -> 50: 45ms passes, 55ms times out.
-        result.unwrap(moq.publish_at(mut ss, mut s3.io, base_t + 45 * MS_NS, base_t, make_obj(clone(tr_min), 1, 0, 0, Subgroup, 10, b"a"), true))
-        result.unwrap(moq.publish_at(mut ss, mut s3.io, base_t + 55 * MS_NS, base_t, make_obj(clone(tr_min), 2, 0, 0, Subgroup, 10, b"b"), true))
+        result.unwrap(moq.publish_at(mut ss, mut s3.io, base_t + 45 * MS_NS, base_t, make_obj(clone(
+            tr_min), 1, 0, 0, Subgroup, 10, b"a"), true))
+        result.unwrap(moq.publish_at(mut ss, mut s3.io, base_t + 55 * MS_NS, base_t, make_obj(clone(
+            tr_min), 2, 0, 0, Subgroup, 10, b"b"), true))
         if moq.timed_out_objects(ss) != 1 {
             fail("pub 80 / sub 50 did not apply 50ms")
         }
         // pub 80 + sub 0 -> 80: 70ms passes, 85ms times out.
-        result.unwrap(moq.publish_at(mut ss, mut s3.io, base_t + 70 * MS_NS, base_t, make_obj(clone(tr_pub), 1, 0, 0, Subgroup, 10, b"c"), true))
-        result.unwrap(moq.publish_at(mut ss, mut s3.io, base_t + 85 * MS_NS, base_t, make_obj(clone(tr_pub), 2, 0, 0, Subgroup, 10, b"d"), true))
+        result.unwrap(moq.publish_at(mut ss, mut s3.io, base_t + 70 * MS_NS, base_t, make_obj(clone(
+            tr_pub), 1, 0, 0, Subgroup, 10, b"c"), true))
+        result.unwrap(moq.publish_at(mut ss, mut s3.io, base_t + 85 * MS_NS, base_t, make_obj(clone(
+            tr_pub), 2, 0, 0, Subgroup, 10, b"d"), true))
         if moq.timed_out_objects(ss) != 2 {
             fail("pub 80 / sub 0 did not apply 80ms")
         }
         // both 0 + max_timeout_ms 500 -> 500: 450ms passes, 510ms times out.
-        result.unwrap(moq.publish_at(mut ss, mut s3.io, base_t + 450 * MS_NS, base_t, make_obj(clone(tr_cap), 1, 0, 0, Subgroup, 10, b"e"), true))
-        result.unwrap(moq.publish_at(mut ss, mut s3.io, base_t + 510 * MS_NS, base_t, make_obj(clone(tr_cap), 2, 0, 0, Subgroup, 10, b"f"), true))
+        result.unwrap(moq.publish_at(mut ss, mut s3.io, base_t + 450 * MS_NS, base_t, make_obj(
+            clone(tr_cap), 1, 0, 0, Subgroup, 10, b"e"), true))
+        result.unwrap(moq.publish_at(mut ss, mut s3.io, base_t + 510 * MS_NS, base_t, make_obj(
+            clone(tr_cap), 2, 0, 0, Subgroup, 10, b"f"), true))
         if moq.timed_out_objects(ss) != 3 {
             fail("both 0 with max_timeout_ms 500 did not apply 500ms cap")
         }
         // Datagram with OBJECT 100ms + SUBGROUP 30ms -> dropped at 30ms, sent at 20ms.
         let dg_props = make_props_timeout(100, 30)
-        let dg_ok = moq.Object(track: clone(tr_dg), group: 1, subgroup: 0, id: 0, mode: Datagram, publisher_priority: 10, status: Normal, properties: clone(dg_props), payload: quic.payload_whole(shared.new(b"dg-ok")))
-        let dg_late = moq.Object(track: clone(tr_dg), group: 1, subgroup: 0, id: 1, mode: Datagram, publisher_priority: 10, status: Normal, properties: take dg_props, payload: quic.payload_whole(shared.new(b"dg-late")))
-        result.unwrap(moq.publish_at(mut ss, mut s3.io, base_t + 20 * MS_NS, base_t, take dg_ok, false))
-        result.unwrap(moq.publish_at(mut ss, mut s3.io, base_t + 30 * MS_NS, base_t, take dg_late, false))
+        let dg_ok = moq.Object(track: clone(tr_dg), group: 1, subgroup: 0, id: 0, mode: Datagram,
+            publisher_priority: 10, status: Normal, properties: clone(dg_props),
+            payload: quic.payload_whole(shared.new(b"dg-ok")))
+        let dg_late = moq.Object(track: clone(tr_dg), group: 1, subgroup: 0, id: 1, mode: Datagram,
+            publisher_priority: 10, status: Normal, properties: take dg_props,
+            payload: quic.payload_whole(shared.new(b"dg-late")))
+        result.unwrap(moq.publish_at(mut ss, mut s3.io, base_t + 20 * MS_NS, base_t, take dg_ok,
+            false))
+        result.unwrap(moq.publish_at(mut ss, mut s3.io, base_t + 30 * MS_NS, base_t, take dg_late,
+            false))
         if moq.timed_out_objects(ss) != 4 {
             fail("datagram with OBJECT 100ms and SUBGROUP 30ms was not dropped at 30ms")
         }
@@ -328,13 +374,16 @@ fn delivery_timeouts_start_and_stop_apart() -> Result[(), ()] {
 fn subscribed_with_send_budget(send_bytes: u64, lim: moq.Limits) -> (Peer, Peer, codec.TrackName) {
     let mut transport = moq.transport_config(lim)
     transport.send_bytes = send_bytes
-    let q = result.unwrap(quic.endpoint(provide.random(9382), moq_endpoint_config(), Some((moq_identity(), take transport))))
-    let mut server = Peer(io: moq.mixed_driver(take q, None, 1), sess: None, pooled: None, pooled_events: list.new(), events: list.new(), raw: list.new(), wt_events: list.new())
+    let q = result.unwrap(quic.endpoint(provide.random(9382), moq_endpoint_config(), Some((
+        moq_identity(), take transport))))
+    let mut server = Peer(io: moq.mixed_driver(take q, None, 1), sess: None, pooled: None,
+        pooled_events: list.new(), events: list.new(), raw: list.new(), wt_events: list.new())
     let mut client = native_client(9381)
     establish_native(mut client, mut server, lim, b"copybreak.test", b"/wire", None)
     let tr = track(ns1(b"charge"), b"range")
     if let Some(mut cs) = client.sess {
-        let _ = result.unwrap(moq.subscribe(mut cs, mut client.io, 10, clone(tr), NoFilter, 8, None))
+        let _ = result.unwrap(moq.subscribe(mut cs, mut client.io, 10, clone(tr), NoFilter, 8,
+            None))
     }
     settle_pair(mut client, mut server, 11)
     accept_all_subscribes(mut server)
@@ -349,9 +398,12 @@ fn subscribed_with_send_budget(send_bytes: u64, lim: moq.Limits) -> (Peer, Peer,
 /// capacity eight. QUIC reserves that, the 64-byte Shared node and its 648-byte
 /// queued/staged records. A 64-KiB source must have the same admission boundary.
 fn copybreak_admits(send_bytes: u64) -> bool {
-    let (take _client, take server0, take tr) = subscribed_with_send_budget(send_bytes, moq_limits())
+    let (take _client, take server0, take tr) = subscribed_with_send_budget(send_bytes,
+        moq_limits())
     let mut server = take server0
-    let obj = moq.Object(track: take tr, group: 1, subgroup: 0, id: 0, mode: Datagram, publisher_priority: 7, status: Normal, properties: b"", payload: framed_payload(b"prefix", b"abc", b"suffix", 65536))
+    let obj = moq.Object(track: take tr, group: 1, subgroup: 0, id: 0, mode: Datagram,
+        publisher_priority: 7, status: Normal, properties: b"", payload: framed_payload(b"prefix",
+        b"abc", b"suffix", 65536))
     if let Some(mut ss) = server.sess {
         result.unwrap(moq.publish(mut ss, mut server.io, 31 * MS_NS, obj))
     }
@@ -377,7 +429,8 @@ fn datagram_properties_overflow_preserves_wire_and_mtu() -> Result[(), ()] {
     establish_native(mut client, mut server, lim, b"prefix.test", b"/wire", None)
     let tr = track(ns1(b"prefix"), b"video")
     if let Some(mut cs) = client.sess {
-        let _ = result.unwrap(moq.subscribe(mut cs, mut client.io, 10, clone(tr), NoFilter, 8, None))
+        let _ = result.unwrap(moq.subscribe(mut cs, mut client.io, 10, clone(tr), NoFilter, 8,
+            None))
     }
     settle_pair(mut client, mut server, 11)
     accept_all_subscribes(mut server)
@@ -387,14 +440,19 @@ fn datagram_properties_overflow_preserves_wire_and_mtu() -> Result[(), ()] {
     let mut props: Bytes = list.new()
     result.unwrap(codec.write_key_values(kvs, mut props))
     if let Some(mut ss) = server.sess {
-        let small = moq.Object(track: clone(tr), group: 1, subgroup: 0, id: 0, mode: Datagram, publisher_priority: 7, status: Normal, properties: clone(props), payload: framed_payload(b"before", b"frame", b"after", 128))
+        let small = moq.Object(track: clone(tr), group: 1, subgroup: 0, id: 0, mode: Datagram,
+            publisher_priority: 7, status: Normal, properties: clone(props),
+            payload: framed_payload(b"before", b"frame", b"after", 128))
         result.unwrap(moq.publish(mut ss, mut server.io, 13, small))
-        let large = moq.Object(track: clone(tr), group: 2, subgroup: 0, id: 0, mode: Datagram, publisher_priority: 7, status: Normal, properties: clone(props), payload: quic.payload_whole(shared.new(make_tagged_payload(0x55, 1200))))
+        let large = moq.Object(track: clone(tr), group: 2, subgroup: 0, id: 0, mode: Datagram,
+            publisher_priority: 7, status: Normal, properties: clone(props),
+            payload: quic.payload_whole(shared.new(make_tagged_payload(0x55, 1200))))
         result.unwrap(moq.publish(mut ss, mut server.io, 13, large))
     }
     settle_pair(mut client, mut server, 13)
     let got = received_objects(client.events)
-    if list.len(got) != 1 || got[0].group != 1 || got[0].properties != props || quic.payload_bytes(got[0].payload) != b"frame" {
+    if list.len(got) != 1 || got[0].group != 1 || got[0].properties != props || quic.payload_bytes(
+        got[0].payload) != b"frame" {
         fail("extended datagram header, payload range, or MTU refusal changed")
     }
     Ok(())
@@ -404,7 +462,9 @@ fn stalled_range_charge(capacity: u64) -> u64 {
     let (take _client, take server0, take tr) = subscribed_with_send_budget(720, moq_limits())
     let mut server = take server0
     if let Some(mut ss) = server.sess {
-        let obj = moq.Object(track: clone(tr), group: 1, subgroup: 0, id: 0, mode: Subgroup, publisher_priority: 7, status: Normal, properties: b"", payload: framed_payload(b"before", b"abc", b"after", capacity))
+        let obj = moq.Object(track: clone(tr), group: 1, subgroup: 0, id: 0, mode: Subgroup,
+            publisher_priority: 7, status: Normal, properties: b"", payload: framed_payload(
+            b"before", b"abc", b"after", capacity))
         result.unwrap(moq.publish(mut ss, mut server.io, 31 * MS_NS, obj))
         let held = moq.pending_send_bytes(ss)
         if held <= capacity + 64 {

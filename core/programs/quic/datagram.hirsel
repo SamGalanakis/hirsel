@@ -18,7 +18,8 @@ fn next_datagram(st: Streams) -> Option[u64] {
         let d = st.datagrams[i]
         let better = match best {
             None => true,
-            Some(b) => ranks_before(d.priority, d.turn, st.datagrams[b].priority, st.datagrams[b].turn),
+            Some(b) => ranks_before(d.priority, d.turn, st.datagrams[b].priority,
+                st.datagrams[b].turn),
         }
         if better {
             best = Some(i)
@@ -38,7 +39,8 @@ fn move_datagram(mut from: List[QueuedDatagram], i: u64, mut to: List[QueuedData
 
 /// Write queued datagram `k` as one DATAGRAM frame if it fits; it then waits in
 /// staged_datagrams until its packet is committed or abandoned.
-fn write_datagram(mut st: Streams, k: u64, cap: u64, mut payload: Bytes, mut frames: List[SentFrame]) -> bool {
+fn write_datagram(mut st: Streams, k: u64, cap: u64, mut payload: Bytes, mut frames: List[
+    SentFrame]) -> bool {
     let len = framed_len(st.datagrams[k].data)
     if !datagram_fits(cap - list.len(payload), len) {
         return false
@@ -147,7 +149,8 @@ fn empty_packet_room(c: Connection, mtu: u64) -> u64 {
     payload_room(OneRtt, c.peer_id, c.local_id, b"", packet_limit(c, mtu))
 }
 
-fn queue_datagram(mut st: Streams, take data: FramedSlice, p: Priority, tag: DatagramTag, room: u64) -> Result[(), QuicError] {
+fn queue_datagram(mut st: Streams, take data: FramedSlice, p: PriorityKey, tag: DatagramTag,
+    room: u64) -> Result[(), QuicError] {
     if st.peer_datagram == 0 {
         return Error(Unsupported)
     }
@@ -160,7 +163,8 @@ fn queue_datagram(mut st: Streams, take data: FramedSlice, p: Priority, tag: Dat
     if charge > headroom(st.send_bytes, st.held) {
         return Error(Limit)
     }
-    list.push(mut st.datagrams, QueuedDatagram(data: take data, priority: p, tag: tag, seq: st.datagram_seq, turn: st.turn, born: None, charge: charge))
+    list.push(mut st.datagrams, QueuedDatagram(data: take data, priority: p, tag: tag,
+        seq: st.datagram_seq, turn: st.turn, born: None, charge: charge))
     st.datagram_seq += 1
     st.turn += 1
     st.held += charge
@@ -171,16 +175,15 @@ fn queue_datagram(mut st: Streams, take data: FramedSlice, p: Priority, tag: Dat
 /// range, both copied once, into the sealed packet. Its DATAGRAM frame must fit the peer's
 /// max_datagram_frame_size and one packet, or it is TooLarge; a peer that advertised none
 /// makes it Unsupported; past send_bytes it is Limit. Nothing is queued on an error.
-pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, take data: FramedSlice, p: Priority, tag: DatagramTag) -> Result[(), QuicError] {
-    if p.urgency > 7 {
-        return Error(Config)
-    }
+pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, take data: FramedSlice, p: Priority,
+    tag: DatagramTag) -> Result[(), QuicError] {
+    let key = priority_key(p)?
     let i = stream_slot(mut e, c)?
     let mtu: u64 = int.widen(e.config.max_mtu)
     let mut out: Result[(), QuicError] = Error(UnknownConnection)
     if let Some(mut conn) = e.connections[i] {
         let room = empty_packet_room(conn, mtu)
-        out = queue_datagram(mut conn.streams, take data, p, tag, room)
+        out = queue_datagram(mut conn.streams, take data, key, tag, room)
     }
     if let Ok(()) = out {
         enqueue_ready(mut e, i)
@@ -248,7 +251,8 @@ pub fn max_datagram_payload(e: Endpoint, c: ConnectionHandle) -> u64 {
     let Some(conn) = e.connections[i] else {
         return 0
     }
-    let room = order.min(conn.streams.peer_datagram, empty_packet_room(conn, int.widen(e.config.max_mtu)))
+    let room = order.min(conn.streams.peer_datagram, empty_packet_room(conn, int.widen(
+        e.config.max_mtu)))
     if room < 2 {
         return 0
     }

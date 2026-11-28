@@ -84,7 +84,8 @@ fn write_in(mut st: Streams, id: u64, data: Bytes, fin: bool) -> Result[u64, Qui
     let mut n = 0u64
     let mut charge = 0u64
     if let Some(mut s) = st.list[i].send {
-        n = order.min(order.min(list.len(data), memory), order.min(headroom(s.credit, s.written), connection))
+        n = order.min(order.min(list.len(data), memory), order.min(headroom(s.credit, s.written),
+            connection))
         if n > 0 {
             if list.len(s.pieces) == list.capacity(s.pieces) && s.head > 0 {
                 compact_pieces(mut s)
@@ -92,7 +93,8 @@ fn write_in(mut st: Streams, id: u64, data: Bytes, fin: bool) -> Result[u64, Qui
             let mut owned: Bytes = list.with_capacity(n)
             list.append(mut owned, list.slice(data, 0, n))
             charge = round8(n)
-            list.push(mut s.pieces, Piece(offset: s.written, len: n, data: Owned(take owned), charge: charge))
+            list.push(mut s.pieces, Piece(offset: s.written, len: n, data: Owned(take owned),
+                charge: charge))
             s.written += n
         }
         if n < list.len(data) {
@@ -107,7 +109,8 @@ fn write_in(mut st: Streams, id: u64, data: Bytes, fin: bool) -> Result[u64, Qui
     Ok(n)
 }
 
-pub fn write(mut e: Endpoint, c: ConnectionHandle, s: StreamId, data: Bytes, fin: bool) -> Result[u64, QuicError] {
+pub fn write(mut e: Endpoint, c: ConnectionHandle, s: StreamId, data: Bytes, fin: bool) -> Result[
+    u64, QuicError] {
     let i = stream_slot(mut e, c)?
     let StreamId(id) = s
     let mut out: Result[u64, QuicError] = Error(UnknownConnection)
@@ -122,7 +125,8 @@ pub fn write(mut e: Endpoint, c: ConnectionHandle, s: StreamId, data: Bytes, fin
 
 /// All or nothing against send_bytes; Ok(false) asks for Writable (QUIC-5). The charge
 /// is what the slice keeps alive (QUIC-9), not its length.
-fn write_shared_in(mut st: Streams, id: u64, take data: PayloadSlice, fin: bool) -> Result[bool, QuicError] {
+fn write_shared_in(mut st: Streams, id: u64, take data: PayloadSlice, fin: bool) -> Result[bool,
+    QuicError] {
     let i = writable_send(st, id)?
     let len = payload_len(data)
     let charge = if len > 0 {
@@ -140,7 +144,8 @@ fn write_shared_in(mut st: Streams, id: u64, take data: PayloadSlice, fin: bool)
             if list.len(s.pieces) == list.capacity(s.pieces) && s.head > 0 {
                 compact_pieces(mut s)
             }
-            list.push(mut s.pieces, Piece(offset: s.written, len: len, data: Held(take data), charge: charge))
+            list.push(mut s.pieces, Piece(offset: s.written, len: len, data: Held(take data),
+                charge: charge))
             s.written += len
         }
         if fin {
@@ -155,7 +160,8 @@ fn write_shared_in(mut st: Streams, id: u64, take data: PayloadSlice, fin: bool)
 
 /// Queue a payload slice on a stream without copying it; the slice's bytes are copied
 /// once, into the sealed packet.
-pub fn write_shared(mut e: Endpoint, c: ConnectionHandle, s: StreamId, take data: PayloadSlice, fin: bool) -> Result[bool, QuicError] {
+pub fn write_shared(mut e: Endpoint, c: ConnectionHandle, s: StreamId, take data: PayloadSlice,
+    fin: bool) -> Result[bool, QuicError] {
     let i = stream_slot(mut e, c)?
     let StreamId(id) = s
     let mut out: Result[bool, QuicError] = Error(UnknownConnection)
@@ -190,7 +196,8 @@ fn read_in(mut st: Streams, id: u64, mut into: Bytes) -> Result[(u64, bool), Qui
             let within = (at - r.base) % PAGE
             let k = order.min(PAGE - within, r.read + n - at)
             let page: u64 = int.widen(r.pages[p])
-            list.append(mut into, list.slice(st.pool.data, page * PAGE + within, page * PAGE + within + k))
+            list.append(mut into, list.slice(st.pool.data, page * PAGE + within, page * PAGE +
+                within + k))
             at += k
         }
         r.read += n
@@ -220,7 +227,8 @@ fn read_in(mut st: Streams, id: u64, mut into: Bytes) -> Result[(u64, bool), Qui
     Ok((n, fin))
 }
 
-pub fn read(mut e: Endpoint, c: ConnectionHandle, s: StreamId, mut into: Bytes) -> Result[(u64, bool), QuicError] {
+pub fn read(mut e: Endpoint, c: ConnectionHandle, s: StreamId, mut into: Bytes) -> Result[(u64,
+    bool), QuicError] {
     let i = stream_slot(mut e, c)?
     let StreamId(id) = s
     let mut out: Result[(u64, bool), QuicError] = Error(UnknownConnection)
@@ -228,7 +236,8 @@ pub fn read(mut e: Endpoint, c: ConnectionHandle, s: StreamId, mut into: Bytes) 
     if let Some(mut conn) = e.connections[i] {
         out = read_in(mut conn.streams, id, mut into)
         if let Ok(_) = out {
-            wake = conn.streams.max_data_pending || conn.streams.bidi_limit_pending || conn.streams.uni_limit_pending
+            wake = conn.streams.max_data_pending || conn.streams.bidi_limit_pending ||
+                conn.streams.uni_limit_pending
             if !wake {
                 if let Some(k) = find(conn.streams, id) {
                     if let Some(r) = conn.streams.list[k].recv {
@@ -307,7 +316,8 @@ fn reset_in(mut st: Streams, id: u64, code: u64, reliable: u64) -> Result[(), Qu
 
 /// RESET_STREAM (reliable 0) or RESET_STREAM_AT, discarding at once every byte at or past
 /// reliable, including any in a polled but uncommitted suffix (QUIC-5).
-pub fn reset(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64, reliable: u64) -> Result[(), QuicError] {
+pub fn reset(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64, reliable: u64) -> Result[
+    (), QuicError] {
     let i = stream_slot(mut e, c)?
     let StreamId(id) = s
     let mut out: Result[(), QuicError] = Error(UnknownConnection)
@@ -350,10 +360,9 @@ pub fn stop(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64) -> Res
     out
 }
 
-pub fn priority(mut e: Endpoint, c: ConnectionHandle, s: StreamId, p: Priority) -> Result[(), QuicError] {
-    if p.urgency > 7 {
-        return Error(Config)
-    }
+pub fn priority(mut e: Endpoint, c: ConnectionHandle, s: StreamId, p: Priority) -> Result[(),
+    QuicError] {
+    let key = priority_key(p)?
     let i = stream_slot(mut e, c)?
     let StreamId(id) = s
     if let Some(mut conn) = e.connections[i] {
@@ -361,7 +370,7 @@ pub fn priority(mut e: Endpoint, c: ConnectionHandle, s: StreamId, p: Priority) 
             return Error(UnknownStream)
         }
         if let Some(mut send) = conn.streams.list[k].send {
-            send.priority = p
+            send.priority = key
             return Ok(())
         }
         return Error(StreamState)

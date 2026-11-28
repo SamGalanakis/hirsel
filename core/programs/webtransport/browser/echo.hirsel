@@ -19,7 +19,10 @@ fn endpoint_config(r: Random) -> quic.EndpointConfig {
     let mut token_key: Bytes = list.with_capacity(32)
     host.random(r, mut reset_key)
     host.random(r, mut token_key)
-    quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: 1350, retry: Never, reset_key: result.unwrap(secret.seal(take reset_key, "mac")), token_key: result.unwrap(secret.seal(take token_key, "kdf")), limits: quic.EndpointLimits(connections: 4, unvalidated: 4, datagram_bytes: 65536))
+    quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: 1350, retry: Never,
+        reset_key: result.unwrap(secret.seal(take reset_key, "mac")), token_key: result.unwrap(
+        secret.seal(take token_key, "kdf")), limits: quic.EndpointLimits(connections: 4,
+        unvalidated: 4, datagram_bytes: 65536))
 }
 
 fn limits(port: u16, origin: String) -> webtransport.Limits {
@@ -29,7 +32,9 @@ fn limits(port: u16, origin: String) -> webtransport.Limits {
     let mut origins: List[String] = list.with_capacity(1)
     list.push(mut authorities, take authority)
     list.push(mut origins, string.from(origin))
-    webtransport.Limits(authorities: take authorities, origins: take origins, require_origin: true, sessions: 4, sessions_per_connection: 2, pending_connects: 4, streams_bidi: 8, streams_uni: 8, data: 262144, buffered: 8, buffered_datagrams: 16, header_bytes: 4096)
+    webtransport.Limits(authorities: take authorities, origins: take origins, require_origin: true,
+        sessions: 4, sessions_per_connection: 2, pending_connects: 4, streams_bidi: 8,
+        streams_uni: 8, data: 262144, buffered: 8, buffered_datagrams: 16, header_bytes: 4096)
 }
 
 fn hash_text(digest: Inline[u8, 32]) -> String {
@@ -46,7 +51,8 @@ fn echo(mut wt: webtransport.Endpoint, mut q: quic.Endpoint, mut stream: Echo) -
         if stream.written == list.len(stream.pending) && !stream.fin {
             list.clear(mut stream.pending)
             stream.written = 0
-            match webtransport.read(mut wt, mut q, stream.session, stream.stream, mut stream.pending) {
+            match webtransport.read(mut wt, mut q, stream.session, stream.stream,
+                mut stream.pending) {
                 Ok((0, false)) => return false,
                 Ok((_, fin)) => {
                     stream.fin = fin
@@ -55,7 +61,8 @@ fn echo(mut wt: webtransport.Endpoint, mut q: quic.Endpoint, mut stream: Echo) -
             }
         }
         let end = list.len(stream.pending)
-        match webtransport.write(mut wt, mut q, stream.session, stream.stream, list.slice(stream.pending, stream.written, end), stream.fin) {
+        match webtransport.write(mut wt, mut q, stream.session, stream.stream, list.slice(
+            stream.pending, stream.written, end), stream.fin) {
             Ok(n) => {
                 stream.written += n
                 if stream.written < end {
@@ -99,7 +106,8 @@ fn report_code(out: Stdout, prefix: String, code: u64) waits {
     line(out, msg)
 }
 
-fn pump(mut wt: webtransport.Endpoint, mut q: quic.Endpoint, mut echoes: List[Echo], s: webtransport.SessionHandle, id: quic.StreamId) {
+fn pump(mut wt: webtransport.Endpoint, mut q: quic.Endpoint, mut echoes: List[Echo],
+    s: webtransport.SessionHandle, id: quic.StreamId) {
     for i in 0u64 .. list.len(echoes) {
         if echoes[i].session == s && echoes[i].stream == id {
             if echo(mut wt, mut q, mut echoes[i]) {
@@ -110,17 +118,22 @@ fn pump(mut wt: webtransport.Endpoint, mut q: quic.Endpoint, mut echoes: List[Ec
     }
 }
 
-pub fn main(a: Args, net: Net, clock: Clock, random: Random, out: Stdout) -> Result[(), Exit] waits {
+pub fn main(a: Args, net: Net, clock: Clock, random: Random, out: Stdout) -> Result[(),
+    Exit] waits {
     let origin = option.unwrap(args.get(a, 0))
-    let (sock, addr) = result.unwrap(host.udp_bind(net, Addr(ip: V4(0x7f000001u32), port: 0), UdpOptions(slots: 64, slot_bytes: 2048)))
+    let (sock, addr) = result.unwrap(host.udp_bind(net, Addr(ip: V4(0x7f000001u32), port: 0),
+        UdpOptions(slots: 64, slot_bytes: 2048)))
     let mut socket = take sock
     let second: i64 = int.narrow(host.wall_ms(clock) / 1000)
     let not_before = option.unwrap(std.time.from_unix(second - 60, 0))
     let not_after = option.unwrap(std.time.from_unix(second + 86400, 0))
-    let current = result.unwrap(webtransport.browser_identity(random, 1, "127.0.0.1", not_before, not_after))
-    let next = result.unwrap(webtransport.browser_identity(random, 2, "127.0.0.1", not_before, not_after))
+    let current = result.unwrap(webtransport.browser_identity(random, 1, "127.0.0.1", not_before,
+        not_after))
+    let next = result.unwrap(webtransport.browser_identity(random, 2, "127.0.0.1", not_before,
+        not_after))
     let mut wt = webtransport.endpoint(limits(addr.port, origin))
-    let mut q = result.unwrap(webtransport.browser_server(mut wt, random, endpoint_config(random), take current, take next))
+    let mut q = result.unwrap(webtransport.browser_server(mut wt, random, endpoint_config(random),
+        take current, take next))
     ready(out, addr.port, webtransport.certificate_hashes(wt))
     let mut raw: List[quic.Event] = list.new()
     let mut events: List[webtransport.Event] = list.new()
@@ -136,19 +149,23 @@ pub fn main(a: Args, net: Net, clock: Clock, random: Random, out: Stdout) -> Res
             match event {
                 Requested(s, request) => {
                     if request.path == "/echo" {
-                        result.unwrap(webtransport.answer(mut wt, mut q, s, Accept(protocol: None, headers: list.new())))
+                        result.unwrap(webtransport.answer(mut wt, mut q, s, Accept(protocol: None,
+                            headers: list.new())))
                         line(out, "session accepted")
                     } else {
                         result.unwrap(webtransport.answer(mut wt, mut q, s, Refuse(status: 404)))
                     }
                 },
                 Stream(s: s, stream: id, bidi: true) => {
-                    list.push(mut echoes, Echo(session: s, stream: id, pending: list.with_capacity(16384), written: 0, fin: false))
+                    list.push(mut echoes, Echo(session: s, stream: id, pending: list.with_capacity(
+                        16384), written: 0, fin: false))
                 },
                 Readable(s, id) => pump(mut wt, mut q, mut echoes, s, id),
                 Writable(s, id) => pump(mut wt, mut q, mut echoes, s, id),
                 Datagram(s, data) => {
-                    result.unwrap(webtransport.send_datagram(mut wt, mut q, s, quic.framed_from(quic.payload_share(data)), quic.Priority(urgency: 3, order: 0, then: 0), 0))
+                    result.unwrap(webtransport.send_datagram(mut wt, mut q, s, quic.framed_from(
+                        quic.payload_share(data)), quic.Priority(urgency: 3, then_high: 0, order: 0,
+                        then: 0), 0))
                 },
                 Closed(s: _, code: code, reason: reason) => {
                     let mut msg = string.from("closed ")

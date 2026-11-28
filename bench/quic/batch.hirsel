@@ -121,7 +121,7 @@ pub fn main(a: Args, clock: Clock, r: Random, out: Stdout) -> Result[(), Exit] w
     let mut warm = 0u64
     while timed < rounds {
         for _ in 0u64 .. BATCH {
-            result.unwrap(quic.send_datagram(mut client, c, quic.framed_from(quic.payload_whole(shared.share(chunk))), quic.Priority(urgency: 3, order: 0, then: 0), quic.DatagramTag(owner: 0, tag: 0)))
+            result.unwrap(quic.send_datagram(mut client, c, quic.framed_from(quic.payload_whole(shared.share(chunk))), quic.Priority(urgency: 3, then_high: 0, order: 0, then: 0), quic.DatagramTag(owner: 0, tag: 0)))
         }
         list.clear(mut batch)
         list.clear(mut udp)

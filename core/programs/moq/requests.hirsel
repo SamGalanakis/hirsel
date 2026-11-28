@@ -21,7 +21,8 @@ fn req_by_id(s: Session, id: u64) -> Option[u64] {
 fn req_by_alias(s: Session, alias: u64, local_sub: bool) -> Option[u64] {
     for i in 0u64 .. list.len(s.requests) {
         let r = s.requests[i]
-        let is_sub = (r.kind == ReqSubscribe && r.local == local_sub) || (r.kind == ReqPublish && r.local != local_sub)
+        let is_sub = (r.kind == ReqSubscribe && r.local == local_sub) || (r.kind == ReqPublish &&
+            r.local != local_sub)
         if is_sub && r.alias == Some(alias) {
             return Some(i)
         }
@@ -98,9 +99,11 @@ fn extract_req_token(ps: List[codec.Param]) -> Result[Option[Bytes], u64] {
     Ok(take tok)
 }
 
-fn send_request_error[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, code: u64, reason: Bytes) {
+fn send_request_error[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, code: u64,
+    reason: Bytes) {
     let mut wire: Bytes = list.new()
-    if let Ok(()) = codec.write_message(RequestError(code: code, retry: 0, reason: clone(reason), details: list.new()), s.peer_max_control, mut wire) {
+    if let Ok(()) = codec.write_message(RequestError(code: code, retry: 0, reason: clone(reason),
+        details: list.new()), s.peer_max_control, mut wire) {
         enqueue_raw(mut s, mut io, stream, take wire, true)
     }
 }
@@ -115,7 +118,8 @@ fn bidi_head_readable[D](mut s: Session, mut io: LinkIo[D], idx: u64, mut out: L
     }
     let mut at = 0u64
     let len = list.len(s.peer_bidi_heads[idx].buf)
-    let msg = match codec.read_message(s.peer_bidi_heads[idx].buf, mut at, len, local_max_control(s)) {
+    let msg = match codec.read_message(s.peer_bidi_heads[idx].buf, mut at, len, local_max_control(
+        s)) {
         Ok(take m) => take m,
         Error(Truncated) => {
             if fin {
@@ -136,7 +140,8 @@ fn bidi_head_readable[D](mut s: Session, mut io: LinkIo[D], idx: u64, mut out: L
     open_peer_request(mut s, mut io, stream, take msg, take rbuf, fin, mut out)
 }
 
-fn open_peer_request[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, take msg: codec.Message, take rest: Bytes, fin: bool, mut out: List[Event]) {
+fn open_peer_request[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream,
+    take msg: codec.Message, take rest: Bytes, fin: bool, mut out: List[Event]) {
     if !s.setup_received {
         fail_session(mut s, mut io, ERR_PROTOCOL_VIOLATION, b"request before setup", mut out)
         return
@@ -155,11 +160,13 @@ fn open_peer_request[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, t
                 },
             }
             if is_session_namespace(track.ns) {
-                send_request_error(mut s, mut io, stream, REQ_DOES_NOT_EXIST, b"unknown session track")
+                send_request_error(mut s, mut io, stream, REQ_DOES_NOT_EXIST,
+                    b"unknown session track")
                 return
             }
             if count_filter_ranges(params) > int.widen(s.limits.filter_ranges) {
-                send_request_error(mut s, mut io, stream, REQ_INVALID_FILTER, b"too many filter ranges")
+                send_request_error(mut s, mut io, stream, REQ_INVALID_FILTER,
+                    b"too many filter ranges")
                 return
             }
             if list.len(s.requests) >= int.widen(s.limits.requests) {
@@ -195,11 +202,18 @@ fn open_peer_request[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, t
                     _ => {},
                 }
             }
-            tx_priority(s.link, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, order: 0, then: 0))
-            let req = ReqStream(stream: stream, id: id, kind: ReqSubscribe, local: false, state: Pending, track: Some(clone(track)), prefix: None, alias: None, filter: clone(filter), priority: prio, group_order: go, paused: paused, sub_obj_timeout_ms: obj_to, sub_sg_timeout_ms: sg_to, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: take rest, rx_fin: fin, tx_fin: false)
+            tx_priority(s.link, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST,
+                then_high: 0, order: 0, then: 0))
+            let req = ReqStream(stream: stream, id: id, kind: ReqSubscribe, local: false,
+                state: Pending, track: Some(clone(track)), prefix: None, alias: None, filter: clone(
+                filter), priority: prio, group_order: go, paused: paused,
+                sub_obj_timeout_ms: obj_to, sub_sg_timeout_ms: sg_to, pub_obj_timeout_ms: 0,
+                pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0,
+                pending_updates: 0, rx_buf: take rest, rx_fin: fin, tx_fin: false)
             list.push(mut s.requests, take req)
             let idx = list.len(s.requests) - 1
-            list.push(mut out, Subscribe(id: RequestId(id), track: track, filter: filter, priority: prio, token: take tok))
+            list.push(mut out, Subscribe(id: RequestId(id), track: track, filter: filter,
+                priority: prio, token: take tok))
             if list.len(s.requests[idx].rx_buf) > 0 {
                 request_readable(mut s, mut io, idx, mut out)
             }
@@ -221,7 +235,8 @@ fn open_peer_request[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, t
                 },
             }
             if is_session_namespace(track.ns) {
-                send_request_error(mut s, mut io, stream, REQ_DOES_NOT_EXIST, b"unknown session track")
+                send_request_error(mut s, mut io, stream, REQ_DOES_NOT_EXIST,
+                    b"unknown session track")
                 return
             }
             let (def_prio, def_order, p_obj, p_sg) = match parse_track_properties(properties) {
@@ -231,8 +246,14 @@ fn open_peer_request[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, t
                     return
                 },
             }
-            tx_priority(s.link, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, order: 0, then: 0))
-            let req = ReqStream(stream: stream, id: id, kind: ReqPublish, local: false, state: Pending, track: Some(clone(track)), prefix: None, alias: Some(alias), filter: NoFilter, priority: 128, group_order: def_order, paused: false, sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0, pub_obj_timeout_ms: p_obj, pub_sg_timeout_ms: p_sg, default_pub_priority: def_prio, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: take rest, rx_fin: fin, tx_fin: false)
+            tx_priority(s.link, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST,
+                then_high: 0, order: 0, then: 0))
+            let req = ReqStream(stream: stream, id: id, kind: ReqPublish, local: false,
+                state: Pending, track: Some(clone(track)), prefix: None, alias: Some(alias),
+                filter: NoFilter, priority: 128, group_order: def_order, paused: false,
+                sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0, pub_obj_timeout_ms: p_obj,
+                pub_sg_timeout_ms: p_sg, default_pub_priority: def_prio, base_group: None,
+                streams_sent: 0, pending_updates: 0, rx_buf: take rest, rx_fin: fin, tx_fin: false)
             list.push(mut s.requests, take req)
             let idx = list.len(s.requests) - 1
             list.push(mut out, Publish(id: RequestId(id), track: track, token: take tok))
@@ -254,11 +275,13 @@ fn open_peer_request[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, t
                 },
             }
             if is_session_namespace(track.ns) {
-                send_request_error(mut s, mut io, stream, REQ_DOES_NOT_EXIST, b"unknown session track")
+                send_request_error(mut s, mut io, stream, REQ_DOES_NOT_EXIST,
+                    b"unknown session track")
                 return
             }
             if count_filter_ranges(params) > int.widen(s.limits.filter_ranges) {
-                send_request_error(mut s, mut io, stream, REQ_INVALID_FILTER, b"too many filter ranges")
+                send_request_error(mut s, mut io, stream, REQ_INVALID_FILTER,
+                    b"too many filter ranges")
                 return
             }
             let mut from = codec.Location(group: 0, object: 0)
@@ -294,11 +317,18 @@ fn open_peer_request[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, t
                     _ => {},
                 }
             }
-            tx_priority(s.link, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, order: 0, then: 0))
-            let req = ReqStream(stream: stream, id: id, kind: ReqFetch, local: false, state: Pending, track: Some(clone(track)), prefix: None, alias: None, filter: filter, priority: prio, group_order: go, paused: false, sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: take rest, rx_fin: fin, tx_fin: false)
+            tx_priority(s.link, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST,
+                then_high: 0, order: 0, then: 0))
+            let req = ReqStream(stream: stream, id: id, kind: ReqFetch, local: false,
+                state: Pending, track: Some(clone(track)), prefix: None, alias: None,
+                filter: filter, priority: prio, group_order: go, paused: false,
+                sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0,
+                pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0,
+                pending_updates: 0, rx_buf: take rest, rx_fin: fin, tx_fin: false)
             list.push(mut s.requests, take req)
             let idx = list.len(s.requests) - 1
-            list.push(mut out, Fetch(id: RequestId(id), track: track, from: from, to: to, token: take tok))
+            list.push(mut out, Fetch(id: RequestId(id), track: track, from: from, to: to,
+                token: take tok))
             if list.len(s.requests[idx].rx_buf) > 0 {
                 request_readable(mut s, mut io, idx, mut out)
             }
@@ -312,7 +342,12 @@ fn open_peer_request[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, t
                 fail_session(mut s, mut io, code, b"bad auth token", mut out)
                 return
             }
-            let req = ReqStream(stream: stream, id: id, kind: ReqTrackStatus, local: false, state: Pending, track: Some(track), prefix: None, alias: None, filter: NoFilter, priority: 128, group_order: Ascending, paused: false, sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: take rest, rx_fin: fin, tx_fin: false)
+            let req = ReqStream(stream: stream, id: id, kind: ReqTrackStatus, local: false,
+                state: Pending, track: Some(track), prefix: None, alias: None, filter: NoFilter,
+                priority: 128, group_order: Ascending, paused: false, sub_obj_timeout_ms: 0,
+                sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0,
+                default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0,
+                rx_buf: take rest, rx_fin: fin, tx_fin: false)
             list.push(mut s.requests, take req)
         },
         PublishNamespace(id: id, prefix: prefix, params: params) => {
@@ -324,7 +359,12 @@ fn open_peer_request[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, t
                 fail_session(mut s, mut io, code, b"bad auth token", mut out)
                 return
             }
-            let req = ReqStream(stream: stream, id: id, kind: ReqPublishNamespace, local: false, state: Pending, track: None, prefix: Some(prefix), alias: None, filter: NoFilter, priority: 128, group_order: Ascending, paused: false, sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: take rest, rx_fin: fin, tx_fin: false)
+            let req = ReqStream(stream: stream, id: id, kind: ReqPublishNamespace, local: false,
+                state: Pending, track: None, prefix: Some(prefix), alias: None, filter: NoFilter,
+                priority: 128, group_order: Ascending, paused: false, sub_obj_timeout_ms: 0,
+                sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0,
+                default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0,
+                rx_buf: take rest, rx_fin: fin, tx_fin: false)
             list.push(mut s.requests, take req)
         },
         SubscribeNamespace(id: id, prefix: prefix, params: params) => {
@@ -336,7 +376,12 @@ fn open_peer_request[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, t
                 fail_session(mut s, mut io, code, b"bad auth token", mut out)
                 return
             }
-            let req = ReqStream(stream: stream, id: id, kind: ReqSubscribeNamespace, local: false, state: Pending, track: None, prefix: Some(prefix), alias: None, filter: NoFilter, priority: 128, group_order: Ascending, paused: false, sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: take rest, rx_fin: fin, tx_fin: false)
+            let req = ReqStream(stream: stream, id: id, kind: ReqSubscribeNamespace, local: false,
+                state: Pending, track: None, prefix: Some(prefix), alias: None, filter: NoFilter,
+                priority: 128, group_order: Ascending, paused: false, sub_obj_timeout_ms: 0,
+                sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0,
+                default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0,
+                rx_buf: take rest, rx_fin: fin, tx_fin: false)
             list.push(mut s.requests, take req)
         },
         SubscribeTracks(id: id, prefix: prefix, params: params) => {
@@ -348,7 +393,12 @@ fn open_peer_request[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, t
                 fail_session(mut s, mut io, code, b"bad auth token", mut out)
                 return
             }
-            let req = ReqStream(stream: stream, id: id, kind: ReqSubscribeTracks, local: false, state: Pending, track: None, prefix: Some(prefix), alias: None, filter: NoFilter, priority: 128, group_order: Ascending, paused: false, sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: take rest, rx_fin: fin, tx_fin: false)
+            let req = ReqStream(stream: stream, id: id, kind: ReqSubscribeTracks, local: false,
+                state: Pending, track: None, prefix: Some(prefix), alias: None, filter: NoFilter,
+                priority: 128, group_order: Ascending, paused: false, sub_obj_timeout_ms: 0,
+                sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0,
+                default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0,
+                rx_buf: take rest, rx_fin: fin, tx_fin: false)
             list.push(mut s.requests, take req)
         },
         _ => {
@@ -360,7 +410,8 @@ fn open_peer_request[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, t
 
 /// Narrow REQUEST_OK parameters and Track Properties to the request on the stream (moq.md:337,
 /// moqt-23 §9.3).
-fn check_request_ok_narrow(kind: ReqKind, is_update_ok: bool, params: List[codec.Param], properties: List[codec.KeyValue]) -> Result[(), u64] {
+fn check_request_ok_narrow(kind: ReqKind, is_update_ok: bool, params: List[codec.Param],
+    properties: List[codec.KeyValue]) -> Result[(), u64] {
     let allow_largest = is_update_ok || kind == ReqFetch || kind == ReqTrackStatus
     let allow_props = !is_update_ok && (kind == ReqFetch || kind == ReqTrackStatus)
     for p in params {
@@ -381,8 +432,12 @@ fn check_request_ok_narrow(kind: ReqKind, is_update_ok: bool, params: List[codec
 /// Narrow REQUEST_UPDATE parameters to the request on the stream (moq.md:337, moqt-23 §9.5).
 fn check_request_update_narrow(kind: ReqKind, params: List[codec.Param]) -> Result[(), u64] {
     let allowed: u64 = match kind {
-        ReqSubscribe => (1 << 0x02) | (1 << 0x03) | (1 << 0x06) | (1 << 0x11) | (1 << 0x20) | (1 << 0x21) | (1 << 0x23) | (1 << 0x25) | (1 << 0x26) | (1 << 0x27) | (1 << 0x28) | (1 << 0x32),
-        ReqPublish => (1 << 0x02) | (1 << 0x03) | (1 << 0x06) | (1 << 0x11) | (1 << 0x20) | (1 << 0x21) | (1 << 0x23) | (1 << 0x25) | (1 << 0x26) | (1 << 0x27) | (1 << 0x28) | (1 << 0x32),
+        ReqSubscribe => (1 << 0x02) | (1 << 0x03) | (1 << 0x06) | (1 << 0x11) | (1 << 0x20) | (1 <<
+            0x21) | (1 << 0x23) | (1 << 0x25) | (1 << 0x26) | (1 << 0x27) | (1 << 0x28) | (1 <<
+            0x32),
+        ReqPublish => (1 << 0x02) | (1 << 0x03) | (1 << 0x06) | (1 << 0x11) | (1 << 0x20) | (1 <<
+            0x21) | (1 << 0x23) | (1 << 0x25) | (1 << 0x26) | (1 << 0x27) | (1 << 0x28) | (1 <<
+            0x32),
         ReqFetch => (1 << 0x03) | (1 << 0x20),
         ReqPublishNamespace => 1 << 0x03,
         ReqSubscribeNamespace => (1 << 0x03) | (1 << 0x34),
@@ -398,7 +453,8 @@ fn check_request_update_narrow(kind: ReqKind, params: List[codec.Param]) -> Resu
     Ok(())
 }
 
-fn parse_track_properties(props: List[codec.KeyValue]) -> Result[(u8, codec.Direction, u64, u64), u64] {
+fn parse_track_properties(props: List[codec.KeyValue]) -> Result[(u8, codec.Direction, u64, u64),
+    u64] {
     let mut def_prio = 128u8
     let mut def_order: codec.Direction = Ascending
     let mut obj_to = 0u64
@@ -512,7 +568,8 @@ fn request_readable[D](mut s: Session, mut io: LinkIo[D], idx: u64, mut out: Lis
     }
 }
 
-fn on_request_message[D](mut s: Session, mut io: LinkIo[D], idx: u64, take msg: codec.Message, mut out: List[Event]) {
+fn on_request_message[D](mut s: Session, mut io: LinkIo[D], idx: u64, take msg: codec.Message,
+    mut out: List[Event]) {
     let kind = s.requests[idx].kind
     let local = s.requests[idx].local
     let state = s.requests[idx].state
@@ -521,11 +578,13 @@ fn on_request_message[D](mut s: Session, mut io: LinkIo[D], idx: u64, take msg: 
     match take msg {
         SubscribeOk(alias: alias, properties: properties, ..) => {
             if kind != ReqSubscribe || !local || state != Pending {
-                fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected subscribe_ok", mut out)
+                fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected subscribe_ok",
+                    mut out)
                 return
             }
             if req_by_alias(s, alias, true) != None {
-                fail_session(mut s, mut io, ERR_DUPLICATE_TRACK_ALIAS, b"duplicate track alias", mut out)
+                fail_session(mut s, mut io, ERR_DUPLICATE_TRACK_ALIAS, b"duplicate track alias",
+                    mut out)
                 return
             }
             let (def_prio, def_order, p_obj, p_sg) = match parse_track_properties(properties) {
@@ -548,7 +607,8 @@ fn on_request_message[D](mut s: Session, mut io: LinkIo[D], idx: u64, take msg: 
         RequestOk(params: params, properties: properties) => {
             let is_update_ok = state == Active && s.requests[idx].pending_updates > 0
             if !is_update_ok && (!local || state != Pending || kind == ReqSubscribe) {
-                fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected request_ok", mut out)
+                fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected request_ok",
+                    mut out)
                 return
             }
             if let Error(code) = check_request_ok_narrow(kind, is_update_ok, params, properties) {
@@ -570,7 +630,8 @@ fn on_request_message[D](mut s: Session, mut io: LinkIo[D], idx: u64, take msg: 
                 return
             }
             if !local || state != Pending {
-                fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected request_error", mut out)
+                fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected request_error",
+                    mut out)
                 return
             }
             if !s.requests[idx].tx_fin {
@@ -582,7 +643,8 @@ fn on_request_message[D](mut s: Session, mut io: LinkIo[D], idx: u64, take msg: 
         },
         PublishDone(status: status, ..) => {
             if kind != ReqSubscribe && kind != ReqPublish {
-                fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected publish_done", mut out)
+                fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected publish_done",
+                    mut out)
                 return
             }
             if !s.requests[idx].tx_fin {
@@ -607,7 +669,9 @@ fn on_request_message[D](mut s: Session, mut io: LinkIo[D], idx: u64, take msg: 
             }
             if count_filter_ranges(params) > int.widen(s.limits.filter_ranges) {
                 let mut err_wire: Bytes = list.new()
-                if let Ok(()) = codec.write_message(RequestError(code: REQ_INVALID_FILTER, retry: 0, reason: b"too many filter ranges", details: list.new()), s.peer_max_control, mut err_wire) {
+                if let Ok(()) = codec.write_message(RequestError(code: REQ_INVALID_FILTER, retry: 0,
+                    reason: b"too many filter ranges", details: list.new()), s.peer_max_control,
+                    mut err_wire) {
                     enqueue_raw(mut s, mut io, stream, take err_wire, false)
                 }
                 return
@@ -633,13 +697,15 @@ fn on_request_message[D](mut s: Session, mut io: LinkIo[D], idx: u64, take msg: 
                 }
             }
             let mut ok_wire: Bytes = list.new()
-            if let Ok(()) = codec.write_message(RequestOk(params: list.new(), properties: list.new()), s.peer_max_control, mut ok_wire) {
+            if let Ok(()) = codec.write_message(RequestOk(params: list.new(),
+                properties: list.new()), s.peer_max_control, mut ok_wire) {
                 enqueue_raw(mut s, mut io, stream, take ok_wire, false)
             }
         },
         PublishStateNotify(params: params) => {
             if kind != ReqSubscribe && kind != ReqPublish {
-                fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected publish_state_notify", mut out)
+                fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE,
+                    b"unexpected publish_state_notify", mut out)
                 return
             }
             for p in params {
@@ -650,17 +716,20 @@ fn on_request_message[D](mut s: Session, mut io: LinkIo[D], idx: u64, take msg: 
         },
         NamespaceFound(..) => {
             if kind != ReqSubscribeNamespace {
-                fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected namespace", mut out)
+                fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected namespace",
+                    mut out)
             }
         },
         NamespaceDone(..) => {
             if kind != ReqSubscribeNamespace {
-                fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected namespace_done", mut out)
+                fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected namespace_done",
+                    mut out)
             }
         },
         PublishSkipped(..) => {
             if kind != ReqSubscribeTracks {
-                fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected publish_skipped", mut out)
+                fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected publish_skipped",
+                    mut out)
             }
         },
         Goaway(uri: uri, ..) => {
@@ -671,7 +740,8 @@ fn on_request_message[D](mut s: Session, mut io: LinkIo[D], idx: u64, take msg: 
             list.push(mut out, Goaway(uri: uri))
         },
         _ => {
-            fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected message on request stream", mut out)
+            fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE,
+                b"unexpected message on request stream", mut out)
         },
     }
 }
@@ -723,20 +793,24 @@ pub fn accept[D](mut s: Session, mut io: LinkIo[D], id: RequestId, ok: Result[()
                         let ot = s.pub_tracks[pt].obj_timeout_ms
                         let st = s.pub_tracks[pt].sg_timeout_ms
                         if ot > 0 {
-                            list.push(mut props, Number(kind: PROP_OBJECT_DELIVERY_TIMEOUT, value: ot))
+                            list.push(mut props, Number(kind: PROP_OBJECT_DELIVERY_TIMEOUT,
+                                value: ot))
                             s.requests[idx].pub_obj_timeout_ms = ot
                         }
                         if st > 0 {
-                            list.push(mut props, Number(kind: PROP_SUBGROUP_DELIVERY_TIMEOUT, value: st))
+                            list.push(mut props, Number(kind: PROP_SUBGROUP_DELIVERY_TIMEOUT,
+                                value: st))
                             s.requests[idx].pub_sg_timeout_ms = st
                         }
                     }
                 }
-                let _ = codec.write_message(SubscribeOk(alias: alias, params: list.new(), properties: take props), s.peer_max_control, mut wire)
+                let _ = codec.write_message(SubscribeOk(alias: alias, params: list.new(),
+                    properties: take props), s.peer_max_control, mut wire)
                 enqueue_raw(mut s, mut io, stream, take wire, false)
             } else {
                 s.requests[idx].state = Active
-                let _ = codec.write_message(RequestOk(params: list.new(), properties: list.new()), s.peer_max_control, mut wire)
+                let _ = codec.write_message(RequestOk(params: list.new(), properties: list.new()),
+                    s.peer_max_control, mut wire)
                 let fin = kind == ReqTrackStatus
                 if fin {
                     s.requests[idx].tx_fin = true
@@ -752,12 +826,15 @@ pub fn accept[D](mut s: Session, mut io: LinkIo[D], id: RequestId, ok: Result[()
     }
 }
 
-pub fn subscribe[D](mut s: Session, mut io: LinkIo[D], now: u64, track: codec.TrackName, f: codec.Filter, priority: u8, token: Option[Bytes]) -> Result[RequestId, MoqError] {
+pub fn subscribe[D](mut s: Session, mut io: LinkIo[D], now: u64, track: codec.TrackName,
+    f: codec.Filter, priority: u8, token: Option[Bytes]) -> Result[RequestId, MoqError] {
     subscribe_with(mut s, mut io, now, track, f, priority, Ascending, 0, 0, token)
 }
 
 /// Extended subscribe with group order and delivery timeouts (used by MS3/MS4).
-pub fn subscribe_with[D](mut s: Session, mut io: LinkIo[D], now: u64, track: codec.TrackName, f: codec.Filter, priority: u8, group_order: codec.Direction, obj_timeout_ms: u64, sg_timeout_ms: u64, token: Option[Bytes]) -> Result[RequestId, MoqError] {
+pub fn subscribe_with[D](mut s: Session, mut io: LinkIo[D], now: u64, track: codec.TrackName,
+    f: codec.Filter, priority: u8, group_order: codec.Direction, obj_timeout_ms: u64,
+    sg_timeout_ms: u64, token: Option[Bytes]) -> Result[RequestId, MoqError] {
     s.now = now
     if s.phase == Ended {
         return Error(Closed)
@@ -769,7 +846,8 @@ pub fn subscribe_with[D](mut s: Session, mut io: LinkIo[D], now: u64, track: cod
         return Error(Limit)
     }
     let stream = tx_open(s.link, mut io, true)?
-    tx_priority(s.link, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, order: 0, then: 0))
+    tx_priority(s.link, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, then_high: 0,
+        order: 0, then: 0))
     let id = take_local_req_id(mut s)
     let mut ps: List[codec.Param] = list.new()
     // Ascending parameter codes: 0x02, 0x03, 0x06, 0x20, 0x21, 0x22.
@@ -788,18 +866,26 @@ pub fn subscribe_with[D](mut s: Session, mut io: LinkIo[D], now: u64, track: cod
     }
     list.push(mut ps, GroupOrder(group_order))
     let mut wire: Bytes = list.new()
-    if let Error(e) = codec.write_message(Subscribe(id: id, track: clone(track), params: take ps), s.peer_max_control, mut wire) {
+    if let Error(e) = codec.write_message(Subscribe(id: id, track: clone(track), params: take ps),
+        s.peer_max_control, mut wire) {
         tx_reset(s.link, mut io, stream, RESET_CANCELLED, 0)
         return Error(Wire(e))
     }
-    let req = ReqStream(stream: stream, id: id, kind: ReqSubscribe, local: true, state: Pending, track: Some(clone(track)), prefix: None, alias: None, filter: clone(f), priority: priority, group_order: group_order, paused: false, sub_obj_timeout_ms: obj_timeout_ms, sub_sg_timeout_ms: sg_timeout_ms, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: list.with_capacity(128), rx_fin: false, tx_fin: false)
+    let req = ReqStream(stream: stream, id: id, kind: ReqSubscribe, local: true, state: Pending,
+        track: Some(clone(track)), prefix: None, alias: None, filter: clone(f), priority: priority,
+        group_order: group_order, paused: false, sub_obj_timeout_ms: obj_timeout_ms,
+        sub_sg_timeout_ms: sg_timeout_ms, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0,
+        default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0,
+        rx_buf: list.with_capacity(128), rx_fin: false, tx_fin: false)
     list.push(mut s.requests, take req)
     enqueue_raw(mut s, mut io, stream, take wire, false)
     Ok(RequestId(id))
 }
 
 /// Issue a FETCH request for `[from, to]` on `track`.
-pub fn fetch[D](mut s: Session, mut io: LinkIo[D], now: u64, track: codec.TrackName, from: codec.Location, to: codec.Location, priority: u8, group_order: codec.Direction, token: Option[Bytes]) -> Result[RequestId, MoqError] {
+pub fn fetch[D](mut s: Session, mut io: LinkIo[D], now: u64, track: codec.TrackName,
+    from: codec.Location, to: codec.Location, priority: u8, group_order: codec.Direction,
+    token: Option[Bytes]) -> Result[RequestId, MoqError] {
     s.now = now
     if s.phase == Ended {
         return Error(Closed)
@@ -811,7 +897,8 @@ pub fn fetch[D](mut s: Session, mut io: LinkIo[D], now: u64, track: codec.TrackN
         return Error(Limit)
     }
     let stream = tx_open(s.link, mut io, true)?
-    tx_priority(s.link, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, order: 0, then: 0))
+    tx_priority(s.link, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, then_high: 0,
+        order: 0, then: 0))
     let id = take_local_req_id(mut s)
     let mut ps: List[codec.Param] = list.new()
     if let Some(tok) = token {
@@ -822,18 +909,25 @@ pub fn fetch[D](mut s: Session, mut io: LinkIo[D], now: u64, track: codec.TrackN
     list.push(mut ps, LocationFilter(clone(f)))
     list.push(mut ps, GroupOrder(group_order))
     let mut wire: Bytes = list.new()
-    if let Error(e) = codec.write_message(Fetch(id: id, track: clone(track), params: take ps), s.peer_max_control, mut wire) {
+    if let Error(e) = codec.write_message(Fetch(id: id, track: clone(track), params: take ps),
+        s.peer_max_control, mut wire) {
         tx_reset(s.link, mut io, stream, RESET_CANCELLED, 0)
         return Error(Wire(e))
     }
-    let req = ReqStream(stream: stream, id: id, kind: ReqFetch, local: true, state: Pending, track: Some(clone(track)), prefix: None, alias: None, filter: f, priority: priority, group_order: group_order, paused: false, sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: list.with_capacity(128), rx_fin: false, tx_fin: false)
+    let req = ReqStream(stream: stream, id: id, kind: ReqFetch, local: true, state: Pending,
+        track: Some(clone(track)), prefix: None, alias: None, filter: f, priority: priority,
+        group_order: group_order, paused: false, sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0,
+        pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None,
+        streams_sent: 0, pending_updates: 0, rx_buf: list.with_capacity(128), rx_fin: false,
+        tx_fin: false)
     list.push(mut s.requests, take req)
     enqueue_raw(mut s, mut io, stream, take wire, false)
     Ok(RequestId(id))
 }
 
 /// Issue a PUBLISH_NAMESPACE request for `prefix`.
-pub fn publish_namespace[D](mut s: Session, mut io: LinkIo[D], now: u64, prefix: codec.Namespace, token: Option[Bytes]) -> Result[RequestId, MoqError] {
+pub fn publish_namespace[D](mut s: Session, mut io: LinkIo[D], now: u64, prefix: codec.Namespace,
+    token: Option[Bytes]) -> Result[RequestId, MoqError] {
     s.now = now
     if s.phase == Ended {
         return Error(Closed)
@@ -845,30 +939,39 @@ pub fn publish_namespace[D](mut s: Session, mut io: LinkIo[D], now: u64, prefix:
         return Error(Limit)
     }
     let stream = tx_open(s.link, mut io, true)?
-    tx_priority(s.link, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, order: 0, then: 0))
+    tx_priority(s.link, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, then_high: 0,
+        order: 0, then: 0))
     let id = take_local_req_id(mut s)
     let mut ps: List[codec.Param] = list.new()
     if let Some(tok) = token {
         list.push(mut ps, AuthorizationToken(UseValue(kind: 0, value: clone(tok))))
     }
     let mut wire: Bytes = list.new()
-    if let Error(e) = codec.write_message(PublishNamespace(id: id, prefix: clone(prefix), params: take ps), s.peer_max_control, mut wire) {
+    if let Error(e) = codec.write_message(PublishNamespace(id: id, prefix: clone(prefix),
+        params: take ps), s.peer_max_control, mut wire) {
         tx_reset(s.link, mut io, stream, RESET_CANCELLED, 0)
         return Error(Wire(e))
     }
-    let req = ReqStream(stream: stream, id: id, kind: ReqPublishNamespace, local: true, state: Pending, track: None, prefix: Some(clone(prefix)), alias: None, filter: NoFilter, priority: 128, group_order: Ascending, paused: false, sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: list.with_capacity(128), rx_fin: false, tx_fin: false)
+    let req = ReqStream(stream: stream, id: id, kind: ReqPublishNamespace, local: true,
+        state: Pending, track: None, prefix: Some(clone(prefix)), alias: None, filter: NoFilter,
+        priority: 128, group_order: Ascending, paused: false, sub_obj_timeout_ms: 0,
+        sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0,
+        default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0,
+        rx_buf: list.with_capacity(128), rx_fin: false, tx_fin: false)
     list.push(mut s.requests, take req)
     enqueue_raw(mut s, mut io, stream, take wire, false)
     Ok(RequestId(id))
 }
 
 /// Set publisher-side track delivery timeouts (MOQ-5) for a track published on this session.
-pub fn set_track_timeouts(mut s: Session, track: codec.TrackName, obj_timeout_ms: u64, sg_timeout_ms: u64) {
+pub fn set_track_timeouts(mut s: Session, track: codec.TrackName, obj_timeout_ms: u64,
+    sg_timeout_ms: u64) {
     let pt = ensure_pub_track(mut s, clone(track))
     s.pub_tracks[pt].obj_timeout_ms = obj_timeout_ms
     s.pub_tracks[pt].sg_timeout_ms = sg_timeout_ms
     for i in 0u64 .. list.len(s.requests) {
-        if s.requests[i].track == Some(clone(track)) && !s.requests[i].local && s.requests[i].kind == ReqSubscribe {
+        if s.requests[i].track == Some(clone(track)) && !s.requests[i].local &&
+            s.requests[i].kind == ReqSubscribe {
             s.requests[i].pub_obj_timeout_ms = obj_timeout_ms
             s.requests[i].pub_sg_timeout_ms = sg_timeout_ms
         }
@@ -881,12 +984,14 @@ pub fn end_track[D](mut s: Session, mut io: LinkIo[D], track: codec.TrackName, c
     }
     let mut i = 0u64
     while i < list.len(s.requests) {
-        let is_pub = (s.requests[i].kind == ReqSubscribe && !s.requests[i].local) || (s.requests[i].kind == ReqPublish && s.requests[i].local)
+        let is_pub = (s.requests[i].kind == ReqSubscribe && !s.requests[i].local) ||
+            (s.requests[i].kind == ReqPublish && s.requests[i].local)
         if is_pub && s.requests[i].track == Some(clone(track)) {
             let stream = s.requests[i].stream
             let streams_sent = s.requests[i].streams_sent
             let mut wire: Bytes = list.new()
-            if let Ok(()) = codec.write_message(PublishDone(status: code, streams: streams_sent, reason: b""), s.peer_max_control, mut wire) {
+            if let Ok(()) = codec.write_message(PublishDone(status: code, streams: streams_sent,
+                reason: b""), s.peer_max_control, mut wire) {
                 s.requests[i].tx_fin = true
                 enqueue_raw(mut s, mut io, stream, take wire, true)
             }

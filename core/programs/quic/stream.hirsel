@@ -2,10 +2,28 @@
 // live in one Streams record that application keys create, sized by TransportConfig.
 pub type StreamId: key = StreamId(u64)
 
+/// Smaller (urgency, order, then_high, then) tuples go first.
 pub type Priority: key {
     urgency: u8,
+    /// The bit above the full 64-bit `then` key, either 0 or 1.
+    then_high: u8,
     order: u64,
     then: u64
+}
+
+// Share one byte between urgency and then_high so queued records keep their logical charge.
+type PriorityKey {
+    urgency_and_then_high: u8,
+    order: u64,
+    then: u64
+}
+
+fn priority_key(p: Priority) -> Result[PriorityKey, QuicError] {
+    if p.urgency > 7 || p.then_high > 1 {
+        return Error(Config)
+    }
+    Ok(PriorityKey(urgency_and_then_high: (p.urgency << 1) | p.then_high, order: p.order,
+        then: p.then))
 }
 
 // Received bytes live in fixed pages of one per-connection pool (QUIC-9): the pool holds
@@ -71,7 +89,7 @@ type Send {
     want_writable: bool,
     acked_reported: bool,
     blocked_at: Option[u64],
-    priority: Priority,
+    priority: PriorityKey,
     turn: u64
 }
 
@@ -82,7 +100,9 @@ type Stream {
 }
 
 /// What a sent packet carried, kept until it is acknowledged or requeued.
-type SentFrame = Data(stream: u64, offset: u64, len: u64, fin: bool) | ResetSent(u64) | StopSent(u64) | MaxDataSent | MaxStreamDataSent(u64) | MaxStreamsSent(bool) | DataBlockedSent | StreamBlockedSent(u64) | DatagramSent(u64) | NewCidSent(u64) | RetireSent(u64) | Raw
+type SentFrame = Data(stream: u64, offset: u64, len: u64, fin: bool) | ResetSent(u64) | StopSent(
+    u64) | MaxDataSent | MaxStreamDataSent(u64) | MaxStreamsSent(bool) | DataBlockedSent
+    | StreamBlockedSent(u64) | DatagramSent(u64) | NewCidSent(u64) | RetireSent(u64) | Raw
 
 /// Who queued a datagram: an owner the caller chose (WebTransport uses its session and
 /// generation) and the owner's own tag. drop_datagrams matches both (QUIC-7).
@@ -96,7 +116,7 @@ pub type DatagramTag: key {
 /// is its send_bytes admission, carried unchanged through queued, staged and requeued.
 type QueuedDatagram {
     data: FramedSlice,
-    priority: Priority,
+    priority: PriorityKey,
     tag: DatagramTag,
     seq: u64,
     turn: u64,
@@ -167,7 +187,18 @@ type Streams {
 }
 
 fn no_streams() -> Streams {
-    Streams(ready: false, side_server: false, list: list.new(), pool: Pool(data: b"", free: list.new()), max_gaps: 0, window: 0, stream_window: 0, max_data: 0, consumed: 0, released: 0, max_data_pending: false, bidi_limit: 0, uni_limit: 0, bidi_opened: 0, uni_opened: 0, bidi_closed: 0, uni_closed: 0, bidi_limit_pending: false, uni_limit_pending: false, peer_max_data: 0, sent_data: 0, written_data: 0, data_blocked_at: None, held: 0, send_bytes: 0, reset_stream_at: false, local_bidi_limit: 0, local_uni_limit: 0, local_bidi_opened: 0, local_uni_opened: 0, credit_bidi_local: 0, credit_bidi_remote: 0, credit_uni: 0, turn: 0, inflight: list.new(), inflight_frames: list.new(), seam: b"", datagrams: list.new(), staged_datagrams: list.new(), datagram_seq: 0, peer_datagram: 0, datagrams_sent: 0, datagrams_late: 0, datagrams_late_total: 0, datagram_room: 0, datagrams_refused: 0, payload_copied: 0, cids: no_cids())
+    Streams(ready: false, side_server: false, list: list.new(), pool: Pool(data: b"",
+        free: list.new()), max_gaps: 0, window: 0, stream_window: 0, max_data: 0, consumed: 0,
+        released: 0, max_data_pending: false, bidi_limit: 0, uni_limit: 0, bidi_opened: 0,
+        uni_opened: 0, bidi_closed: 0, uni_closed: 0, bidi_limit_pending: false,
+        uni_limit_pending: false, peer_max_data: 0, sent_data: 0, written_data: 0,
+        data_blocked_at: None, held: 0, send_bytes: 0, reset_stream_at: false, local_bidi_limit: 0,
+        local_uni_limit: 0, local_bidi_opened: 0, local_uni_opened: 0, credit_bidi_local: 0,
+        credit_bidi_remote: 0, credit_uni: 0, turn: 0, inflight: list.new(),
+        inflight_frames: list.new(), seam: b"", datagrams: list.new(), staged_datagrams: list.new(),
+        datagram_seq: 0, peer_datagram: 0, datagrams_sent: 0, datagrams_late: 0,
+        datagrams_late_total: 0, datagram_room: 0, datagrams_refused: 0, payload_copied: 0,
+        cids: no_cids())
 }
 
 fn page_count(window: u64) -> u64 {
@@ -181,7 +212,8 @@ fn stream_pages(window: u64) -> u64 {
 
 /// Charged once when application keys install (QUIC-9): the pool covers the connection
 /// window plus two partial pages per out-of-order range allowed on one stream.
-fn start_streams(mut st: Streams, t: TransportConfig, p: handshake.TransportParameters, server: bool) {
+fn start_streams(mut st: Streams, t: TransportConfig, p: handshake.TransportParameters,
+    server: bool) {
     let gaps: u64 = int.widen(t.max_gaps)
     let window_pages = page_count(t.initial_max_data)
     let pages = window_pages + order.min(2 * (gaps + 2), window_pages)
@@ -237,12 +269,18 @@ fn find(st: Streams, id: u64) -> Option[u64] {
 fn new_recv(st: Streams) -> Recv {
     let mut pages: List[u32] = list.with_capacity(stream_pages(st.stream_window))
     list.fill(mut pages, stream_pages(st.stream_window), NO_PAGE)
-    Recv(base: 0, pages: take pages, read: 0, runs: list.new(), highest: 0, limit: st.stream_window, final_size: None, reset: None, stop: None, stop_pending: false, limit_pending: false)
+    Recv(base: 0, pages: take pages, read: 0, runs: list.new(), highest: 0, limit: st.stream_window,
+        final_size: None, reset: None, stop: None, stop_pending: false, limit_pending: false)
 }
 
 fn new_send(credit: u64, send_bytes: u64) -> Send {
     let piece_cap = order.min(order.max((send_bytes + 65535) / 65536, 8), 128)
-    Send(pieces: list.with_capacity(piece_cap), head: 0, written: 0, next: 0, resend: list.with_capacity(16), acked: list.with_capacity(16), floor: 0, credit: credit, fin: false, fin_pending: false, fin_acked: false, reset: None, reset_pending: false, reset_acked: false, want_writable: false, acked_reported: false, blocked_at: None, priority: Priority(urgency: 3, order: 0, then: 0), turn: 0)
+    let initial_priority = PriorityKey(urgency_and_then_high: 3u8 << 1, order: 0, then: 0)
+    Send(pieces: list.with_capacity(piece_cap), head: 0, written: 0, next: 0,
+        resend: list.with_capacity(16), acked: list.with_capacity(16), floor: 0, credit: credit,
+        fin: false, fin_pending: false, fin_acked: false, reset: None, reset_pending: false,
+        reset_acked: false, want_writable: false, acked_reported: false, blocked_at: None,
+        priority: initial_priority, turn: 0)
 }
 
 /// Create a stream record. Locally opened bidi streams take the peer's bidi_remote credit,
@@ -406,7 +444,8 @@ fn store(mut pool: Pool, mut r: Recv, start: u64, data: Bytes) {
         let within = (at - r.base) % PAGE
         let n = order.min(PAGE - within, end - at)
         let page: u64 = int.widen(r.pages[p])
-        list.copy_from_slice(mut pool.data, page * PAGE + within, list.slice(data, at - start, at - start + n))
+        list.copy_from_slice(mut pool.data, page * PAGE + within, list.slice(data, at - start, at -
+            start + n))
         at += n
     }
 }
@@ -448,7 +487,8 @@ fn release_all(mut pool: Pool, mut r: Recv) {
 /// ReceiveWindow rule); never without a read.
 fn release_data(mut st: Streams, n: u64) {
     st.released += n
-    if st.released + st.window - st.max_data >= st.window / 2 && st.released + st.window > st.max_data {
+    if st.released + st.window - st.max_data >= st.window / 2 && st.released + st.window >
+        st.max_data {
         st.max_data = st.released + st.window
         st.max_data_pending = true
     }

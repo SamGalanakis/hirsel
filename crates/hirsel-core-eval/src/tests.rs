@@ -205,7 +205,9 @@ fn host_return_place_and_instruction_allowance() {
         "budget",
         "core v1\nsig g0 = () -> ()\ninst n0 = app@1/main/looping [] []\nfn f0 = n0 g0 {\nb0:\n jump b0\n}\n",
     );
-    wf::module(&looping).unwrap();
+    let err = wf::module(&looping).expect_err("an unmetered loop must fail admission");
+    assert!(err.contains("cycle without a metering charge"), "{err}");
+    // Run the refused fixture directly to exercise the evaluator's host allowance.
     let fault = std::panic::catch_unwind(|| {
         eval::run_nans_into(
             &looping,
@@ -705,27 +707,24 @@ fn an_alloc_names_the_edge_that_cleans_it() {
 /// slots ended at exit).
 #[test]
 fn a_frame_slot_ends_with_its_activation() {
-    let module = |main: &str| {
-        format!(
-            "core v1\nsig g0 = () -> (u64)\nsig g1 = () -> (ptr)\ninst n0 = p@0/m/main [] []\ninst n1 = p@0/m/leak [] []\nfn f0 = n0 g0 {{\n  addr a0 = v0 : u64\nb0:\n{main}}}\nfn f1 = n1 g1 {{\n  slot s0 = u64\n  addr a0 = s0 : u64\nb0:\n  live s0\n  v0: u64 = const 7\n  address a0\n  store a0, v0\n  v1: ptr = pointer a0\n  return v1\n}}\n"
-        )
-    };
-    let run = |text: &str| {
-        let m = load("frame", text);
-        wf::module(&m).unwrap();
-        std::panic::catch_unwind(|| eval::run(&m, FuncId(0), &[], u64::MAX))
-            .map(|r| r.outcome)
-            .map_err(|e| match e.downcast::<String>() {
-                Ok(s) => *s,
-                Err(e) => e
-                    .downcast::<&str>()
-                    .map_or_else(|_| String::new(), |s| s.to_string()),
-            })
-    };
-    let err = run(&module(
-        "  v0: ptr = call f1 g1 ()\n  address a0\n  v1: u64 = read a0\n  return v1\n",
-    ))
-    .unwrap_err();
+    let m = load(
+        "frame",
+        "core v1\nsig g0 = () -> (u64)\nsig g1 = () -> (ptr)\ninst n0 = p@0/m/main [] []\ninst n1 = p@0/m/leak [] []\nfn f0 = n0 g0 {\n  addr a0 = v0 : u64\nb0:\n  v0: ptr = call f1 g1 ()\n  address a0\n  v1: u64 = read a0\n  return v1\n}\nfn f1 = n1 g1 {\n  slot s0 = u64\n  addr a0 = s0 : u64\nb0:\n  live s0\n  v0: u64 = const 7\n  address a0\n  store a0, v0\n  v1: ptr = pointer a0\n  return v1\n}\n",
+    );
+    let err = wf::module(&m).expect_err("a frame pointer cannot escape by return");
+    assert!(
+        err.contains("returns a pointer into local slot s0"),
+        "{err}"
+    );
+    // Exercise frame retirement in the evaluator with the refused fixture.
+    let fault = std::panic::catch_unwind(|| eval::run(&m, FuncId(0), &[], u64::MAX))
+        .err()
+        .expect("a stale frame pointer must fault");
+    let err = fault
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| fault.downcast_ref::<&str>().copied())
+        .unwrap();
     assert!(err.contains("use of a freed block"), "{err}");
 }
 
@@ -848,6 +847,7 @@ b0(v0: u64):
 b1:
  return v1
 b2:
+ step
  v3: u64 = const 1
  v4: u64 = sub v0, v3
  v5: u64 = call f2 g0 (v4)

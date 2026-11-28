@@ -213,6 +213,7 @@ b0(v0: u64):
 b1:
  return
 b2:
+ step
  v3: u64 = const 1
  v4: u64 = wrapping_sub v0, v3
  call f0 g0 (v4)
@@ -686,66 +687,7 @@ b4():
 
 #[test]
 fn local_homes_keep_ssa_addresses_across_blocks_and_entry_back_edges() {
-    let module = text::parse(
-        r#"core v1
-sig g0 = (u64) -> (u64)
-sig g1 = (bool, u64) -> (u64)
-inst n0 = tests@0/homes/local [] []
-inst n1 = tests@0/homes/identity [] []
-inst n2 = tests@0/homes/inactive [] []
-inst n3 = tests@0/homes/entry_loop [] []
-fn f0 = n0 g0 {
- slot s0 = u64
- addr a0 = s0 : u64
-b0(v0: u64):
- live s0
- address a0
- store a0, v0
- v1: u64 = read a0
- v2: u64 = call f1 g0 (v1)
- dead s0
- return v2
-}
-fn f1 = n1 g0 {
-b0(v0: u64):
- return v0
-}
-fn f2 = n2 g1 {
- slot s0 = u64
- addr a0 = s0 : u64
-b0(v0: bool, v1: u64):
- live s0
- address a0
- store a0, v1
- branch v0, b1(), b2()
-b1():
- jump b2()
-b2():
- branch v0, b3(), b4()
-b3():
- v2: u64 = read a0
- dead s0
- return v2
-b4():
- v3: u64 = const 0
- dead s0
- return v3
-}
-fn f3 = n3 g0 {
-b0(v0: u64):
- v1: u64 = const 0
- v2: bool = ne v0, v1
- branch v2, b1(), b2()
-b1():
- v3: u64 = const 1
- v4: u64 = wrapping_sub v0, v3
- jump b0(v4)
-b2():
- return v0
-}
-"#,
-    )
-    .unwrap();
+    let module = text::parse(include_str!("../../tests/core_runtime/local_homes.core")).unwrap();
     wf::module(&module).unwrap();
     let raw = emit_ir(&module).unwrap();
     let local = raw
@@ -1767,7 +1709,10 @@ fn terminal_results_forward_without_abandoning_cleanup_or_local_arguments() {
 #[test]
 fn infallible_direct_calls_keep_the_external_and_indirect_failure_abi() {
     let module = text::parse(include_str!("../../tests/core_runtime/infallible.core")).unwrap();
-    wf::module(&module).unwrap();
+    let err = wf::module(&module).expect_err("unmetered mutual recursion must fail admission");
+    assert!(err.contains("cycle without a metering charge"), "{err}");
+    // This backend test exercises failure analysis on a recursive component with
+    // no source of failure. An admitted recursive component would have a Step.
     assert_eq!(
         failure::Failures::new(&module).may_fail,
         [false, false, true, true, true]

@@ -1,6 +1,7 @@
 //! Mechanical `key` glue. Generic calls retain a type recipe until the ordinary
 //! instance materializer substitutes it; no source body is checked again.
 use super::*;
+mod packed_array;
 mod runtime;
 use hirsel_core_ir::RtOp;
 use hirsel_core_layout::{Body as ShapeBody, FieldTy};
@@ -959,9 +960,7 @@ impl Derive<'_> {
                 self.order_result(c, result, different);
             }
             FieldTy::Array(item, count) => {
-                let len = c.constant(*count);
-                ats =
-                    self.order_packed_sequence(c, item, blobs, ats, widths, [len, len], different)?;
+                ats = self.order_packed_array(c, item, blobs, ats, widths, *count, different)?;
             }
             FieldTy::FixedSpan(item) | FieldTy::SeqSpan(item) | FieldTy::IndexedSpan(item) => {
                 let mut lengths = [ValueId(0); 2];

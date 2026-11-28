@@ -135,15 +135,18 @@ fn loans_stop_producer_aliasing() {
 #[test]
 fn roles_hold_or_stop_the_run() {
     let list = "core v1\ntype t0 = own \"List[u8]\" { items: seq u8 }\n";
-    let run = |text: &str, f: u32, args: &[u64]| {
-        let m = parse(&format!("{list}{text}")).unwrap();
-        wf::module(&m).unwrap_or_else(|e| panic!("{e}"));
-        std::panic::catch_unwind(|| eval::run(&m, FuncId(f), args, u64::MAX))
+    let run_eval = |m: &Module, f: u32, args: &[u64]| {
+        std::panic::catch_unwind(|| eval::run(m, FuncId(f), args, u64::MAX))
             .map(|r| r.outcome)
             .map_err(|e| {
                 e.downcast::<String>()
                     .map_or_else(|_| String::new(), |s| *s)
             })
+    };
+    let run = |text: &str, f: u32, args: &[u64]| {
+        let m = parse(&format!("{list}{text}")).unwrap();
+        wf::module(&m).unwrap_or_else(|e| panic!("{e}"));
+        run_eval(&m, f, args)
     };
     // Bug: a kernel points one carrier's data word at another carrier's place, so a
     // buffer store rewrites that carrier's length behind LLVM's alias scopes. The
@@ -176,7 +179,16 @@ fn roles_hold_or_stop_the_run() {
         "{f0}",
         "fn f0 = n0 g0 {\n  slot s0 = t0\n  addr a0 = v0 byte v1 : u64\n  addr a1 = s0 byte v1 : u64\n  addr a2 = s0 : t0\nb0(v0: ptr):\n  v1: u64 = const 8\n  v3: u64 = const 7\n  address a0\n  v2: u64 = read a0\n  v4: bool = eq v2, v3\n  branch v4, b2, b1\nb1:\n  live s0\n  address a1\n  store a1, v3\n  address a2\n  v5: ptr = pointer a2\n  jump b0(v5)\nb2:\n  return v2\n}\n",
     );
-    assert_eq!(run(&reentry, 1, &[]), Ok(eval::Outcome::Returned(vec![7])));
+    let reentry = parse(&format!("{list}{reentry}")).unwrap();
+    let err = wf::module(&reentry).expect_err("an entry back edge cannot rebind a pointer");
+    assert!(
+        err.contains("an edge into b0 gives pointer parameter v0 v5"),
+        "{err}"
+    );
+    assert_eq!(
+        run_eval(&reentry, 1, &[]),
+        Ok(eval::Outcome::Returned(vec![7]))
+    );
     // Bug: each carrier's buffer gets its own role. A move hands the buffer to
     // another carrier: element 0 is written through s0's data and read back (5)
     // through s1's, the same bytes under two carriers.

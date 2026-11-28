@@ -38,10 +38,7 @@ inst n0 = tests@0/partition_attrs/stop0 [] []
 inst n1 = tests@0/partition_attrs/caller0 [] []
 fn f0 = n0 g0 cold {
 b0(v0: ptr):
-  v1: u64 = const 0
-  jump b1
-b1:
-  jump b1
+  unreachable
 }
 fn f1 = n1 g0 {
   addr a0 = v0 : t0

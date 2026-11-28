@@ -1129,7 +1129,7 @@ ends when that child stops.
 
 | Client | Unchanged surface | Changed surface |
 |---|---|---|
-| SDK client, bound Caller | closes, backs off, reconnects with the same Caller, resubscribes with new IDs and replays its pending request; `admit(p)` returns the stored reply or runs a request that never committed | one `Placed(Gone)` for any want makes the client `Incompatible` before it sends its pending call; nothing reloads the page unless the app's handler or the bundler does, in no guaranteed order |
+| SDK client, bound Caller | closes, backs off, reconnects with the same Caller, resubscribes with new IDs and resends its pending recovered request with its original bytes. STORE-SPEC §1.8 decides whether it gets a retained reply, starts fresh or receives a refusal | one `Placed(Gone)` for any want makes the client `Incompatible` before it sends its pending call; nothing reloads the page unless the app's handler or the bundler does, in no guaranteed order |
 | SDK client, anonymous | a new Caller on reconnect, so a pending call settles `LocallyUnknown` and its effect may exist | as above |
 | Page reload | promises and room handles are gone; a new client with the durable stream reports recovery through its callback | as left |
 | Raw WebSocket, HTTP | the socket closes during the swap; a raw client needs its own reconnect, Hello, placement and subscriptions, and an HTTP request can lose its reply | as left |

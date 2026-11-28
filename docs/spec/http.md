@@ -1337,7 +1337,7 @@ A query entry returns an `Answer[R]`: a codec value R and an opaque `CoverSet` (
 
 **Purpose.** Some clients bring their own retry key, an opaque string rather than a (stream, position) pair: webhook delivery IDs, payment-style `Idempotency-Key`s, and upstream message IDs. A keyed operation runs a transact entry at most once per **claim** (`op`, principal, key) while the claim is live (K-5).
 
-**What it shares with streams, and what it adds.** It shares the admission logic of `admit` (store.hirsel:1449): a durable admit before the body runs, one worker per identity, a digest check, and a stored reply. It adds a store control extension (K-4), expiry (K-6), quotas (K-7) and a recovery queue (K-8). It is not the stream machine unchanged.
+**Keyed admission.** A keyed claim persists its arguments and digest before the body runs (K-4, K-5). Both keyed claims and recovered streams compare the digest before joining a worker or returning a saved reply. Expiry (K-6), quotas (K-7) and the recovery queue (K-8) govern keyed claims. STORE-SPEC §1.8 governs stream positions.
 
 ### 4.0 Prior art
 
@@ -1606,7 +1606,7 @@ A removed keyed op must still answer its live claims' retries, with the original
 
 ### K-10: What keyed operations are not
 
-- Not the stream machine unchanged. It shares `admit`'s logic, and extends F2's control section (K-4).
+- The claim uses F2's control section (K-4) to store its durable admission and terminal result.
 - Not an HTTP cache. The store is the only memory.
 - Not available to compute, query or granted entries.
 ## 5. Outside inputs

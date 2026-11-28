@@ -661,20 +661,3 @@ fn exec_startup_binds_the_policy_and_pins_the_image() {
         matches!(PinnedImage::open(&script.profiles["git"]), Err(reason) if reason.contains("without a #! line"))
     );
 }
-
-fn build_copy_filter(image: &Path) {
-    // macOS kills relocated system executables. Pin a native copy filter built
-    // in the work directory so deleting that directory removes the host image.
-    let source = image.with_extension("c");
-    std::fs::write(&source, r#"#include <stdio.h>
-int main(void) {
-    int c;
-    while ((c = getchar()) != EOF) {
-        if (putchar(c) == EOF) return 1;
-    }
-    return ferror(stdin) || fflush(stdout);
-}
-"#).unwrap();
-    let options = native_options(Backend::Cranelift, image.parent().unwrap());
-    command(Command::new(options.link.driver()).arg(&source).arg("-o").arg(image)).unwrap();
-}

@@ -365,7 +365,7 @@ fn replaced_watch_leaves_one_poll() {
 /// queue's capacity may be lost.
 #[test]
 fn readiness_beyond_the_completion_queue_is_all_reported() {
-    const CQ_ENTRIES: u32 = 512;
+    const CQ_ENTRIES: u32 = 128;
     let (poller, completion_entries) = match reactor().unwrap() {
         #[cfg(target_os = "linux")]
         Reactor::IoUring => {
@@ -378,7 +378,8 @@ fn readiness_beyond_the_completion_queue_is_all_reported() {
         #[cfg(target_os = "macos")]
         Reactor::Kqueue => (Poller::new_readiness().unwrap(), CQ_ENTRIES),
     };
-    // Keep the burst at three times the CQ while fitting within 4,096 fds.
+    // Three times the CQ takes 768 socket fds, leaving room under the
+    // nightly service's soft limit of 1,024 for the reactor and other tests.
     let socket_count = 3 * completion_entries as usize;
     let mut sockets = Sockets::default();
     sockets.poller = Some(poller);

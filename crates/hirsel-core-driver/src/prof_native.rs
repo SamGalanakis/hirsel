@@ -723,13 +723,13 @@ pub fn main() -> Result[(), Exit] {
     // site_owner, run and stack_floor, flags padded to a word, four state
     // words, causes, task_record, two pointers, the isolates Vec, inline
     // step bounds (three payload words and a tag), two step IDs, eight state words,
-    // contained instances (a Linux Vec) and the glue Vec.
+    // contained instances (a Linux Vec), glue Vec and pending decode (Vec and scratch word).
     let instances = match crate::host::HOST_TARGET.os() {
         hirsel_core_layout::Os::Linux => 3 * 8,
         hirsel_core_layout::Os::Macos | hirsel_core_layout::Os::Ios => 0,
     };
     let context_fields: i64 = 64 + 2 * 32 + 3 * 8 + 8 + 4 * 8 + 2 * 16 + 2 * 8
-        + 24 + 32 + 2 * 8 + 8 * 8 + instances + 24;
+        + 24 + 32 + 2 * 8 + 8 * 8 + instances + 24 + 32;
     let cache_aligned = |bytes: i64| (bytes + 63) / 64 * 64;
     // Task's flags, polls_left and context pointer precede the aligned owned
     // Context. Then run and ready, waiters and links, timer, operation and four
@@ -738,7 +738,7 @@ pub fn main() -> Result[(), Exit] {
     // Group; stack; sp and body; input and result pointers; storage Layout;
     // TaskLayout. The root uses separate 16-byte input and 24-byte result stores.
     let task_entry = 24 + 24 + 16 + 2 * 8 + 16 + 64;
-    let task_tail = 8 + 16 + 8 + 8 + 24 + 24 + 16 + 8;
+    let task_tail = 8 + 16 + 8 + 8 + 24 + 24 + 16 + 8 + 24; // Ends with the code pins Vec.
     let task = cache_aligned(task_header + task_entry + task_tail);
     // PACK-9.7's cause cell adds an owner word and two inline owner pointers.
     let cause_cell = 32 + 3 * 8 + 2 * 8 + 8;

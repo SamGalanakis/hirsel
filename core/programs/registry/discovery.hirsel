@@ -1,0 +1,204 @@
+// Read-only discovery daemon. Both listeners bind loopback. The only network
+// reads upstream are public checkpoints, entry bundles, evidence and frames.
+type Settings: codec {
+    origin: String,
+    release_key: String,
+    status_key: String,
+    mode: String,
+    witness_keys: List[String],
+    allowed_origins: List[String],
+    mcp_port: u16,
+    json_port: u16
+}
+
+fn trust(cfg: Settings) -> Result[directory_log.Trust, String] {
+    let Ok(uri) = std.uri.parse(cfg.origin) else {
+        return Error("invalid registry origin")
+    }
+    let Some(host) = std.string.strip_prefix(cfg.origin, "https://") else {
+        return Error("expected HTTPS registry origin")
+    }
+    if uri.host == None || uri.userinfo != None || uri.query != None || uri.fragment != None || uri.path.start != uri.path.end {
+        return Error("expected a registry origin")
+    }
+    if !(cfg.mode == "preview" && cfg.origin != "https://pkg.hirsel.ai" && list.len(cfg.witness_keys) == 0) && !(cfg.mode == "witnessed" && list.len(cfg.witness_keys) == 2) {
+        return Error("invalid witness mode")
+    }
+    let Ok(release) = tlog.note.verifier_key(cfg.release_key) else {
+        return Error("invalid release verifier")
+    }
+    let Ok(status) = tlog.note.verifier_key(cfg.status_key) else {
+        return Error("invalid status verifier")
+    }
+    let mut witnesses: List[tlog.note.VerifierKey] = list.new()
+    for pin in cfg.witness_keys {
+        let Ok(key) = tlog.note.verifier_key(pin) else {
+            return Error("invalid witness verifier")
+        }
+        list.push(mut witnesses, take key)
+    }
+    Ok(directory_log.Trust(origin: string.from(host), release_key: take release, status_key: take status, witnesses: take witnesses))
+}
+
+fn fetch(cl: std.http_client.Client, origin: String, key: String, limit: u64, clock: Clock) -> Result[Bytes, String] waits {
+    let mut url = string.from(origin)
+    string.push(mut url, "/")
+    string.push(mut url, key)
+    let req = std.http_client.Fetch(method: "GET", url: take url, headers: list.new(), body: list.new())
+    let Ok(response) = std.http_client.fetch(cl, req, std.clock.deadline_after_ms(host.mono_ns(clock), 30000)) else {
+        return Error("registry read unavailable")
+    }
+    let mut r = take response
+    if std.http_client.status(std.http_client.fetch_head(r)) != 200 {
+        return Error("registry object unavailable")
+    }
+    let mut data: Bytes = list.new()
+    loop {
+        if list.len(data) == list.capacity(data) {
+            list.reserve(mut data, order.min(65536u64, limit - list.len(data) + 1))
+        }
+        let Ok(n) = std.http_client.fetch_read(mut r, mut data) else {
+            return Error("registry body unavailable")
+        }
+        if list.len(data) > limit {
+            return Error("registry object exceeds byte limit")
+        }
+        if n == 0 {
+            return Ok(take data)
+        }
+    }
+}
+
+pub fn frame(cl: std.http_client.Client, origin: String, root: String, clock: Clock) -> Result[Bytes, String] waits {
+    let mut key = string.from("c/")
+    string.push(mut key, root)
+    string.push(mut key, ".zst")
+    fetch(cl, origin, key, pending.MAX_COMPRESSED_FRAME, clock)
+}
+
+pub fn public_origin(config: Dir) -> Result[String, String] waits {
+    let Ok(raw) = std.file.read_string_bounded(config, "discovery.json", 65536) else {
+        return Error("cannot read discovery.json")
+    }
+    let format: std.json.Format[Settings] = result.unwrap(std.json.interop())
+    let Ok(cfg) = std.json.from_string(format, raw, 65536) else {
+        return Error("invalid discovery.json")
+    }
+    let _ = trust(cfg)?
+    Ok(clone(cfg.origin))
+}
+
+pub fn refresh(mut db: store.Db, tables: directory.Tables, mut history: directory_log.History, pins: directory_log.Trust, now: u64, get: scoped fn(String, u64) -> Result[Bytes, String] waits) -> Result[(), String] waits {
+    directory_log.advance(mut history, pins, Status, now, get)?
+    directory_log.advance(mut history, pins, Release, now, get)?
+    match directory.replay(mut db, tables, history, scoped fn(digest: String, limit: u64) -> Result[Bytes, String] waits {
+        let mut key = string.from("e/")
+        string.push(mut key, digest)
+        get(key, limit)
+    }) {
+        Ok(()) => Ok(()),
+        Error(Input(e)) => Error(take e),
+        Error(_) => Error("directory projection failed"),
+    }
+}
+
+pub fn compiler_source(_content: Bytes, _path: String, _limit: u64) -> Result[String, String] {
+    Error("this compiler has no archive member extraction operation")
+}
+
+type ListenerJob: send {
+    site: Listener,
+    ctx: mcp_hub.Ctx,
+    clock: Clock,
+    tasks: Tasks,
+    random: Random,
+    origins: List[String]
+}
+
+fn serve_mcp(take job: ListenerJob) -> Result[(), std.http.ServeError] waits {
+    let ListenerJob(site: take site, ctx: take ctx, clock, tasks, random, origins: take origins) = take job
+    mcp_hub.serve(take site, ctx.requests, clock, tasks, random, origins, None)
+}
+
+fn serve_json(take job: ListenerJob) -> Result[(), std.http.ServeError] waits {
+    let ListenerJob(site: take site, ctx: take ctx, clock, tasks, ..) = take job
+    directory_http.serve(take site, ctx.requests, clock, tasks, None)
+}
+
+pub fn main(n: Net, clock: Clock, tasks: Tasks, random: Random, config: Dir, projection: Dir, err: Stderr) -> Result[(), Exit] waits {
+    let down = Exit(status: 1)
+    let invalid = Exit(status: 2)
+    let Ok(raw) = std.file.read_string_bounded(config, "discovery.json", 65536) else {
+        return Error(invalid)
+    }
+    let format: std.json.Format[Settings] = result.unwrap(std.json.interop())
+    let Ok(cfg) = std.json.from_string(format, raw, 65536) else {
+        return Error(invalid)
+    }
+    let Ok(pins) = trust(cfg) else {
+        return Error(invalid)
+    }
+    let mut limits = std.http_client.limits(pending.MAX_COMPRESSED_FRAME)
+    limits.redirects = Return
+    limits.decode = false
+    let Ok(pool) = std.http_client.pool(n, clock, tasks, System, limits) else {
+        return Error(down)
+    }
+    let options = result.unwrap(store.sized(Directory, 2147483648u64))
+    let Ok(opened) = store.open(tasks, projection, clock, random, options) else {
+        return Error(down)
+    }
+    let mut db = take opened
+    let Ok(tables) = store.bind_declaration(mut db, Migrate, directory.schema) else {
+        return Error(down)
+    }
+    let Ok(reader) = store.reader(db, 0) else {
+        return Error(down)
+    }
+    let Ok((mcp_site, _)) = host.listen(n, Addr(ip: V4(2130706433), port: cfg.mcp_port), 32) else {
+        return Error(down)
+    }
+    let Ok((json_site, _)) = host.listen(n, Addr(ip: V4(2130706433), port: cfg.json_port), 32) else {
+        return Error(down)
+    }
+    let (to, from): (Sender[mcp_hub.Call], Receiver[mcp_hub.Call]) = channel.new(32)
+    let mcp_job = task.spawn(tasks, bytes 1073741824, ListenerJob(site: take mcp_site, ctx: mcp_hub.Ctx(requests: channel.sender(to)), clock, tasks, random, origins: clone(cfg.allowed_origins)), serve_mcp)
+    let json_job = task.spawn(tasks, bytes 1073741824, ListenerJob(site: take json_site, ctx: mcp_hub.Ctx(requests: take to), clock, tasks, random, origins: list.new()), serve_json)
+    let mut history = directory_log.empty()
+    let mut ready = false
+    let mut next = 0u64
+    loop {
+        if host.mono_ns(clock) >= next {
+            match refresh(mut db, tables, mut history, pins, host.wall_ms(clock) / 1000, scoped fn(key: String, limit: u64) -> Result[Bytes, String] waits {
+                fetch(std.http_client.handle(pool), cfg.origin, key, limit, clock)
+            }) {
+                Ok(()) => {
+                    ready = true
+                },
+                Error(e) => {
+                    ready = false
+                    let _ = stderr.write(err, e)
+                },
+            }
+            next = std.clock.deadline_after_ms(host.mono_ns(clock), 5000)
+        }
+        match channel.receive_until(from, At(clock, next)) {
+            Ok(msg) => {
+                let value = if ready {
+                    mcp_hub.answer(reader, store.snapshot(db), tables, msg.name, msg.arguments, scoped fn(root: String) -> Result[Bytes, String] waits {
+                        frame(std.http_client.handle(pool), cfg.origin, root, clock)
+                    }, compiler_source)
+                } else {
+                    Error(string.from("directory replay unavailable"))
+                }
+                let _ = channel.try_send(msg.reply, take value)
+            },
+            Error(Closed) => break,
+            Error(Empty) => {},
+        }
+    }
+    let _ = task.join(take mcp_job)
+    let _ = task.join(take json_job)
+    let _ = store.close(take db)
+    Error(down)
+}

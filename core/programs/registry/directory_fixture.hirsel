@@ -1,0 +1,148 @@
+// Public, deterministic checked-library fixtures. Use the Phase 1 writer and
+// its two witness peers to materialize the exact bucket objects read by refresh.
+fn fixture_content() -> Bytes {
+    b"\x03\x0eacme.dev/codec\x01\x00\x00\x00\x09charge-v1\x00\x01\x0bleaf.hirsel\x01\x04leaf\x1apub fn one() -> u64 { 1 }\x0a\x00"
+}
+
+fn fixture_extract(data: Bytes, path: String, limit: u64) -> Result[String, String] {
+    if data != fixture_content() || path != "leaf.hirsel" || limit < 26 {
+        return Error("fixture member unavailable")
+    }
+    Ok("pub fn one() -> u64 { 1 }\n")
+}
+
+fn fixture_sidecar(root: String, id: String, version: String, binding: String, doc: String, exports: u64, net: bool) -> String {
+    let mut items: List[String] = list.new()
+    let mut reached: mcp.rpc.Fields = map.new()
+    for i in 0u64 .. exports {
+        let name = if i == 0 {
+            string.from("one")
+        } else {
+            cat2("count_", pending.decimal(i))
+        }
+        let mut item: mcp.rpc.Fields = map.new()
+        mcp.rpc.put(mut item, "definition", pending.quoted(cat3(id, "/leaf/", name)))
+        mcp.rpc.put(mut item, "doc", pending.quoted(doc))
+        mcp.rpc.put(mut item, "kind", "\"function\"")
+        mcp.rpc.put(mut item, "name", pending.quoted(name))
+        mcp.rpc.put(mut item, "signature", pending.quoted(cat3("pub fn ", name, if net {
+            "(n: Net) -> u64"
+        } else {
+            "() -> u64"
+        })))
+        list.push(mut items, mcp.rpc.encode_object(item))
+        mcp.rpc.put(mut reached, cat2("leaf/", name), if net {
+            "{\"contained\":[],\"kinds\":[\"Net\"],\"provided\":[],\"unresolved\":null}"
+        } else {
+            "{\"contained\":[],\"kinds\":[],\"provided\":[],\"unresolved\":null}"
+        })
+    }
+    let Some((name, _)) = std.string.split_once(id, "@") else {
+        fail("invalid fixture identity")
+    }
+    let card = cat3("{\"carried\":{},\"reached\":", mcp.rpc.encode_object(reached), if net {
+        ",\"verdict\":[\"Net\"]}"
+    } else {
+        ",\"verdict\":\"pure\"}"
+    })
+    let bindings = if binding == "" {
+        string.from("[]")
+    } else {
+        cat3("[[\"codec\",\"acme.dev/codec@1\",\"floor\",", pending.quoted(binding), ",\"1.0.0\"]]")
+    }
+    let header = cat3("{\"charge\":\"charge-v1\",\"identity\":", pending.quoted(id), cat3(",\"version\":", pending.quoted(version), "}"))
+    let api = cat3("{\"modules\":[{\"extends_core\":false,\"items\":", admit.array(items), cat3(",\"path\":[\"leaf\"]}],\"package\":{\"name\":", pending.quoted(name), ",\"version\":\"1\"},\"version\":1}"))
+    cat3("{\"authority\":", card, cat3(",\"bindings\":", bindings, cat3(",\"header\":", header, cat3(",\"interface\":", api, cat3(",\"root\":", pending.quoted(root), "}")))))
+}
+
+fn discovery_publish(id: String, version: String, payload: String, binding: String, doc: String, exports: u64, net: bool, first: bool) -> commit.PublishRequest {
+    let mut req = build_publish_req("acme.dev", id, version, payload, if first {
+        0u64
+    } else {
+        1u64
+    }, if first {
+        Some(subjects_one(SUB_A))
+    } else {
+        None
+    }, SUB_A, false)
+    let data = string.into_bytes(fixture_sidecar(req.root, id, version, binding, doc, exports, net))
+    let digest = pending.sha256_hex(data)
+    req.evidence[0] = commit.EvidenceInput(digest: clone(digest), data: take data)
+    req.release_entry = make_release_entry(id, version, req.root, 1, digest, 1730000000, SUB_A, req.intent_digest)
+    take req
+}
+
+fn discovery_trust() -> directory_log.Trust {
+    let mut witnesses: List[tlog.note.VerifierKey] = list.new()
+    list.push(mut witnesses, result.unwrap(tlog.note.verifier_key(WITNESS_A_VKEY)))
+    list.push(mut witnesses, result.unwrap(tlog.note.verifier_key(WITNESS_B_VKEY)))
+    directory_log.Trust(origin: "pkg.example", release_key: result.unwrap(tlog.note.verifier_key(RELEASE_VKEY)), status_key: result.unwrap(tlog.note.verifier_key(STATUS_VKEY)), witnesses: take witnesses)
+}
+
+fn refresh_bucket(mut db: store.Db, tables: directory.Tables, mut history: directory_log.History, mut client: std.object.Client, now: u64) -> Result[(), String] waits {
+    discovery.refresh(mut db, tables, mut history, discovery_trust(), now, scoped fn(key: String, limit: u64) -> Result[Bytes, String] waits {
+        match checkpoint.fetch_object(mut client, key, 65536, limit, DEADLINE) {
+            Ok((_, data)) => Ok(take data),
+            Error(_) => Error(cat2("missing bucket key ", key)),
+        }
+    })
+}
+
+fn read_query(db: store.Db, tables: directory.Tables, name: String, args: String) -> Result[String, String] waits {
+    let reader = result.unwrap(store.reader(db, 0))
+    mcp_hub.answer(reader, store.snapshot(db), tables, name, args, scoped fn(_root: String) -> Result[Bytes, String] {
+        Error("unexpected frame read")
+    }, fixture_extract)
+}
+
+fn hit_roots(data: String) -> List[String] {
+    let mut roots: List[String] = list.new()
+    for item in result.unwrap(mcp.rpc.array(data)) {
+        list.push(mut roots, option.unwrap(mcp.rpc.field_text(result.unwrap(mcp.rpc.object(item)), "root")))
+    }
+    take roots
+}
+
+fn fixture_args(root: String) -> String {
+    cat3("{\"root\":", pending.quoted(root), "}")
+}
+
+type SampleRoots: send {
+    old: String,
+    latest: String,
+    reader: String
+}
+
+fn sample_queries(roots: SampleRoots) -> List[(String, String)] {
+    let mut inputs: List[(String, String)] = list.new()
+    list.push(mut inputs, ("search", "{\"query\":\"quartz\",\"pure_only\":true,\"scope\":\"acme.dev\",\"status\":\"retired\"}"))
+    list.push(mut inputs, ("search", cat3("{\"query\":\"\",\"depends_on\":", pending.quoted(roots.old), ",\"status\":\"takedown\"}")))
+    list.push(mut inputs, ("search", "{\"query\":\"\",\"signature\":\"one() -> u64\"}"))
+    list.push(mut inputs, ("search", "{\"query\":\"\",\"status\":\"advisory\"}"))
+    list.push(mut inputs, ("releases", "{\"identity\":\"acme.dev/codec@1\"}"))
+    list.push(mut inputs, ("interface", fixture_args(roots.latest)))
+    list.push(mut inputs, ("authority", fixture_args(roots.old)))
+    list.push(mut inputs, ("diff", cat3("{\"root_a\":", pending.quoted(roots.old), cat3(",\"root_b\":", pending.quoted(roots.latest), "}"))))
+    list.push(mut inputs, ("advisories", cat3("{\"roots\":[", pending.quoted(roots.old), "]}")))
+    take inputs
+}
+
+fn sample_answers(db: store.Db, tables: directory.Tables, roots: SampleRoots) -> Result[List[String], String] waits {
+    let mut outputs: List[String] = list.new()
+    for pair in sample_queries(roots) {
+        list.push(mut outputs, read_query(db, tables, pair.0, pair.1)?)
+    }
+    let selected: Inline[String, 4] =[clone(roots.old), clone(roots.reader), clone(roots.latest), clone(roots.old)]
+    for i in 0u64 .. 4 {
+        let hits = hit_roots(outputs[i])
+        require(list.len(hits) == 1 && hits[0] == selected[i], "wrong filtered root")?
+    }
+    require(list.len(hit_roots(outputs[4])) == 2, "release history missing")?
+    let diff = result.unwrap(mcp.rpc.object(outputs[7]))
+    require(list.len(directory_facts.array(directory_facts.member(diff, "added")?)?) == 47, "diff missing exports")?
+    require(std.string.find(outputs[8], 0, "OSV-1") != None, "advisory missing")?
+    if let Ok(_) = read_query(db, tables, "interface", fixture_args(roots.reader)) {
+        return Error("takedown exposed interface")
+    }
+    Ok(take outputs)
+}

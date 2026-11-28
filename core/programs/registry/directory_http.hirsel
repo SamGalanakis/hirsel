@@ -1,0 +1,54 @@
+pub type Front: send {
+    ctx: mcp_hub.Ctx,
+    clock: Clock
+}
+
+fn response(code: u16, take wire: String) -> Result[std.http.Outcome, std.http.HandlerError] {
+    let mut reply = std.http.response(code, string.into_bytes(take wire), false)?
+    std.http.header(mut reply, b"content-type", b"application/json")?
+    Ok(Reply(take reply))
+}
+
+fn query(req: std.http.Request, scratch: Region, mut responder: std.http.Responder, front: Front) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+    let segments = std.http.segments(req)
+    if list.len(segments) != 3 {
+        return response(404, "\"unknown route\"")
+    }
+    let mut data: Bytes = list.new()
+    if let Some(body) = std.http.inline_body(req) {
+        data = clone(body)
+    } else {
+        loop {
+            list.reserve(mut data, 4096)
+            let Ok(n) = std.http.read(mut responder, mut data) else {
+                return response(400, "\"invalid body\"")
+            }
+            if n == 0 {
+                break
+            }
+        }
+    }
+    let Ok(raw) = string.from_utf8(take data) else {
+        return response(400, "\"invalid UTF-8\"")
+    }
+    match mcp_hub.call(front.ctx, segments[2], raw, front.clock) {
+        Ok(value) => response(200, take value),
+        Error(e) => response(422, pending.quoted(e)),
+    }
+}
+
+pub fn serve(take listener: Listener, requests: Sender[mcp_hub.Call], clock: Clock, tasks: Tasks, take stop: Option[Receiver[u64]]) -> Result[(), std.http.ServeError] waits {
+    let mut listeners: List[Listener] = list.new()
+    list.push(mut listeners, take listener)
+    let mut routes: std.router.Builder[Front] = std.router.builder()
+    result.unwrap(std.router.add(mut routes, "POST", "/v1/discovery/{tool}", std.router.raw(query)))
+    let mut config = std.http.defaults()
+    config.body_max = 65536
+    config.handler_bytes = 33554432
+    config.sockets_max = 16
+    config.conns_max = 16
+    config.http_max = 16
+    std.http.serve_with_factory(take listeners, clock, tasks, take config, result.unwrap(std.router.build(take routes)), 256, scoped fn() -> Front {
+        Front(ctx: mcp_hub.Ctx(requests: channel.sender(requests)), clock)
+    }, take stop)
+}

@@ -1,16 +1,21 @@
 hirsel.laws 1
 hirsel.ai/registry@1/commit_laws/canonical_entry_bytes src=39c3d9319ef17c75 sig=e135d045a8024d46 run=1ddd99282e86b5b8 bug=- oracle=- rows=pending
+hirsel.ai/registry@1/commit_laws/checked_signature_wildcard src=b5736ab1041ab814 sig=94b601ed9201c725 run=1ddd99282e86b5b8 bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/cold_version_hints src=6b6ee0e1e6c3b2ff sig=752b78131f2bd981 run=6779e2cf5a45ab26 bug=- oracle=- rows=pending
+hirsel.ai/registry@1/commit_laws/directory_bucket_rebuild src=03593c1ea1415b6b sig=8a055f770abea9ab run=14628b627d244b56 bug=- oracle=- rows=pending
+hirsel.ai/registry@1/commit_laws/directory_search_latency src=2b9ca3d2405ae8da sig=b355b257ebc5ee49 run=fc79b891a384257c bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/frame_reservation src=cdf238161d859c89 sig=ede09e128951dcaa run=1ddd99282e86b5b8 bug=- oracle=- rows=pending
-hirsel.ai/registry@1/commit_laws/g14_fault_matrix src=a244d1b7361eb003 sig=6ca47ab121cd26f7 run=6779e2cf5a45ab26 bug=- oracle=- rows=pending
+hirsel.ai/registry@1/commit_laws/g14_fault_matrix src=a244d1b7361eb003 sig=990dd5d49747d381 run=6779e2cf5a45ab26 bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/grouped_index_limit src=47eef110fc2566b1 sig=9df5f10fe73df072 run=1ddd99282e86b5b8 bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/heartbeat_uses_committed_tree src=c0eeb5ec6178303b sig=a3ca8a4a642f8bb6 run=6779e2cf5a45ab26 bug=- oracle=- rows=pending
-hirsel.ai/registry@1/commit_laws/http_first_key src=e31684659a90f016 sig=c4ec1f0c1e1a0cd4 run=0f4870ceb550a467 bug=- oracle=- rows=pending
+hirsel.ai/registry@1/commit_laws/http_first_key src=e31684659a90f016 sig=414872e19c3653b5 run=0f4870ceb550a467 bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/library_admission src=397983b93f5953c7 sig=2e45e581d4d106eb run=0f4870ceb550a467 bug=- oracle=- rows=pending
+hirsel.ai/registry@1/commit_laws/long_export_round_trip src=ed5299793b835986 sig=ef5119c4490e4c7c run=1ddd99282e86b5b8 bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/original_release_receipt_after_restart src=c6564af0f8e6664c sig=f90b02844540bce4 run=6779e2cf5a45ab26 bug=- oracle=- rows=pending
-hirsel.ai/registry@1/commit_laws/publish_lifecycle src=5a13769e318993ee sig=94b9555ad2b8d280 run=0f4870ceb550a467 bug=- oracle=- rows=pending
+hirsel.ai/registry@1/commit_laws/publish_lifecycle src=5a13769e318993ee sig=6f0580065b215b61 run=0f4870ceb550a467 bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/rejected_proposal_is_atomic src=5a694f7ade810132 sig=81efcad49c35040e run=6779e2cf5a45ab26 bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/reviewed_entry_bundles src=36afcc3362c7c049 sig=ef5bbed503a5c58f run=4979b05f25e5f02b bug=- oracle=- rows=pending
+hirsel.ai/registry@1/commit_laws/source_checks_frame_before_extraction src=03b836a140ff097e sig=326efcce10d2e303 run=1ddd99282e86b5b8 bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/stale_rebind_writes_nothing src=24b01d3e72f9402e sig=8a71c26e867e017b run=6779e2cf5a45ab26 bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/status_admission_binds_evidence_and_key src=e49dbd007d5d8c16 sig=2a766ee8f8f51d6a run=6779e2cf5a45ab26 bug=- oracle=- rows=pending
 hirsel.ai/registry@1/commit_laws/witness_configuration src=bf5bf05bf7f60e14 sig=aff5f0c753bc94d5 run=1ddd99282e86b5b8 bug=- oracle=- rows=pending

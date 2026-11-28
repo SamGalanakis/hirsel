@@ -1,0 +1,178 @@
+pub type Tables: shareable + send {
+    docs: store.Table[String, directory_facts.Document],
+    facts: store.Table[String, directory_facts.Facts],
+    text_index: search.Text[String, directory_facts.Document],
+    identities: store.Index[String, String, directory_facts.Document, ()],
+    dependents: store.Index[String, String, directory_facts.Document, ()],
+    ready: store.Table[u8, bool],
+    heads: store.Table[u8, (u64, String)]
+}
+
+fn terms(_root: String, doc: directory_facts.Document) -> Result[search.Terms, Capacity] {
+    Ok(search.analyze(search.tokenizer(list.new()), doc.search_text))
+}
+
+fn identity(_root: String, doc: directory_facts.Document) -> Result[List[String], Capacity] {
+    let mut names: List[String] = list.new()
+    list.push(mut names, clone(doc.identity))
+    Ok(take names)
+}
+
+fn dependencies(_root: String, doc: directory_facts.Document) -> Result[List[String], Capacity] {
+    Ok(clone(doc.dependencies))
+}
+
+pub fn schema(mut decl: store.Declare) -> Result[Tables, store.Error] {
+    let codec: std.codec.Codec[directory_facts.Document] = std.codec.of()
+    let mut docs = store.declare_table(mut decl, "releases", std.codec.key_string(), codec)?
+    let text_index = search.declare(mut decl, mut docs, "text", list.new(), code.describe(terms))?
+    let identities = store.index(mut decl, mut docs, "identity", Many, code.describe(identity), std.codec.key_string())?
+    let dependents = store.index(mut decl, mut docs, "depends", Many, code.describe(dependencies), std.codec.key_string())?
+    let facts = store.declare_table(mut decl, "facts", std.codec.key_string(), (std.codec.of() : std.codec.Codec[directory_facts.Facts]))?
+    let ready = store.declare_table(mut decl, "complete", std.codec.key_u8(), (std.codec.of() : std.codec.Codec[bool]))?
+    let heads = store.declare_table(mut decl, "heads", std.codec.key_u8(), (std.codec.of() : std.codec.Codec[(u64, String)]))?
+    Ok(Tables(docs: store.finish(mut decl, take docs)?, facts: store.finish(mut decl, take facts)?, text_index: take text_index, identities: take identities, dependents: take dependents, ready: store.finish(mut decl, take ready)?, heads: store.finish(mut decl, take heads)?))
+}
+
+pub type Error = Database(store.Error) | Input(String) | Incomplete
+
+type Change = Published(String, directory_facts.Document, directory_facts.Facts) | Disposition(String, String, Option[String], Option[String], Map[String, String])
+
+fn apply(mut tx: store.Tx, batch: (Tables, List[Change], u8, u64, String)) -> Result[(), store.Error] {
+    let tables = view batch.0
+    for change in batch.1 {
+        match change {
+            Published(root, row, facts) => {
+                store.put(mut tx, tables.docs, clone(root), clone(row))?
+                store.put(mut tx, tables.facts, clone(root), clone(facts))?
+            },
+            Disposition(root, lifecycle, reason, message, advisories) => {
+                let Some(old) = store.fetch(tx, tables.docs, root)? else {
+                    return Error(MigrationFault)
+                }
+                let mut row = take old
+                row.lifecycle = clone(lifecycle)
+                row.reason = clone(reason)
+                row.message = clone(message)
+                row.advisories = clone(advisories)
+                store.put(mut tx, tables.docs, clone(root), take row)?
+            },
+        }
+    }
+    store.put(mut tx, tables.ready, 0, false)?
+    store.put(mut tx, tables.heads, batch.2, (batch.3, clone(batch.4)))
+}
+
+fn status_change(folded: pending.Fold, raw: Bytes, evidence: scoped fn(String, u64) -> Result[Bytes, String] waits) -> Result[Change, Error] waits {
+    let Ok(root) = directory_log.status_root(raw) else {
+        return Error(Incomplete)
+    }
+    let Some(fold) = map.get(folded.statuses, root) else {
+        return Error(Incomplete)
+    }
+    let Some(release) = map.get(folded.roots, root) else {
+        return Error(Incomplete)
+    }
+    let (state, reason, message): (String, Option[String], Option[String]) = match view fold.state {
+        Active => ("active", None, None),
+        Retired(r, m) => ("retired", Some(clone(r)), Some(clone(m))),
+        TakenDown(r, m) => ("takedown", Some(clone(r)), Some(clone(m))),
+    }
+    let mut active: Map[String, String] = map.new()
+    for (id, digest) in fold.advisories {
+        let data = match evidence(digest, 1048576) {
+            Ok(value) => take value,
+            Error(e) => return Error(Input(take e)),
+        }
+        let Ok(withdrawn) = status.advisory(data, id, digest, release) else {
+            return Error(Incomplete)
+        }
+        if !withdrawn {
+            let Ok(osv) = string.from_utf8(take data) else {
+                return Error(Incomplete)
+            }
+            map.insert(mut active, clone(id), take osv)
+        }
+    }
+    Ok(Disposition(take root, take state, take reason, take message, take active))
+}
+
+// The caller supplies the verified Phase 1 log pair. Each transaction advances
+// its log position alongside the rows. Serve a snapshot only after both finish.
+pub fn replay(mut db: store.Db, tables: Tables, history: directory_log.History, evidence: scoped fn(String, u64) -> Result[Bytes, String] waits) -> Result[(), Error] waits {
+    let Ok(reader) = store.reader(db, 0) else {
+        return Error(Incomplete)
+    }
+    for kind in 0u64 .. 2 {
+        let log = view history.logs[kind]
+        let slot: u8 = int.narrow(kind)
+        let mut at = 0u64
+        match store.get(reader, store.snapshot(db), tables.heads, slot) {
+            Ok(Some((n, hash))) => {
+                let Some(prefix) = tlog.root_at(log, n) else {
+                    return Error(Incomplete)
+                }
+                if pending.hash_to_hex(prefix) != hash {
+                    return Error(Incomplete)
+                }
+                at = n
+            },
+            Ok(None) => {},
+            Error(e) => return Error(Database(take e)),
+        }
+        while at < tlog.size(log) {
+            let mut batch: List[Change] = list.new()
+            let mut size = 0u64
+            while at < tlog.size(log) && list.len(batch) < 128 && size < 1048576 {
+                let Some(raw) = tlog.entry_at(log, at) else {
+                    return Error(Incomplete)
+                }
+                at += 1
+                if slot == 1 {
+                    list.push(mut batch, status_change(history.folded, raw, evidence)?)
+                    continue
+                }
+                let Ok(event) = pending.decode_release_entry(raw) else {
+                    return Error(Incomplete)
+                }
+                if let Release(row) = take event {
+                    let data = match evidence(row.facts_digest, 67108864) {
+                        Ok(value) => take value,
+                        Error(e) => return Error(Input(take e)),
+                    }
+                    size += list.len(data)
+                    let (doc, facts) = match directory_facts.decode(row, at - 1, data) {
+                        Ok(pair) => take pair,
+                        Error(e) => return Error(Input(take e)),
+                    }
+                    list.push(mut batch, Published(clone(row.root), take doc, take facts))
+                }
+            }
+            let hash = pending.hash_to_hex(option.unwrap(tlog.root_at(log, at)))
+            match store.run(mut db, None, (store.copy_env(tables), take batch, slot, at, take hash), apply) {
+                Ok(Committed(_)) => {},
+                Error(e) => return Error(Database(take e)),
+                _ => return Error(Incomplete),
+            }
+        }
+    }
+    loop {
+        match store.project_step(mut db, "text", store.Limits(rows: 128, byte_limit: 1048576)) {
+            Ok(Idle) => break,
+            Ok(_) => {},
+            Error(_) => return Error(Incomplete),
+        }
+    }
+    match store.get(reader, store.snapshot(db), tables.ready, 0) {
+        Ok(Some(true)) => return Ok(()),
+        Error(e) => return Error(Database(take e)),
+        _ => {},
+    }
+    match store.run(mut db, None, store.copy_env(tables.ready), fn(mut tx, table) -> Result[(), store.Error] {
+        store.put(mut tx, table, 0u8, true)
+    }) {
+        Ok(Committed(_)) => Ok(()),
+        Error(e) => Error(Database(take e)),
+        _ => Error(Incomplete),
+    }
+}

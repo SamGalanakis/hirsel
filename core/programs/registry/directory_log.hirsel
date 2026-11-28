@@ -1,0 +1,127 @@
+pub type History: send {
+    logs: List[tlog.Log],
+    folded: pending.Fold
+}
+
+pub type Trust: send {
+    origin: String,
+    release_key: tlog.note.VerifierKey,
+    status_key: tlog.note.VerifierKey,
+    witnesses: List[tlog.note.VerifierKey]
+}
+
+pub fn empty() -> History {
+    let mut logs: List[tlog.Log] = list.new()
+    list.push(mut logs, tlog.empty())
+    list.push(mut logs, tlog.empty())
+    History(logs: take logs, folded: pending.empty_fold())
+}
+
+pub fn status_root(raw: Bytes) -> Result[String, String] {
+    let Ok(event) = pending.decode_status_entry(raw) else {
+        return Error("invalid status event")
+    }
+    Ok(match take event {
+        Retire(r, _, _, _, _, _) => take r,
+        Reinstate(r, _, _, _, _) => take r,
+        Takedown(r, _, _, _, _, _) => take r,
+        Advise(r, _, _, _, _, _) => take r,
+    })
+}
+
+fn append_suffix(mut log: tlog.Log, folded: pending.Fold, kind: checkpoint.LogKind, head: tlog.note.SignedHead, get: scoped fn(String, u64) -> Result[Bytes, String] waits) -> Result[pending.Fold, String] waits {
+    let target = tlog.note.tree_size(head)
+    let mut delta = pending.empty_fold()
+    if target < tlog.size(log) {
+        return Error("checkpoint rollback")
+    }
+    while tlog.size(log) < target {
+        let first = tlog.size(log) / 256 * 256
+        let width = order.min(256u64, target - first)
+        let rel = option.unwrap(tlog.tiles.path(Entries, first / 256, width))
+        let bundle = get(checkpoint.tile_key(kind, rel), 256 * (pending.MAX_ENTRY_BYTES + 2))?
+        let Ok(entries) = pending.decode_entry_bundle(bundle, width) else {
+            return Error("invalid entry bundle")
+        }
+        for i in tlog.size(log) - first .. width {
+            let n = first + i
+            let raw = view entries[i]
+            let result = match kind {
+                Release => pending.fold_release(mut delta, folded.scopes, folded.labels, n, n + 1, raw),
+                Status => {
+                    let root = status_root(raw)?
+                    if !map.contains(delta.statuses, root) {
+                        if let Some(prior) = map.get(folded.statuses, root) {
+                            map.insert(mut delta.statuses, clone(root), clone(prior))
+                        }
+                    }
+                    pending.fold_status(mut delta, folded.statuses, n, n + 1, raw)
+                },
+            }
+            if let Error(_) = result {
+                return Error("invalid committed event")
+            }
+            if let Error(_) = tlog.append(mut log, clone(raw)) {
+                return Error("release log capacity exceeded")
+            }
+        }
+    }
+    if tlog.root_at(log, target) != Some(tlog.note.tree_root(head)) {
+        return Error("entry bundle disagrees with checkpoint")
+    }
+    Ok(take delta)
+}
+
+pub fn advance(mut history: History, trust: Trust, kind: checkpoint.LogKind, now: u64, get: scoped fn(String, u64) -> Result[Bytes, String] waits) -> Result[(), String] waits {
+    let raw = get(checkpoint.checkpoint_key(kind), tlog.note.MAX_NOTE_BYTES)?
+    let Ok(wire) = string.from_utf8(take raw) else {
+        return Error("invalid checkpoint")
+    }
+    let mut origin = string.from(trust.origin)
+    string.push(mut origin, "/")
+    string.push(mut origin, checkpoint.log_prefix(kind))
+    let log_key = match kind {
+        Release => view trust.release_key,
+        Status => view trust.status_key,
+    }
+    let Ok(head) = tlog.note.verify(origin, log_key, wire) else {
+        return Error("invalid signed checkpoint")
+    }
+    if list.len(trust.witnesses) != 0 && list.len(trust.witnesses) != 2 {
+        return Error("invalid witness quorum")
+    }
+    if list.len(trust.witnesses) == 2 && tlog.note.same_public_key(trust.witnesses[0], trust.witnesses[1]) {
+        return Error("duplicate witness")
+    }
+    for witness in trust.witnesses {
+        if tlog.note.same_public_key(witness, trust.release_key) || tlog.note.same_public_key(witness, trust.status_key) {
+            return Error("witness key is also a log key")
+        }
+        if let Error(_) = tlog.note.attached_cosignature(head, witness, now) {
+            return Error("missing or stale witness signature")
+        }
+    }
+    let index = commit.log_index(kind)
+    let start = tlog.size(history.logs[index])
+    let delta = match append_suffix(mut history.logs[index], history.folded, kind, head, get) {
+        Ok(d) => take d,
+        Error(e) => {
+            tlog.truncate(mut history.logs[index], start)
+            return Error(take e)
+        },
+    }
+    let pending.Fold(scopes: take scopes, labels: take labels, roots: take roots, statuses: take statuses, ..) = take delta
+    for take (key, value) in take scopes {
+        map.insert(mut history.folded.scopes, take key, take value)
+    }
+    for take (key, value) in take labels {
+        map.insert(mut history.folded.labels, take key, take value)
+    }
+    for take (key, value) in take roots {
+        map.insert(mut history.folded.roots, take key, take value)
+    }
+    for take (key, value) in take statuses {
+        map.insert(mut history.folded.statuses, take key, take value)
+    }
+    Ok(())
+}

@@ -1,0 +1,211 @@
+// A single export may exceed a page, even when the page holds nothing else.
+@test
+fn long_export_round_trip() -> Result[(), String] {
+    let mut item = string.from("{\"doc\":\"")
+    for i in 0u64 .. 1800 {
+        string.push(mut item, "猫\\\"")
+    }
+    string.push(mut item, "\",\"name\":\"猫\"}")
+    let mut exports: List[String] = list.new()
+    list.push(mut exports, clone(item))
+    list.push(mut exports, "{\"name\":\"second\"}")
+    let mut cursor = 0u64
+    let mut offset = 0u64
+    let mut recovered = string.new()
+    let mut count = 0u64
+    loop {
+        let page = directory_page.page(exports, cursor, offset)?
+        if string.byte_len(page) > 4096 {
+            return Error("interface page exceeds G16")
+        }
+        let obj = result.unwrap(mcp.rpc.object(page))
+        let raw_exports = option.unwrap(map.get(obj, "exports"))
+        for whole in result.unwrap(mcp.rpc.array(raw_exports)) {
+            if whole != "{\"name\":\"second\"}" {
+                return Error("unexpected complete export")
+            }
+            count += 1
+        }
+        if let Some(chunk) = mcp.rpc.field_text(obj, "fragment") {
+            string.push(mut recovered, chunk)
+        }
+        let next = option.unwrap(map.get(obj, "next"))
+        if next == "null" {
+            break
+        }
+        let parts = result.unwrap(mcp.rpc.array(next))
+        cursor = option.unwrap(tlog.note.parse_size(parts[0]))
+        offset = option.unwrap(tlog.note.parse_size(parts[1]))
+    }
+    if recovered != item || count != 1 {
+        return Error("lost or duplicated export bytes")
+    }
+    Ok(())
+}
+
+@test
+fn directory_bucket_rebuild(parent: Dir, clock: Clock, tasks: Tasks, random: Random, n: Net, out: Stdout) -> Result[(), String] waits {
+    let bucket = start_bucket(tasks, 3396, list.new())
+    let mut c = connect_client(bucket.endpoint, tasks, bucket.clock, 3397)
+    let mut witnesses = new_witness_pair(1730000000)
+    let mut seq = new_sequencer()
+    do_init_pair(mut seq, mut c, mut witnesses, random)
+    let first = discovery_publish("acme.dev/codec@1", "1.0.0", result.unwrap(string.from_utf8(fixture_content())), "", "quartz quartz quartz", 1, false, true)
+    let second = discovery_publish("acme.dev/codec@1", "1.1.0", "updated library", "", "numeric conversion", 48, false, false)
+    let third = discovery_publish("acme.dev/reader@1", "1.0.0", "consumer library", first.root, "decode quartz over a network", 1, true, false)
+    let roots = SampleRoots(old: clone(first.root), latest: clone(second.root), reader: clone(third.root))
+    let options = result.unwrap(store.sized(Directory, 2147483648u64))
+    let mut live_name = string.from("registry-projection-")
+    string.reserve(mut live_name, 32)
+    let live = result.unwrap(host.mkdtemp(parent, mut live_name))
+    let mut db = result.unwrap(store.open(tasks, live, clock, random, options))
+    let tables = result.unwrap(store.bind_declaration(mut db, Migrate, directory.schema))
+    let mut history = directory_log.empty()
+    let _ = result.unwrap(do_pub(mut seq, mut c, mut witnesses, take first, None, random))
+    let _ = result.unwrap(do_pub(mut seq, mut c, mut witnesses, take second, None, random))
+    let _ = result.unwrap(do_pub(mut seq, mut c, mut witnesses, take third, None, random))
+    refresh_bucket(mut db, tables, mut history, mut c, witnesses.a.clock_s)?
+    let hits = hit_roots(read_query(db, tables, "search", "{\"query\":\"quartz\"}")?)
+    require(list.len(hits) == 2 && hits[0] == roots.old && hits[1] == roots.reader, "wrong BM25 ranking")?
+    let pure = hit_roots(read_query(db, tables, "search", "{\"query\":\"quartz\",\"authority_within\":[]}")?)
+    require(list.len(pure) == 1 && pure[0] == roots.old, "authority ceiling admitted Net")?
+    require(read_query(db, tables, "search", "{\"query\":\"quartz\",\"scope\":\"outside.dev\"}")? == "[]", "scope filter leaked")?
+    let parent0 = option.unwrap(result.unwrap(commit.sync_status(mut seq, mut c, DEADLINE)))
+    let document = "{\"affected\":[{\"package\":{\"ecosystem\":\"Hirsel\",\"name\":\"acme.dev/codec\"},\"versions\":[\"1.0.0\"]}],\"id\":\"OSV-1\",\"modified\":\"2024-02-29T00:00:00Z\"}"
+    let digest = registry_auth.digest(document)
+    let mut advice = signed_status(roots.old, None, Advise("OSV-1", clone(digest)), parent0, 1730000010, random)
+    list.push(mut advice.evidence, commit.EvidenceInput(digest: take digest, data: clone(string.as_bytes(document))))
+    let _ = result.unwrap(do_status(mut seq, mut c, mut witnesses, take advice, None, random))
+    refresh_bucket(mut db, tables, mut history, mut c, witnesses.a.clock_s)?
+    let previous = option.unwrap(commit.root_status(seq, roots.old))
+    let parent1 = option.unwrap(result.unwrap(commit.sync_status(mut seq, mut c, DEADLINE)))
+    let retire = signed_status(roots.old, Some(clone(previous.last_leaf_hash)), Retire("deprecated", "use 1.1.0"), parent1, 1730000020, random)
+    let _ = result.unwrap(do_status(mut seq, mut c, mut witnesses, take retire, None, random))
+    let parent2 = option.unwrap(result.unwrap(commit.sync_status(mut seq, mut c, DEADLINE)))
+    let removal = signed_status(roots.reader, None, Takedown("dmca", "order"), parent2, 1730000030, random)
+    let _ = result.unwrap(do_status(mut seq, mut c, mut witnesses, take removal, None, random))
+    refresh_bucket(mut db, tables, mut history, mut c, witnesses.a.clock_s)?
+    let before = sample_answers(db, tables, roots)?
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, live_name))
+    let _ = take history
+    let mut cold_name = string.from("registry-rebuild-")
+    string.reserve(mut cold_name, 32)
+    let cold = result.unwrap(host.mkdtemp(parent, mut cold_name))
+    let mut rebuilt = result.unwrap(store.open(tasks, cold, clock, random, options))
+    let rebound = result.unwrap(store.bind_declaration(mut rebuilt, Migrate, directory.schema))
+    let mut empty = directory_log.empty()
+    refresh_bucket(mut rebuilt, rebound, mut empty, mut c, witnesses.a.clock_s)?
+    require(before == sample_answers(rebuilt, rebound, roots)?, "cold bucket replay changed query bytes")?
+    let (_, frame) = result.unwrap(checkpoint.fetch_object(mut c, cat3("c/", roots.old, ".zst"), 65536, pending.MAX_COMPRESSED_FRAME, DEADLINE))
+    let _ = take c
+    let _ = finish_bucket(take bucket)
+    let queries = sample_queries(roots)
+    for i in 0u64 .. list.len(queries) {
+        let value = discovery_cli.query(queries[i].0, queries[i].1, cold, parent, n, clock, tasks)?
+        require(value == before[i], "local --json twin disagrees with live snapshot")?
+    }
+    let gone = cat3("{\"path\":\"leaf.hirsel\",\"root\":", pending.quoted(roots.reader), "}")
+    match read_query(rebuilt, rebound, "source", gone) {
+        Error(msg) if msg == "release taken down" => {},
+        _ => return Error("source must refuse takedown before reading the frame"),
+    }
+    let dispatch_result = dispatch_law(n, clock, random, tasks, rebuilt, rebound, roots, frame, out)
+    result.unwrap(store.close(take rebuilt))
+    result.unwrap(std.dir.remove_all(parent, cold_name))
+    take dispatch_result
+}
+
+// Time the public search request decoder, snapshot look, BM25 filter and JSON
+// encoding together. Setup and log replay occur before the first clock read.
+@test
+fn directory_search_latency(parent: Dir, clock: Clock, random: Random, tasks: Tasks, out: Stdout) -> Result[(), String] waits {
+    let mut name = string.from("registry-search-")
+    string.reserve(mut name, 32)
+    let destination = result.unwrap(host.mkdtemp(parent, mut name))
+    let options = result.unwrap(store.sized(Directory, 2147483648u64))
+    let mut db = result.unwrap(store.open(tasks, destination, clock, random, options))
+    let tables = result.unwrap(store.bind_declaration(mut db, Migrate, directory.schema))
+    let mut history = directory_log.empty()
+    let mut sidecars: Map[String, Bytes] = map.new()
+    let topics: Inline[String, 8] =["decimal currency accounting", "bounded ring queue", "codec image pixel", "geo coordinates tile", "matrix tensor linear", "search ranking postings", "time calendar dates", "geometry mesh normals"]
+    for i in 0u64 .. 512 {
+        let id = cat3("acme.dev/lib", pending.decimal(i / 2), "@1")
+        let version = if i % 2 == 0 {
+            "1.0.0"
+        } else {
+            "1.1.0"
+        }
+        let root = pending.library_root(string.as_bytes(cat3(id, ":", version)))
+        let fact = fixture_sidecar(root, id, version, "", topics[(i / 2) % 8], 2 + i % 5, i % 6 == 0)
+        let digest = registry_auth.digest(fact)
+        map.insert(mut sidecars, clone(digest), string.into_bytes(take fact))
+        let _ = result.unwrap(tlog.append(mut history.logs[0], make_release_entry(id, version, root, 1, digest, 1730000000 + i, SUB_A, digest)))
+    }
+    let result_replay = directory.replay(mut db, tables, history, scoped fn(hash: String, cap: u64) -> Result[Bytes, String] {
+        let Some(data) = map.get(sidecars, hash) else {
+            return Error("missing fixture evidence")
+        }
+        Ok(clone(data))
+    })
+    if let Error(_) = result_replay {
+        return Error("latency fixture replay failed")
+    }
+    let reader = result.unwrap(store.reader(db, 0))
+    let snapshot = store.snapshot(db)
+    let mut samples: List[u64] = list.new()
+    for i in 0u64 .. 100 {
+        let arguments = cat3("{\"query\":", pending.quoted(topics[i % 8]), if i % 2 == 0 {
+            ",\"pure_only\":true,\"limit\":8}"
+        } else {
+            ",\"scope\":\"acme.dev\",\"limit\":8}"
+        })
+        let start = host.mono_ns(clock)
+        let data = mcp_hub.answer(reader, snapshot, tables, "search", arguments, scoped fn(_r: String) -> Result[Bytes, String] {
+            Error("unexpected frame read")
+        }, fixture_extract)?
+        let elapsed = host.mono_ns(clock) - start
+        require(list.len(hit_roots(data)) == 8, "latency probe did not return eight matches")?
+        list.push(mut samples, elapsed)
+    }
+    std.list.sort(mut samples, fn(a: u64, b: u64) -> Order {
+        order.compare(a, b)
+    })
+    let p95 = samples[94]
+    let _ = stdout.write(out, cat3("512 releases, 256 packages, 100 queries, p95 ns ", pending.decimal(p95), "\n"))
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, name))
+    require(p95 <= 50000000, "G15 search p95 exceeded 50 ms")
+}
+
+@test
+fn checked_signature_wildcard() -> Result[(), String] {
+    let signature = "pub fn parse(take input: Bytes) -> Result[Json, Map[String, Error]]"
+    require(directory_signature.matches(signature, "Bytes -> Result[Json, _]"), "nested error type must match one wildcard")?
+    require(!directory_signature.matches(signature, "Bytes -> Result[String, _]"), "wrong success type")?
+    require(!directory_signature.matches(signature, "(Bytes, _) -> Result[Json, _]"), "wrong arity")
+}
+
+@test
+fn source_checks_frame_before_extraction() -> Result[(), String] waits {
+    let root = pending.library_root(fixture_content())
+    for path in["../leaf.hirsel", "/leaf.hirsel", "lib//leaf.hirsel", "lib\\leaf.hirsel"] {
+        if let Error(msg) = mcp_hub.source(root, path, scoped fn(_root: String) -> Result[Bytes, String] {
+            fail("invalid path fetched a frame")
+        }, fixture_extract) {
+            require(msg == "invalid source root or path", "wrong path refusal")?
+        } else {
+            return Error("invalid archive path accepted")
+        }
+    }
+    let wrong = std.zstd.encode(b"other package", 1)
+    let answer = mcp_hub.source(root, "leaf.hirsel", scoped fn(_root: String) -> Result[Bytes, String] {
+        Ok(clone(wrong))
+    }, fn(_data: Bytes, _path: String, _cap: u64) -> Result[String, String] {
+        fail("unverified C reached extractor")
+    })
+    let Error(msg) = answer else {
+        return Error("wrong package returned source")
+    }
+    require(msg == "invalid package frame", "wrong corrupt-frame refusal")
+}

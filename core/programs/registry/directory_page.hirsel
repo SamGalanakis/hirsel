@@ -1,0 +1,62 @@
+fn next_cursor(index: u64, offset: u64, count: u64) -> String {
+    if index == count {
+        return "null"
+    }
+    let mut s = string.from("[")
+    string.push_u64(mut s, index)
+    string.push(mut s, ",")
+    string.push_u64(mut s, offset)
+    string.push(mut s, "]")
+    take s
+}
+
+fn render(rows: List[String], fragment: Option[String], index: u64, offset: u64, count: u64) -> String {
+    let mut fields: mcp.rpc.Fields = map.new()
+    mcp.rpc.put(mut fields, "exports", admit.array(rows))
+    if let Some(s) = fragment {
+        mcp.rpc.put(mut fields, "fragment", pending.quoted(s))
+    }
+    mcp.rpc.put(mut fields, "next", next_cursor(index, offset, count))
+    mcp.rpc.encode_object(fields)
+}
+
+// Keep room for escaping the tool text inside its JSON-RPC result envelope.
+const PAYLOAD: u64 = 1900
+
+pub fn page(exports: List[String], index: u64, offset: u64) -> Result[String, String] {
+    let count = list.len(exports)
+    if index > count || (index == count && offset != 0) {
+        return Error("invalid interface cursor")
+    }
+    let mut rows: List[String] = list.new()
+    let mut i = index
+    let mut used = 0u64
+    if offset == 0 {
+        while i < count && string.byte_len(exports[i]) + used <= PAYLOAD {
+            list.push(mut rows, clone(exports[i]))
+            used += string.byte_len(exports[i]) + 1
+            i += 1
+        }
+        if i > index || i == count {
+            return Ok(render(rows, None, i, 0, count))
+        }
+    }
+    let item = view exports[i]
+    let data = string.as_bytes(item)
+    if offset >= list.len(data) || (data[offset] & 192u8) == 128u8 {
+        return Error("invalid interface fragment offset")
+    }
+    let mut end = offset
+    while let Some((_, next)) = string.next_scalar(item, end) {
+        if next - offset > PAYLOAD / 2 {
+            break
+        }
+        end = next
+    }
+    let fragment = Some(string.from(string.slice(item, offset, end)))
+    if end == list.len(data) {
+        Ok(render(rows, fragment, i + 1, 0, count))
+    } else {
+        Ok(render(rows, fragment, i, end, count))
+    }
+}

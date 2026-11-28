@@ -1,0 +1,143 @@
+pub type Export: codec + send {
+    module_path: String,
+    name: String,
+    definition: String,
+    signature: String,
+    item: String
+}
+
+pub type Facts: codec + send {
+    authority: String,
+    bindings: String,
+    exports: List[Export]
+}
+
+pub type Document: codec + send {
+    identity: String,
+    version: String,
+    scope: String,
+    published: u64,
+    leaf_index: u64,
+    source_commit: Option[String],
+    description: String,
+    search_text: String,
+    signatures: List[String],
+    dependencies: List[String],
+    verdict: String,
+    kinds: List[String],
+    lifecycle: String,
+    reason: Option[String],
+    message: Option[String],
+    advisories: Map[String, String]
+}
+
+pub fn member(obj: mcp.rpc.Fields, key: String) -> Result[String, String] {
+    let Some(raw) = map.get(obj, key) else {
+        return Error(string.from(key))
+    }
+    Ok(clone(raw))
+}
+
+pub fn object(raw: String) -> Result[mcp.rpc.Fields, String] {
+    let Ok(obj) = mcp.rpc.object(raw) else {
+        return Error("expected a JSON object")
+    }
+    Ok(take obj)
+}
+
+pub fn array(raw: String) -> Result[List[String], String] {
+    let Ok(items) = mcp.rpc.array(raw) else {
+        return Error("expected a JSON array")
+    }
+    Ok(take items)
+}
+
+pub fn text(obj: mcp.rpc.Fields, key: String) -> Result[String, String] {
+    let Some(s) = mcp.rpc.field_text(obj, key) else {
+        return Error(string.from(key))
+    }
+    Ok(take s)
+}
+
+pub fn strings(raw: String) -> Result[List[String], String] {
+    let mut out: List[String] = list.new()
+    for value in array(raw)? {
+        let Some(s) = mcp.rpc.text(value) else {
+            return Error("expected a string")
+        }
+        list.push(mut out, take s)
+    }
+    Ok(take out)
+}
+
+fn add_word(mut out: String, value: String) {
+    string.push(mut out, " ")
+    string.push(mut out, value)
+}
+
+pub fn decode(release: pending.ReleaseFields, index: u64, data: Bytes) -> Result[(Document, Facts), String] {
+    if pending.sha256_hex(data) != release.facts_digest {
+        return Error("checked-library sidecar digest mismatch")
+    }
+    let Ok(wire) = string.from_utf8(clone(data)) else {
+        return Error("checked-library sidecar is not UTF-8")
+    }
+    let fields = object(wire)?
+    let header = object(member(fields, "header")?)?
+    if text(fields, "root")? != release.root || text(header, "identity")? != release.identity || text(header, "version")? != release.version {
+        return Error("checked-library sidecar disagrees with release")
+    }
+    let Some(scope) = pending.scope_of_identity(release.identity) else {
+        return Error("invalid scope")
+    }
+    let mut deps: List[String] = list.new()
+    let bindings = member(fields, "bindings")?
+    for raw in array(bindings)? {
+        let b = strings(raw)?
+        if list.len(b) == 3 && b[2] == "toolchain" {
+            continue
+        }
+        if !((list.len(b) == 4 && b[2] == "exact") || (list.len(b) == 5 && b[2] == "floor")) || !pending.lower_hex(b[3], 64) {
+            return Error("invalid checked binding")
+        }
+        if !list.contains(deps, b[3]) {
+            list.push(mut deps, clone(b[3]))
+        }
+    }
+    let mut words = string.from(release.identity)
+    add_word(mut words, release.description)
+    let mut signatures: List[String] = list.new()
+    let mut exports: List[Export] = list.new()
+    let api = object(member(fields, "interface")?)?
+    for raw in array(member(api, "modules")?)? {
+        let module_fields = object(raw)?
+        let path = std.string.join(strings(member(module_fields, "path")?)?, "/")
+        for item in array(member(module_fields, "items")?)? {
+            let export = object(item)?
+            let name = text(export, "name")?
+            let signature = text(export, "signature")?
+            add_word(mut words, name)
+            if let Some(doc) = mcp.rpc.field_text(export, "doc") {
+                add_word(mut words, doc)
+            }
+            list.push(mut signatures, clone(signature))
+            list.push(mut exports, Export(module_path: clone(path), name: take name, definition: text(export, "definition")?, signature: take signature, item: clone(item)))
+        }
+    }
+    let authority = member(fields, "authority")?
+    let verdict_wire = member(object(authority)?, "verdict")?
+    let mut kinds: List[String] = list.new()
+    let verdict = match mcp.rpc.text(verdict_wire) {
+        Some(v) => {
+            if v != "pure" && v != "conditional" && v != "unknown" {
+                return Error("invalid authority verdict")
+            }
+            take v
+        },
+        None => {
+            kinds = strings(verdict_wire)?
+            string.from("kinds")
+        },
+    }
+    Ok((Document(identity: clone(release.identity), version: clone(release.version), scope: take scope, published: release.time, leaf_index: index, source_commit: clone(release.source_commit), description: clone(release.description), search_text: take words, signatures: take signatures, dependencies: take deps, verdict: take verdict, kinds: take kinds, lifecycle: "active", reason: None, message: None, advisories: map.new()), Facts(authority: take authority, bindings: take bindings, exports: take exports)))
+}

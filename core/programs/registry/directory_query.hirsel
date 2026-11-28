@@ -1,0 +1,336 @@
+pub type SearchArgs: codec + send {
+    query: String,
+    authority_within: Option[List[String]],
+    pure_only: Option[bool],
+    scope: Option[String],
+    status: Option[String],
+    signature: Option[String],
+    depends_on: Option[String],
+    limit: Option[u64]
+}
+
+pub type ReleasesArgs: codec + send {
+    identity: String
+}
+
+pub type RootArgs: codec + send {
+    root: String
+}
+
+pub type InterfaceArgs: codec + send {
+    root: String,
+    module: Option[String],
+    cursor: Option[List[u64]]
+}
+
+pub type DiffArgs: codec + send {
+    root_a: String,
+    root_b: String
+}
+
+pub type AdvisoryArgs: codec + send {
+    roots: List[String]
+}
+
+pub type SourceArgs: codec + send {
+    root: String,
+    path: String
+}
+
+pub type Query: send = Search(SearchArgs) | Releases(ReleasesArgs) | Interface(InterfaceArgs) | Authority(RootArgs) | Diff(DiffArgs) | Advisories(AdvisoryArgs) | Source(SourceArgs)
+
+fn parse[T: codec](raw: String) -> Result[T, String] {
+    let format: std.json.Format[T] = result.unwrap(std.json.interop())
+    match std.json.from_string(format, raw, 65536) {
+        Ok(value) => Ok(take value),
+        Error(_) => Error("invalid tool arguments"),
+    }
+}
+
+pub fn request(name: String, raw: String) -> Result[Query, String] {
+    if name == "search" {
+        return Ok(Search(parse(raw)?))
+    }
+    if name == "releases" {
+        return Ok(Releases(parse(raw)?))
+    }
+    if name == "interface" {
+        return Ok(Interface(parse(raw)?))
+    }
+    if name == "authority" {
+        return Ok(Authority(parse(raw)?))
+    }
+    if name == "diff" {
+        return Ok(Diff(parse(raw)?))
+    }
+    if name == "advisories" {
+        return Ok(Advisories(parse(raw)?))
+    }
+    if name == "source" {
+        return Ok(Source(parse(raw)?))
+    }
+    Error("unknown discovery tool")
+}
+
+fn allows(doc: directory_facts.Document, q: SearchArgs) -> bool {
+    let wanted = match view q.status {
+        Some(s) => s,
+        None => "active",
+    }
+    if wanted == "advisory" {
+        if map.len(doc.advisories) == 0 || doc.lifecycle == "takedown" {
+            return false
+        }
+    } else if doc.lifecycle != wanted {
+        return false
+    }
+    if let Some(scope) = view q.scope {
+        if !std.string.starts_with(doc.scope, scope) {
+            return false
+        }
+    }
+    if q.pure_only == Some(true) && doc.verdict != "pure" {
+        return false
+    }
+    if let Some(ceiling) = view q.authority_within {
+        if doc.verdict == "unknown" {
+            return false
+        }
+        for k in doc.kinds {
+            if !list.contains(ceiling, k) {
+                return false
+            }
+        }
+    }
+    if let Some(root) = view q.depends_on {
+        if !list.contains(doc.dependencies, root) {
+            return false
+        }
+    }
+    if let Some(shape) = view q.signature {
+        for sig in doc.signatures {
+            if directory_signature.matches(sig, shape) {
+                return true
+            }
+        }
+        return false
+    }
+    true
+}
+
+fn summary(root: String, doc: directory_facts.Document) -> String {
+    let mut f: mcp.rpc.Fields = map.new()
+    mcp.rpc.put(mut f, "root", pending.quoted(root))
+    mcp.rpc.put(mut f, "identity", pending.quoted(doc.identity))
+    mcp.rpc.put(mut f, "version", pending.quoted(doc.version))
+    mcp.rpc.put(mut f, "status", pending.quoted(doc.lifecycle))
+    mcp.rpc.put(mut f, "authority", if doc.verdict == "kinds" {
+        mcp.rpc.typed_json(doc.kinds)
+    } else {
+        pending.quoted(doc.verdict)
+    })
+    mcp.rpc.put(mut f, "published", pending.quoted(pending.decimal(doc.published)))
+    mcp.rpc.put(mut f, "release_index", pending.quoted(pending.decimal(doc.leaf_index)))
+    if let Some(source) = view doc.source_commit {
+        mcp.rpc.put(mut f, "source_commit", pending.quoted(source))
+    }
+    if let Some(reason) = view doc.reason {
+        mcp.rpc.put(mut f, "reason", pending.quoted(reason))
+    }
+    if let Some(message) = view doc.message {
+        mcp.rpc.put(mut f, "message", pending.quoted(message))
+    }
+    mcp.rpc.put(mut f, "description", pending.quoted(doc.description))
+    mcp.rpc.encode_object(f)
+}
+
+fn search_rows(tx: store.Tx, tables: directory.Tables, q: SearchArgs) -> Result[String, String] {
+    let k = match q.limit {
+        Some(n) => n,
+        None => 20u64,
+    }
+    if k == 0 || k > 100 {
+        return Error("limit must be 1 to 100")
+    }
+    if let Some(status) = view q.status {
+        if status != "active" && status != "retired" && status != "takedown" && status != "advisory" {
+            return Error("unknown release status")
+        }
+    }
+    let mut rows: List[String] = list.new()
+    if q.query != "" {
+        let mut failed = false
+        let Ok(hits) = search.query(tx, tables.text_index, q.query, k, search.defaults(), scoped fn(root: String) -> bool {
+            match store.fetch(tx, tables.docs, root) {
+                Ok(Some(doc)) => allows(doc, q),
+                _ => {
+                    failed = true;
+                    false
+                },
+            }
+        }) else {
+            return Error("BM25 lookup failed")
+        }
+        if failed {
+            return Error("release lookup failed")
+        }
+        for hit in hits {
+            let Ok(Some(doc)) = store.fetch(tx, tables.docs, hit.key) else {
+                return Error("release lookup failed")
+            }
+            list.push(mut rows, summary(hit.key, doc))
+        }
+    } else if let Some(root) = view q.depends_on {
+        let Ok(cursor) = store.lookup(tx, tables.dependents, Included(clone(root)), Included(clone(root))) else {
+            return Error("dependent lookup failed")
+        }
+        let mut iter = take cursor
+        while list.len(rows) < k {
+            match store.next_indexed(mut iter) {
+                Ok(Some((r, doc))) => if allows(doc, q) {
+                    list.push(mut rows, summary(r, doc))
+                },
+                Ok(None) => break,
+                Error(_) => return Error("dependent lookup failed"),
+            }
+        }
+    } else {
+        let Ok(cursor) = store.range(tx, tables.docs, Unbounded, Unbounded) else {
+            return Error("release scan failed")
+        }
+        let mut iter = take cursor
+        while list.len(rows) < k {
+            match store.next_in(tx, mut iter) {
+                Ok(Some((r, doc))) => if allows(doc, q) {
+                    list.push(mut rows, summary(r, doc))
+                },
+                Ok(None) => break,
+                Error(_) => return Error("release scan failed"),
+            }
+        }
+    }
+    Ok(admit.array(rows))
+}
+
+fn releases(tx: store.Tx, tables: directory.Tables, identity: String) -> Result[String, String] {
+    let Ok(cursor) = store.lookup(tx, tables.identities, Included(string.from(identity)), Included(string.from(identity))) else {
+        return Error("identity lookup failed")
+    }
+    let mut iter = take cursor
+    let mut rows: List[String] = list.new()
+    loop {
+        match store.next_indexed(mut iter) {
+            Ok(Some((r, doc))) => list.push(mut rows, summary(r, doc)),
+            Ok(None) => return Ok(admit.array(rows)),
+            Error(_) => return Error("identity lookup failed"),
+        }
+    }
+}
+
+fn doc_for(tx: store.Tx, tables: directory.Tables, root: String) -> Result[directory_facts.Document, String] {
+    if !pending.lower_hex(root, 64) {
+        return Error("invalid release root")
+    }
+    match store.fetch(tx, tables.docs, root) {
+        Ok(Some(doc)) => Ok(take doc),
+        Ok(None) => Error("unknown release root"),
+        Error(_) => Error("release lookup failed"),
+    }
+}
+
+fn facts_for(tx: store.Tx, tables: directory.Tables, root: String) -> Result[directory_facts.Facts, String] {
+    if doc_for(tx, tables, root)?.lifecycle == "takedown" {
+        return Error("release taken down")
+    }
+    match store.fetch(tx, tables.facts, root) {
+        Ok(Some(facts)) => Ok(take facts),
+        _ => Error("checked facts unavailable"),
+    }
+}
+
+fn diff(a: directory_facts.Facts, b: directory_facts.Facts) -> String {
+    let mut before: Map[String, String] = map.new()
+    for export in a.exports {
+        map.insert(mut before, clone(export.definition), clone(export.item))
+    }
+    let mut added: List[String] = list.new()
+    let mut changed: List[String] = list.new()
+    for export in b.exports {
+        match map.remove(mut before, export.definition) {
+            Some(old) => if old != export.item {
+                let mut pair: mcp.rpc.Fields = map.new()
+                mcp.rpc.put(mut pair, "before", take old)
+                mcp.rpc.put(mut pair, "after", clone(export.item))
+                list.push(mut changed, mcp.rpc.encode_object(pair))
+            },
+            None => list.push(mut added, clone(export.item)),
+        }
+    }
+    let mut removed: List[String] = list.new()
+    for export in a.exports {
+        if mcp.rpc.contains(before, export.definition) {
+            list.push(mut removed, clone(export.item))
+        }
+    }
+    let mut out: mcp.rpc.Fields = map.new()
+    mcp.rpc.put(mut out, "added", admit.array(added))
+    mcp.rpc.put(mut out, "removed", admit.array(removed))
+    mcp.rpc.put(mut out, "changed", admit.array(changed))
+    if a.bindings != b.bindings {
+        mcp.rpc.put(mut out, "bindings_before", clone(a.bindings))
+        mcp.rpc.put(mut out, "bindings_after", clone(b.bindings))
+    }
+    if a.authority != b.authority {
+        mcp.rpc.put(mut out, "authority_before", clone(a.authority))
+        mcp.rpc.put(mut out, "authority_after", clone(b.authority))
+    }
+    mcp.rpc.encode_object(out)
+}
+
+pub fn answer(tx: store.Tx, inputs: (directory.Tables, Query)) -> Result[String, String] {
+    let tables = view inputs.0
+    match view inputs.1 {
+        Search(q) => search_rows(tx, tables, q),
+        Releases(q) => releases(tx, tables, q.identity),
+        Interface(q) => {
+            let facts = facts_for(tx, tables, q.root)?
+            let mut rows: List[String] = list.new()
+            for export in facts.exports {
+                if q.module == None || q.module == Some(clone(export.module_path)) {
+                    list.push(mut rows, clone(export.item))
+                }
+            }
+            let (index, offset) = match view q.cursor {
+                Some(c) if list.len(c) == 2 => (c[0], c[1]),
+                Some(_) => return Error("invalid interface cursor"),
+                None => (0u64, 0u64),
+            }
+            directory_page.page(rows, index, offset)
+        },
+        Authority(q) => Ok(string.from(facts_for(tx, tables, q.root)?.authority)),
+        Diff(q) => Ok(diff(facts_for(tx, tables, q.root_a)?, facts_for(tx, tables, q.root_b)?)),
+        Advisories(q) => {
+            let mut out: mcp.rpc.Fields = map.new()
+            for root in q.roots {
+                let doc = doc_for(tx, tables, root)?
+                let mut state: mcp.rpc.Fields = map.new()
+                mcp.rpc.put(mut state, "status", pending.quoted(doc.lifecycle))
+                if let Some(reason) = view doc.reason {
+                    mcp.rpc.put(mut state, "reason", pending.quoted(reason))
+                }
+                if let Some(message) = view doc.message {
+                    mcp.rpc.put(mut state, "message", pending.quoted(message))
+                }
+                mcp.rpc.put(mut state, "osv", mcp.rpc.encode_object(doc.advisories))
+                mcp.rpc.put(mut out, root, mcp.rpc.encode_object(state))
+            }
+            Ok(mcp.rpc.encode_object(out))
+        },
+        Source(q) => {
+            if doc_for(tx, tables, q.root)?.lifecycle == "takedown" {
+                return Error("release taken down")
+            }
+            Ok("null")
+        },
+    }
+}

@@ -1,0 +1,129 @@
+pub type SourceExtractor = fn(Bytes, String, u64) -> Result[String, String] waits
+
+pub const MAX_SOURCE: u64 = 1048576
+
+pub type Call: send {
+    name: String,
+    arguments: String,
+    reply: Sender[Result[String, String]]
+}
+
+pub type Ctx: send {
+    requests: Sender[Call]
+}
+
+pub fn source(root: String, path: String, frame: scoped fn(String) -> Result[Bytes, String] waits, extract: SourceExtractor) -> Result[String, String] waits {
+    if !pending.lower_hex(root, 64) || string.byte_len(path) == 0 || string.byte_len(path) > 4096 || !std.path.is_valid(path) || std.string.find(path, 0, "\\") != None {
+        return Error("invalid source root or path")
+    }
+    let data = frame(root)?
+    let Ok(size) = pending.verify_zstd_frame(data, root, pending.MAX_COMPRESSED_FRAME, pending.MAX_EXPANDED_FRAME) else {
+        return Error("invalid package frame")
+    }
+    let Ok(content) = std.zstd.decode(data, size, pending.MAX_ZSTD_WINDOW) else {
+        return Error("invalid package frame")
+    }
+    let file = extract(content, path, MAX_SOURCE)?
+    if string.byte_len(file) > MAX_SOURCE {
+        return Error("source file exceeds the byte limit")
+    }
+    let mut fields: mcp.rpc.Fields = map.new()
+    mcp.rpc.put(mut fields, "path", pending.quoted(path))
+    mcp.rpc.put(mut fields, "source", pending.quoted(file))
+    Ok(mcp.rpc.encode_object(fields))
+}
+
+pub fn answer(reader: store.Reader, snapshot: store.Snapshot, tables: directory.Tables, name: String, arguments: String, frame: scoped fn(String) -> Result[Bytes, String] waits, extract: SourceExtractor) -> Result[String, String] waits {
+    let query = directory_query.request(name, arguments)?
+    let Ok(Seen(seen)) = store.look(reader, snapshot, None, (store.copy_env(tables), store.copy_env(query)), directory_query.answer) else {
+        return Error("directory snapshot unavailable")
+    }
+    let store.Seen(value: take value, ..) = take seen
+    let data = (take value)?
+    if let Source(q) = query {
+        return source(q.root, q.path, frame, extract)
+    }
+    Ok(take data)
+}
+
+pub fn call(ctx: Ctx, name: String, args: String, clock: Clock) -> Result[String, String] waits {
+    let (to, from): (Sender[Result[String, String]], Receiver[Result[String, String]]) = channel.new(1)
+    if let Error(_) = channel.try_send(ctx.requests, Call(name: string.from(name), arguments: string.from(args), reply: take to)) {
+        return Error("directory busy")
+    }
+    match channel.receive_until(from, At(clock, std.clock.deadline_after_ms(host.mono_ns(clock), 30000))) {
+        Ok(r) => take r,
+        Error(_) => Error("directory unavailable"),
+    }
+}
+
+fn invoke(name: String, c: mcp.server.Call, clock: Clock, ctx: Ctx) -> mcp.server.Step waits {
+    match call(ctx, name, c.arguments, clock) {
+        Ok(data) => Text(take data),
+        Error(msg) => ToolError(take msg),
+    }
+}
+
+fn tool[T: codec](name: String, description: String, format: std.json.Format[T], handle: fn(mut mcp.server.Call, Clock, mut Ctx) -> mcp.server.Step waits) -> mcp.server.Tool[Ctx] {
+    mcp.server.Tool(name: string.from(name), description: string.from(description), input_schema: result.unwrap(mcp.server.schema(format, list.new())), call: handle)
+}
+
+fn search_tool(mut c: mcp.server.Call, clock: Clock, mut ctx: Ctx) -> mcp.server.Step waits {
+    invoke("search", c, clock, ctx)
+}
+
+fn releases_tool(mut c: mcp.server.Call, clock: Clock, mut ctx: Ctx) -> mcp.server.Step waits {
+    invoke("releases", c, clock, ctx)
+}
+
+fn interface_tool(mut c: mcp.server.Call, clock: Clock, mut ctx: Ctx) -> mcp.server.Step waits {
+    invoke("interface", c, clock, ctx)
+}
+
+fn authority_tool(mut c: mcp.server.Call, clock: Clock, mut ctx: Ctx) -> mcp.server.Step waits {
+    invoke("authority", c, clock, ctx)
+}
+
+fn diff_tool(mut c: mcp.server.Call, clock: Clock, mut ctx: Ctx) -> mcp.server.Step waits {
+    invoke("diff", c, clock, ctx)
+}
+
+fn advisories_tool(mut c: mcp.server.Call, clock: Clock, mut ctx: Ctx) -> mcp.server.Step waits {
+    invoke("advisories", c, clock, ctx)
+}
+
+fn source_tool(mut c: mcp.server.Call, clock: Clock, mut ctx: Ctx) -> mcp.server.Step waits {
+    invoke("source", c, clock, ctx)
+}
+
+pub fn catalog() -> List[mcp.server.Tool[Ctx]] {
+    let mut tools: List[mcp.server.Tool[Ctx]] = list.new()
+    list.push(mut tools, tool("search", "Search package releases by text, signature, scope, status or dependency root.", (result.unwrap(std.json.interop()) : std.json.Format[directory_query.SearchArgs]), search_tool))
+    list.push(mut tools, tool("releases", "List every release of a package identity.", (result.unwrap(std.json.interop()) : std.json.Format[directory_query.ReleasesArgs]), releases_tool))
+    list.push(mut tools, tool("interface", "Read exports. Pass the next cursor to continue. Concatenate fragments of a large export.", (result.unwrap(std.json.interop()) : std.json.Format[directory_query.InterfaceArgs]), interface_tool))
+    list.push(mut tools, tool("authority", "Read the checked authority card.", (result.unwrap(std.json.interop()) : std.json.Format[directory_query.RootArgs]), authority_tool))
+    list.push(mut tools, tool("diff", "Compare the checked exports and authority of two releases.", (result.unwrap(std.json.interop()) : std.json.Format[directory_query.DiffArgs]), diff_tool))
+    list.push(mut tools, tool("advisories", "Read current OSV records keyed by release root and advisory ID.", (result.unwrap(std.json.interop()) : std.json.Format[directory_query.AdvisoryArgs]), advisories_tool))
+    list.push(mut tools, tool("source", "Read one source file by release root and archive path.", (result.unwrap(std.json.interop()) : std.json.Format[directory_query.SourceArgs]), source_tool))
+    take tools
+}
+
+pub fn serve(take listener: Listener, requests: Sender[Call], clock: Clock, tasks: Tasks, random: Random, origins: List[String], take stop: Option[Receiver[u64]]) -> Result[(), std.http.ServeError] waits {
+    let mut listeners: List[Listener] = list.new()
+    list.push(mut listeners, take listener)
+    let (take registry, _sessions) = result.unwrap(mcp.sessions.start(tasks, clock, random, 128, 3600000))
+    let state = mcp.server.Server(identity: mcp.rpc.Identity(name: "hirsel-registry", version: "1"), origins: clone(origins), tools: Fixed(catalog()), resources: list.new(), event_max: 8388608, producer_bytes: 33554432, producer_steps: 100000000)
+    let mut routes: std.router.Builder[mcp.server.Endpoint[Ctx]] = std.router.builder()
+    result.unwrap(mcp.server.mount(mut routes, "/mcp", 65536, 67108864))
+    let mut config = std.http.defaults()
+    config.streams_max = 4
+    config.heartbeat_ms = 1000
+    config.lease_ms = 30000
+    config.sockets_max = 16
+    config.conns_max = 16
+    config.http_max = 16
+    config.ip_sockets_max = 16
+    mcp.server.serve(take listeners, clock, tasks, take config, result.unwrap(std.router.build(take routes)), take state, take registry, 4096, 256, fn() -> Ctx {
+        Ctx(requests: channel.sender(requests))
+    }, take stop)
+}

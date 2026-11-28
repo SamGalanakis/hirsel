@@ -1,0 +1,52 @@
+// discovery_cli/main --json TOOL ARGUMENTS. The Directory is opened read-only.
+// Only source needs to fetch a public object.
+pub fn query(name: String, arguments: String, projection: Dir, config: Dir, n: Net, clock: Clock, tasks: Tasks) -> Result[String, String] waits {
+    let options = result.unwrap(store.sized(Directory, 2147483648u64))
+    let Ok(captured) = store.open_read_only(projection, clock, options) else {
+        return Error("cannot open discovery Directory")
+    }
+    let Ok(tables) = store.bind_read_only(captured, directory.schema) else {
+        return Error("cannot open discovery schema")
+    }
+    let Ok(reader) = store.read_only_reader(captured, 0) else {
+        return Error("cannot read discovery Directory")
+    }
+    let snapshot = store.read_only_snapshot(captured)
+    if let Ok(Some(true)) = store.get(reader, snapshot, tables.ready, 0) {} else {
+        return Error("incomplete discovery replay")
+    }
+    mcp_hub.answer(reader, snapshot, tables, name, arguments, scoped fn(root: String) -> Result[Bytes, String] waits {
+        let mut limits = std.http_client.limits(pending.MAX_COMPRESSED_FRAME)
+        limits.redirects = Return
+        limits.decode = false
+        let Ok(pool) = std.http_client.pool(n, clock, tasks, System, limits) else {
+            return Error("source fetch unavailable")
+        }
+        discovery.frame(std.http_client.handle(pool), discovery.public_origin(config)?, root, clock)
+    }, discovery.compiler_source)
+}
+
+pub fn main(argv: Args, projection: Dir, config: Dir, n: Net, clock: Clock, tasks: Tasks, out: Stdout, err: Stderr) -> Result[(), Exit] waits {
+    if args.len(argv) != 3 || args.get(argv, 0) != Some("--json") {
+        let _ = stderr.write(err, "usage: --json TOOL ARGUMENTS\n")
+        return Error(Exit(status: 2))
+    }
+    let name = option.unwrap(args.get(argv, 1))
+    let arguments = option.unwrap(args.get(argv, 2))
+    match query(name, arguments, projection, config, n, clock, tasks) {
+        Ok(text) => {
+            let mut line = take text
+            string.push(mut line, "\n")
+            let Ok(_) = stdout.write(out, line) else {
+                return Error(Exit(status: 1))
+            }
+            Ok(())
+        },
+        Error(e) => {
+            let mut line = take e
+            string.push(mut line, "\n")
+            let _ = stderr.write(err, line)
+            Error(Exit(status: 1))
+        },
+    }
+}

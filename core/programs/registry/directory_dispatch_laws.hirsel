@@ -1,0 +1,168 @@
+type DiscoveryListener: send {
+    site: Listener,
+    requests: Sender[mcp_hub.Call],
+    stop: Receiver[u64],
+    clock: Clock,
+    tasks: Tasks,
+    random: Random
+}
+
+fn serve_discovery(take job: DiscoveryListener) -> Result[(), std.http.ServeError] waits {
+    let DiscoveryListener(site: take site, requests: take requests, stop: take stop, clock, tasks, random) = take job
+    let mut origins: List[String] = list.new()
+    list.push(mut origins, "http://registry.test")
+    mcp_hub.serve(take site, requests, clock, tasks, random, origins, Some(take stop))
+}
+
+type DiscoveryReader: send {
+    calls: Receiver[mcp_hub.Call],
+    reader: store.Reader,
+    snapshot: store.Snapshot,
+    tables: directory.Tables,
+    frame: Bytes
+}
+
+fn read_calls(take job: DiscoveryReader) waits {
+    while let Ok(call) = channel.receive(job.calls) {
+        let value = mcp_hub.answer(job.reader, job.snapshot, job.tables, call.name, call.arguments, scoped fn(root: String) -> Result[Bytes, String] {
+            if root != pending.library_root(fixture_content()) {
+                return Error("wrong frame key")
+            }
+            Ok(clone(job.frame))
+        }, fixture_extract)
+        let _ = channel.try_send(call.reply, take value)
+    }
+}
+
+fn no_notice(_n: mcp.client.Notice) -> bool {
+    true
+}
+
+fn dispatched(n: Net, c: Clock, peer: mcp.client.Endpoint, session: mcp.client.Session, tool: mcp.metadata.ToolDefinition, args: String) -> Result[(String, u64), String] waits {
+    let id = option.unwrap(mcp.rpc.id_value("27"))
+    let result = mcp.client.call_tool(n, c, peer, session, None, clone(id), tool, string.from(args), None, 1048576, 1048576, std.clock.deadline_after_ms(host.mono_ns(c), 5000), no_notice)
+    let Ok(reply) = take result else {
+        return Error(cat2("MCP call failed: ", mcp.metadata.tool_name(tool)))
+    }
+    let fields = directory_facts.object(reply.body)?
+    let envelope = mcp.rpc.encode_result(id, fields)
+    let content = directory_facts.array(directory_facts.member(fields, "content")?)?
+    require(list.len(content) == 1, "expected one MCP tool result")?
+    let text = directory_facts.text(directory_facts.object(content[0])?, "text")?
+    if map.get(fields, "isError") == Some("true") {
+        return Error(take text)
+    }
+    Ok((take text, string.byte_len(envelope)))
+}
+
+fn check_tools(n: Net, clock: Clock, address: Addr, roots: SampleRoots, out: Stdout) -> Result[(), String] waits {
+    let peer = mcp.client.Endpoint(address: address, authority: cat2("127.0.0.1:", pending.decimal(int.widen(address.port))), target: "/mcp", origin: "http://registry.test", security: Plain)
+    let identity = mcp.rpc.Identity(name: "directory-law", version: "1")
+    let Ok(session) = mcp.client.connect(n, clock, peer, None, identity, 1048576, 1048576, std.clock.deadline_after_ms(host.mono_ns(clock), 5000)) else {
+        return Error("MCP connect failed")
+    }
+    let Ok(catalog) = mcp.client.call(n, clock, peer, session, None, option.unwrap(mcp.rpc.id_value("26")), "tools/list", map.new(), 1048576, 1048576, std.clock.deadline_after_ms(host.mono_ns(clock), 5000), no_notice) else {
+        return Error("MCP list failed")
+    }
+    let listed = result.unwrap(mcp.metadata.tools(catalog.body))
+    require(list.len(listed.tools) == 7 && list.len(listed.rejected) == 0, "wrong catalog")?
+    let inputs = sample_queries(roots)
+    let mut called: Map[String, bool] = map.new()
+    for tool in listed.tools {
+        let name = mcp.metadata.tool_name(tool)
+        require(!map.contains(called, name), "duplicate discovery tool")?
+        map.insert(mut called, string.from(name), true)
+        if name == "interface" {
+            let mut cursor = string.from("null")
+            let mut exports = 0u64
+            loop {
+                let args = cat3("{\"root\":", pending.quoted(roots.latest), cat3(",\"module\":\"leaf\",\"cursor\":", cursor, "}"))
+                let (wire, size) = dispatched(n, clock, peer, session, tool, args)?
+                require(size <= 4096, "MCP interface envelope exceeds G16")?
+                let _ = stdout.write(out, cat3("interface envelope bytes ", pending.decimal(size), "\n"))
+                let page = directory_facts.object(wire)?
+                for item in directory_facts.array(directory_facts.member(page, "exports")?)? {
+                    let expected = if exports == 0 {
+                        string.from("one")
+                    } else {
+                        cat2("count_", pending.decimal(exports))
+                    }
+                    require(directory_facts.text(directory_facts.object(item)?, "name")? == expected, "interface lost or repeated an export")?
+                    exports += 1
+                }
+                cursor = directory_facts.member(page, "next")?
+                if cursor == "null" {
+                    break
+                }
+            }
+            require(exports == 48, "wrong number of paged exports")?
+        } else if name == "source" {
+            let args = cat3("{\"path\":\"leaf.hirsel\",\"root\":", pending.quoted(roots.old), "}")
+            let (wire, _) = dispatched(n, clock, peer, session, tool, args)?
+            require(directory_facts.text(directory_facts.object(wire)?, "source")? == "pub fn one() -> u64 { 1 }\n", "source file disagrees")?
+        } else {
+            let mut matched = false
+            for input in inputs {
+                if input.0 == name {
+                    let (wire, _) = dispatched(n, clock, peer, session, tool, input.1)?
+                    if name == "search" || name == "releases" {
+                        require(list.len(directory_facts.array(wire)?) > 0, "empty tool result")?
+                    } else {
+                        require(map.len(directory_facts.object(wire)?) > 0, "empty tool result")?
+                    }
+                    matched = true
+                    break
+                }
+            }
+            require(matched, "unrecognized MCP tool")?
+        }
+    }
+    Ok(())
+}
+
+fn serve_test_json(take job: DiscoveryListener) -> Result[(), std.http.ServeError] waits {
+    let DiscoveryListener(site: take site, requests: take requests, stop: take stop, clock, tasks, ..) = take job
+    directory_http.serve(take site, requests, clock, tasks, Some(take stop))
+}
+
+fn check_json_queries(n: Net, clock: Clock, tasks: Tasks, address: Addr, roots: SampleRoots, expected: List[String]) -> Result[(), String] waits {
+    let pool = result.unwrap(std.http_client.pool(n, clock, tasks, System, std.http_client.limits(1048576)))
+    let queries = sample_queries(roots)
+    for i in 0u64 .. list.len(queries) {
+        let item = view queries[i]
+        let url = cat3("http://127.0.0.1:", pending.decimal(int.widen(address.port)), cat2("/v1/discovery/", item.0))
+        let mut body: List[std.http_client.Segment] = list.new()
+        list.push(mut body, Plain(string.into_bytes(clone(item.1))))
+        let req = std.http_client.Fetch(method: "POST", url: take url, headers: list.new(), body: take body)
+        let mut data: Bytes = list.new()
+        let Ok(head) = std.http_client.fetch_all(std.http_client.handle(pool), req, mut data, std.clock.deadline_after_ms(host.mono_ns(clock), 5000)) else {
+            return Error("HTTP discovery request failed")
+        }
+        require(std.http_client.status(head) == 200 && data == string.as_bytes(expected[i]), "HTTP JSON twin disagrees with Directory")?
+    }
+    Ok(())
+}
+
+fn dispatch_law(n: Net, c: Clock, random: Random, tasks: Tasks, db: store.Db, tables: directory.Tables, roots: SampleRoots, frame: Bytes, out: Stdout) -> Result[(), String] waits {
+    let (listener, address) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
+    let (to, from): (Sender[mcp_hub.Call], Receiver[mcp_hub.Call]) = channel.new(8)
+    let worker = task.spawn(tasks, bytes 67108864, DiscoveryReader(calls: take from, reader: result.unwrap(store.reader(db, 0)), snapshot: store.snapshot(db), tables: store.copy_env(tables), frame: clone(frame)), read_calls)
+    let (stop, stopping): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let (json_listener, json_address) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
+    let (end_json, stopping_json): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let json_server = task.spawn(tasks, bytes 671088640, DiscoveryListener(site: take json_listener, requests: channel.sender(to), stop: take stopping_json, clock: c, tasks, random), serve_test_json)
+    let server = task.spawn(tasks, bytes 805306368, DiscoveryListener(site: take listener, requests: take to, stop: take stopping, clock: c, tasks, random), serve_discovery)
+    let checked_json = check_json_queries(n, c, tasks, json_address, roots, sample_answers(db, tables, roots)?)
+    let _ = channel.try_send(end_json, 1u64)
+    let _ = task.join(take json_server)
+    let checked = check_tools(n, c, address, roots, out)
+    let _ = channel.try_send(stop, 1u64)
+    let served = task.join(take server)
+    let _ = task.join(take worker)
+    (take checked_json)?
+    (take checked)?
+    if let Ok(Ok(())) = served {
+        return Ok(())
+    }
+    Error("MCP server failed")
+}

@@ -1,0 +1,113 @@
+// Signature text is the compiler's public declaration. A shape query names
+// argument types and a result type. An underscore stands for one complete
+// type, including a nested generic. Literal declaration searches also work.
+fn compact(s: String) -> String {
+    let mut out = string.new()
+    let mut at = 0u64
+    while let Some((c, next)) = string.next_scalar(s, at) {
+        if !std.char.is_whitespace(c) {
+            string.push_char(mut out, c)
+        }
+        at = next
+    }
+    take out
+}
+
+fn boundary(s: String, at: u64) -> u64 {
+    let raw = string.as_bytes(s)
+    let mut depth = 0u64
+    let mut i = at
+    while i < list.len(raw) {
+        let b = raw[i]
+        if (b == b',' || b == b']' || b == b')') && depth == 0 {
+            break
+        }
+        if b == b'[' || b == b'(' {
+            depth += 1
+        }
+        if b == b']' || b == b')' {
+            depth -= 1
+        }
+        i += 1
+    }
+    i
+}
+
+fn result_shape(signature: String) -> Option[String] {
+    let start = std.string.find(signature, 0, "(")?
+    let mut at = start + 1
+    let mut args: List[String] = list.new()
+    let raw = string.as_bytes(signature)
+    while at < list.len(raw) && raw[at] != b')' {
+        let end = boundary(signature, at)
+        let (_, ty) = std.string.split_once(string.slice(signature, at, end), ":")?
+        list.push(mut args, compact(ty))
+        at = end
+        if at < list.len(raw) && raw[at] == b',' {
+            at += 1
+        }
+    }
+    if at >= list.len(raw) {
+        return None
+    }
+    let suffix = std.string.trim_ascii(string.slice(signature, at + 1, list.len(raw)))
+    let ty = std.string.strip_prefix(suffix, "->")?
+    let ty_end = match std.string.find(ty, 0, " waits") {
+        Some(end) => end,
+        None => string.byte_len(ty),
+    }
+    let mut shape = string.from("(")
+    string.push(mut shape, std.string.join(args, ","))
+    string.push(mut shape, ")->")
+    string.push(mut shape, compact(string.slice(ty, 0, ty_end)))
+    Some(take shape)
+}
+
+pub fn matches(signature: String, query: String) -> bool {
+    if query == "" {
+        return false
+    }
+    if let Some(_) = std.string.find(signature, 0, query) {
+        return true
+    }
+    let Some((args, result)) = std.string.split_once(query, "->") else {
+        return false
+    }
+    let Some(actual) = result_shape(signature) else {
+        return false
+    }
+    let params = compact(args)
+    let mut pattern = string.new()
+    if std.string.starts_with(params, "(") {
+        string.push(mut pattern, params)
+    } else {
+        string.push(mut pattern, "(")
+        string.push(mut pattern, params)
+        string.push(mut pattern, ")")
+    }
+    string.push(mut pattern, "->")
+    string.push(mut pattern, compact(result))
+    let input = string.as_bytes(actual)
+    let wanted = string.as_bytes(pattern)
+    let mut i = 0u64
+    let mut p = 0u64
+    while p < list.len(wanted) {
+        if i == list.len(input) {
+            return false
+        }
+        if wanted[p] == b'_' && (p == 0 || wanted[p - 1] == b',' || wanted[p - 1] == b'[' || wanted[p - 1] == b'(' || wanted[p - 1] == b'>') && (p + 1 == list.len(wanted) || wanted[p + 1] == b',' || wanted[p + 1] == b']' || wanted[p + 1] == b')') {
+            let end = boundary(actual, i)
+            if end == i {
+                return false
+            }
+            i = end
+        } else {
+            if wanted[p] != input[i] {
+                return false
+            }
+            i += 1
+        }
+        p += 1
+    }
+    i == list.len(input)
+}

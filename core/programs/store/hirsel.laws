@@ -244,9 +244,9 @@ store@1/store/projector_bounded src=c5e6222881a02373 sig=0cd2a5770efc4256 run=af
 store@1/store/read_only_projector_limits_law src=9cb45d9603e4b812 sig=aff96e81fa30a325 run=ea720f3846592392 bug=b51cb6ed6b6b88b1 oracle=3085c673bbc50423 rows=pending
 store@1/store/read_only_replay_step_budget src=dc66cc05f0788c17 sig=62b8fe2ae0ce3025 run=ba799caff9b50348 bug=- oracle=- rows=pending
 store@1/store/read_tail_step_budget src=d278d5ba2d805156 sig=88cddc2d92b8b9d7 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
-store@1/store/recovery_table_accounts_for_every_cell src=4a70ede82f42fc97 sig=1e85023fcebc8a15 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-store@1/store/recovery_table_live_follower_capture src=3f402ea0e4e06166 sig=3e5839528fc66aff run=ea720f3846592392 bug=- oracle=- rows=pending
-store@1/store/recovery_table_owner_reopen src=e4b9432a1424f506 sig=3e5839528fc66aff run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/recovery_table_accounts_for_every_cell src=4a70ede82f42fc97 sig=1e85023fcebc8a15 run=c2c0c6612d4cbb79 bug=df0066c7c1bc77b2 oracle=2b8109f430d6d1ae rows=pending
+store@1/store/recovery_table_live_follower_capture src=3f402ea0e4e06166 sig=3e5839528fc66aff run=ea720f3846592392 bug=66107db2878fb9a5 oracle=3672a45d17b345d3 rows=pending
+store@1/store/recovery_table_owner_reopen src=e4b9432a1424f506 sig=3e5839528fc66aff run=ea720f3846592392 bug=3680223d0f473f67 oracle=97cd03d0a0db1c57 rows=pending
 store@1/store/reexecute_zero_data_write_serve src=ee418deceb50f99c sig=fcc9d6eca05dcb73 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/small_bucket_place_plan_at_floor src=d302981002727e52 sig=6588b1a37e375c7e run=dbf6722727633166 bug=- oracle=- rows=pending
 store@1/store/small_directory_place_need src=ec9370a4d2e392bf sig=e002e99d5ef1e70a run=ea720f3846592392 bug=- oracle=- rows=pending

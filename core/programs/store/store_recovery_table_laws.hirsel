@@ -569,6 +569,9 @@ fn table_shard(d: Dir, c: Clock, r: Random, tasks: Tasks, entry: u64) -> Result[
 // The full product is accounted for: each cell is impossible for one stated
 // reason or reachable by exactly one entry point, and each reason and each
 // expected disposition occurs.
+/// bug: a combination of recovery axes has no stated reason and no expected
+/// answer, so a disposition can change with no cell to catch it.
+/// oracle: the axis sizes and STORE-SPEC §3.3b and §3.4 step 5.
 @test
 fn recovery_table_accounts_for_every_cell() -> Result[(), Error] {
     let mut product = 1u64
@@ -622,11 +625,17 @@ fn recovery_table_accounts_for_every_cell() -> Result[(), Error] {
     Ok(())
 }
 
+/// bug: reopen drops a bad-header first_live segment that has a successor
+/// file, or accepts a bad frame below a certified boundary.
+/// oracle: STORE-SPEC §3.4 step 5, through the table's spec-only verdict.
 @test
 fn recovery_table_owner_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     table_shard(d, c, r, tasks, TABLE_OWNER)
 }
 
+/// bug: a first changing walk reports stable corruption, a capture publishes
+/// behind its predecessor, or a bad frame below END is accepted.
+/// oracle: STORE-SPEC §3.3b and the monotone rule, through the spec-only verdict.
 @test
 fn recovery_table_live_follower_capture(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     table_shard(d, c, r, tasks, TABLE_FOLLOWER)

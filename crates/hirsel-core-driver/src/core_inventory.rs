@@ -283,7 +283,10 @@ mod tests {
             .file_name()
             .is_some_and(|file| file == crate::package_dir::MANIFEST)
         {
-            let directory = crate::package_dir::PackageDir::open(path.parent().unwrap()).unwrap();
+            let mut directory =
+                crate::package_dir::PackageDir::open(path.parent().unwrap()).unwrap();
+            // The installed library root supplies its programs as the driver does.
+            directory.trust_library_root(&root.join("core"));
             assert_eq!(directory.package.package.name, name);
             return vec![directory.package];
         }

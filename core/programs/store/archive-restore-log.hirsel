@@ -1,6 +1,6 @@
 // The successor HEADER proves the previous segment's sealed end, including
 // when the newly advertised cursor is still at offset zero in the successor.
-pub fn archive_stage_successor(d: Dir, mut sink: std.object.Client, store: types.StoreKey, seq: u64, previous_end: u64, deadline: u64) -> Result[(), types.Failure] waits {
+pub fn archive_stage_successor(d: Dir, mut sink: std.object.Client, store: types.StoreKey, inc: Inline[u8, 16], seq: u64, previous_end: u64, deadline: u64) -> Result[(), types.Failure] waits {
     let path = manifest.journal_path(seq, "")?
     let mut f = manifest.disk_io(host.open(d, path, Read))?
     let header = manifest.read_disk_bytes(mut f, path, 0, 72)?
@@ -9,7 +9,7 @@ pub fn archive_stage_successor(d: Dir, mut sink: std.object.Client, store: types
     if h.prev_end != previous_end {
         return Error(format.disk_fault(path, 0, Order))
     }
-    let key = format.archive_key(store, format.archive_log_journal_rel(seq, 0))
+    let key = format.archive_key(store, inc, format.archive_log_journal_rel(seq, 0))
     let (take issued, take expected) = std.object.store_if_retry(mut sink, key, Absent, take header, deadline)
     match take issued {
         Ok(Applied(_)) => Ok(()),

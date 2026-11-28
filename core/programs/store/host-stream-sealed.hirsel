@@ -222,3 +222,67 @@ pub fn stream_settle_sealed_core(mut client: std.object.Client, mut register: hi
         }
     }
 }
+
+// Collect only this Place's frames after its settlement cursor in the batch.
+fn reclaim_batch_packs(mut client: std.object.Client, mut buffers: TailBuffers, root: String, tail: format.StreamRef, seq: u64, store: types.StoreKey, epoch: u64, mut keep: Map[String, ()], deadline: u64) -> Result[(), types.Failure] waits {
+    let dir = stream_key(root, stream_dir(tail.sid))
+    let mut name = string.with_capacity(48)
+    format.stream_batch_key(mut name, tail.inc, seq)
+    let key = stream_key(dir, name)
+    let row = stream_sealed_fetch_slice(mut client, mut buffers, key, tail.sid, tail.inc, seq, store, epoch, deadline)?
+    if let Some(found) = row {
+        let skip: u64 = if seq == tail.from_seq {
+            int.widen(tail.from_frame)
+        } else {
+            0u64
+        }
+        let ctx = format.DiskContext(store, role: format.ROLE_BATCH, seq)
+        let mut at = 0u64
+        let mut i = 0u64
+        while at < list.len(buffers.slice) {
+            let frame = manifest.disk_frame_bytes(key, ctx, buffers.slice, at)?
+            if frame.kind == 0x0011 && i >= skip {
+                let mut refs: List[Arc[format.DirectBlob]] = list.new()
+                manifest.commit_direct_blobs(key, list.slice(buffers.slice, frame.payload, frame.end), mut refs)?
+                for place in refs {
+                    types.capacity(map.try_reserve(mut keep, 1))?
+                    map.insert(mut keep, history.history_read_key("p-", manifest.direct_history_ref(place))?, ())
+                }
+            }
+            at = frame.end
+            i += 1
+        }
+        if i != found.frames || skip > i {
+            return Error(format.disk_fault(key, found.offset, Malformed))
+        }
+    }
+    Ok(())
+}
+
+pub fn reclaim_attached_packs(mut client: std.object.Client, head: history.HistoryHead, attach: format.Attach, root: String, batches: List[u64], mut keep: Map[String, ()], deadline: u64) -> Result[(), types.Failure] waits {
+    if list.len(attach.sealed) == 0 && list.len(batches) == 0 {
+        return Ok(())
+    }
+    let mut buffers = stream_tail_buffers()?
+    for st in attach.sealed {
+        let epoch = stream_sealed_tail_epoch(mut client, mut buffers, root, st, head.store, deadline)?
+        let mut seq = st.tail.from_seq
+        loop {
+            reclaim_batch_packs(mut client, mut buffers, root, st.tail, seq, head.store, epoch, mut keep, deadline)?
+            if seq == st.cutoff {
+                break
+            }
+            seq += 1
+        }
+    }
+    if let Some(tail) = attach.live {
+        for seq in batches {
+            if seq >= tail.from_seq {
+                reclaim_batch_packs(mut client, mut buffers, root, tail, seq, head.store, head.pair.epoch, mut keep, deadline)?
+            }
+        }
+        // Undecided current-epoch writes are above the captured installed
+        // frontier. history_dead_key leaves them to the eventual prefix decision.
+    }
+    Ok(())
+}

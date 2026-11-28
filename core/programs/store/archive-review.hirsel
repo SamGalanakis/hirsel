@@ -46,3 +46,155 @@ fn review_archive_head(mut src: std.object.Client, parent: StoreId, head: format
     }
     Ok(clone(idx.intervals))
 }
+
+pub type PreviewHoldRow = format.PreviewHoldRep
+
+pub type PreviewError: send = PreviewExpired | PreviewHoldsFull | Store(Error)
+
+pub opaque type PreviewHold: shareable + send {
+    parent: StoreId,
+    incarnation: Inline[u8, 16],
+    record: format.PreviewHoldRep
+}
+
+fn preview_head(mut src: std.object.Client, parent: StoreId, due: u64) -> Result[(format.ArchiveHeadRep, std.object.ETag), Error] waits {
+    let Some(take found) = failure_result_from_rep(history.archive_head_fetch(mut src, store_key_to_rep(parent), due))? else {
+        return Error(NotFound)
+    }
+    Ok(take found)
+}
+
+fn preview_position(head: format.ArchiveHeadRep, child: types.StoreKey) -> u64 {
+    let mut i = 0u64
+    while i < list.len(head.holds) {
+        let k = head.holds[i].child
+        if k.hi > child.hi || (k.hi == child.hi && k.lo >= child.lo) {
+            break
+        }
+        i += 1
+    }
+    i
+}
+
+pub fn preview_admit(mut src: std.object.Client, child: StoreId, token: RestoreToken, until_ms: u64, op_ms: u64) -> Result[PreviewHold, PreviewError] waits {
+    let id = store_key_to_rep(child)
+    let due = std.object.deadline_after_ms(src, op_ms)
+    let mut stamped: Option[(Inline[u8, 16], format.PreviewHoldRep)] = None
+    loop {
+        let (take observed, tag) = preview_head(mut src, token.parent, due) ?=> Store
+        if let Some((id_before, _)) = stamped {
+            if id_before != observed.incarnation {
+                stamped = None
+            }
+        }
+        let at = preview_position(observed, id)
+        if at < list.len(observed.holds) && observed.holds[at].child == id {
+            let h = observed.holds[at]
+            if let Some((_, prior)) = stamped {
+                if h.stamp == prior.stamp && h.binding_id == prior.binding_id && h.boundary == prior.boundary && h.until_ms >= prior.until_ms {
+                    return Ok(PreviewHold(parent: token.parent, incarnation: observed.incarnation, record: h))
+                }
+            }
+            return Error(Store(Conflict("Preview child already held")))
+        }
+        if list.len(observed.holds) >= format.PREVIEW_HOLDS_MAX {
+            return Error(PreviewHoldsFull)
+        }
+        if child == token.parent || token.binding_id != observed.binding_id || token.capture_attempt !=[0u8; 16] {
+            return Error(Store(Foreign))
+        }
+        let resolved = restore_archive_scan(mut src, observed, Boundary(token), due) ?=> Store
+        let RestorePresent(point) = take resolved else {
+            return Error(Store(NotFound))
+        }
+        if point.token != token {
+            return Error(Store(NotFound))
+        }
+        let mut candidate = take observed
+        candidate.rev = failure_result_from_rep(history.history_next_id(candidate.rev)) ?=> Store
+        let h = format.PreviewHoldRep(child: id, binding_id: token.binding_id, boundary: token.boundary, until_ms, stamp: candidate.rev)
+        stamped = Some((candidate.incarnation, h))
+        failure_result_from_rep(types.capacity(list.try_reserve(mut candidate.holds, 1))) ?=> Store
+        list.push(mut candidate.holds, h)
+        let mut i = list.len(candidate.holds) - 1
+        while i > at {
+            candidate.holds[i] = candidate.holds[i - 1]
+            i -= 1
+        }
+        candidate.holds[at] = h
+        let _ = failure_result_from_rep(history.archive_head_cas(mut src, candidate.store, Match(tag), candidate, due)) ?=> Store
+    }
+}
+
+fn change_preview_hold(mut src: std.object.Client, hold: PreviewHold, extend_to: Option[u64], op_ms: u64) -> Result[(), PreviewError] waits {
+    let due = std.object.deadline_after_ms(src, op_ms)
+    loop {
+        let observed = failure_result_from_rep(history.archive_head_fetch(mut src, store_key_to_rep(hold.parent), due)) ?=> Store
+        let Some((take head, tag)) = take observed else {
+            return match extend_to {
+                None => Ok(()),
+                Some(_) => Error(PreviewExpired),
+            }
+        }
+        let at = preview_position(head, hold.record.child)
+        if head.incarnation != hold.incarnation || at == list.len(head.holds) || head.holds[at].child != hold.record.child || head.holds[at].stamp != hold.record.stamp {
+            return match extend_to {
+                None => Ok(()),
+                Some(_) => Error(PreviewExpired),
+            }
+        }
+        let mut candidate = take head
+        if let Some(requested) = extend_to {
+            if candidate.holds[at].until_ms >= requested {
+                return Ok(())
+            }
+            candidate.holds[at].until_ms = requested
+        } else {
+            for i in at + 1 .. list.len(candidate.holds) {
+                candidate.holds[i - 1] = candidate.holds[i]
+            }
+            let _ = list.pop(mut candidate.holds)
+        }
+        candidate.rev = failure_result_from_rep(history.history_next_id(candidate.rev)) ?=> Store
+        let written = failure_result_from_rep(history.archive_head_cas(mut src, candidate.store, Match(tag), candidate, due)) ?=> Store
+        if let ArchiveCasApplied(_) = take written {
+            return Ok(())
+        }
+    }
+}
+
+pub fn preview_extend(mut src: std.object.Client, hold: PreviewHold, until_ms: u64, op_ms: u64) -> Result[(), PreviewError] waits {
+    change_preview_hold(mut src, hold, Some(until_ms), op_ms)
+}
+
+pub fn preview_release(mut src: std.object.Client, hold: PreviewHold, op_ms: u64) -> Result[(), PreviewError] waits {
+    change_preview_hold(mut src, hold, None, op_ms)
+}
+
+pub fn preview_check(src: std.object.Opener, hold: PreviewHold, op_ms: u64) -> Result[(), PreviewError] waits {
+    let parent = store_key_to_rep(hold.parent)
+    let due = std.object.opener_deadline_ms(src, op_ms)
+    match pager.held_preview_head(src, parent, hold.incarnation, hold.record, due) {
+        Ok(_) => Ok(()),
+        Error(PreviewExpired) => Error(PreviewExpired),
+        Error(take problem) => Error(Store(failure_from_rep(take problem))),
+    }
+}
+
+fn directory_pager(d: Dir, preview: Option[pager.PreviewRead]) -> pager.TieredPagerSource {
+    match preview {
+        Some(source) => PreviewDirectory(d, pager.share_preview(source)),
+        None => PagerDirectory(d),
+    }
+}
+
+pub fn open_preview_directory(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options, archive: std.object.Opener, op_ms: u64) -> Result[Db, Error] waits {
+    let (id, take image) = read_page_manifest_file(d)?
+    let Some(origin) = image.origin else {
+        return Error(Foreign)
+    }
+    let source = preview_source(archive, store_key_to_rep(id), origin, op_ms)?
+    let mut opts: Options = clone(options)
+    opts.create = false
+    open_directory_with_mode(tasks, d, c, r, opts, journal.DIRECTORY_JOURNAL_CADENCE, ServingPreview(take source))
+}

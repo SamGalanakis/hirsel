@@ -94,8 +94,7 @@ fn draft_tiered_index_chunk(attempt: core.Cell[pager.TieredTouchSet], visible: M
             _ => 0u32,
         }
         let val: Option[Bytes] = match op.value {
-            Some(BlobBody(raw)) => Some(failure_result_from_rep(types.copied(raw))?),
-            Some(PageValue(raw)) => Some(failure_result_from_rep(types.copied(raw))?),
+            Some(value) => Some(failure_result_from_rep(types.copied(format.staged_bytes(value)))?),
             None => None,
         }
         list.push(mut step_rows, transfer.StepOp(key: failure_result_from_rep(types.copied(op.key))?, value: take val, prior: prior))
@@ -108,6 +107,8 @@ fn tiered_chunk_prior(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pag
         let raw = pages.data_row(staged.rows, slot).value
         return Ok(match raw {
             Some(BlobBody(body)) => Some(arc.share(body)),
+            Some(PendingChunk(body)) => Some(arc.share(body)),
+            Some(SealedChunk(chunk)) => Some(arc.share(chunk.stored)),
             Some(PageValue(body)) => Some(arc.new(failure_result_from_rep(types.copied(body))?)),
             None => None,
         })

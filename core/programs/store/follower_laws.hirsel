@@ -277,7 +277,7 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
     let mut locator = history.empty_history_locator()
     let excessive = pages.HistoryRef(seq: 1, epoch: 1, len: 72 + 1048576 + 1, digest: 0)
     history.fixture_set_pack(mut locator, excessive)
-    let pack = pages.PagePack(class: 0, frames: 0, live: 0, payload_bytes: 0, index: 0)
+    let pack = pages.PagePack(foreign: None, class: 0, frames: 0, live: 0, payload_bytes: 0, index: 0)
     // The longest object key has 60 bytes, rounded to 64.
     let key_room = option.unwrap(charge.round(60))
     let bad = failure_result_from_rep(types.capacity(bound bytes key_room {

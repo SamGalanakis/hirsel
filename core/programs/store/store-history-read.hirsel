@@ -1,4 +1,4 @@
-fn history_apply_entry(path: String, id: StoreId, reference: pages.HistoryRef, raw: Bytes, mut replay: pager.JournalReplay, ceiling: u64) -> Result[(), Error] {
+fn history_apply_entry(domain: core.Cell[u64], mut client: std.object.Client, deadline: u64, path: String, id: StoreId, reference: pages.HistoryRef, raw: Bytes, mut replay: pager.JournalReplay, ceiling: u64) -> Result[(), Error] waits {
     let (ctx, _) = failure_result_from_rep(history.history_entry_context(path, store_key_to_rep(id), reference, raw))?
     failure_result_from_rep(history.history_object_digest(path, reference, raw))?
     let frame = failure_result_from_rep(manifest.disk_frame_bytes(path, ctx, raw, 112))?
@@ -17,7 +17,11 @@ fn history_apply_entry(path: String, id: StoreId, reference: pages.HistoryRef, r
             let event = disk_allocation(scoped fn() -> Result[format.JournalEvent, Error] {
                 journal_decode(path, current.kind, list.slice(raw, current.payload, current.end))
             })?
-            journal_apply(path, mut replay, take event)?
+            let secured = capture_object_event(mut client, "", store_key_to_rep(id), raw[29], reference.epoch, deadline, take event, domain, mut replay) ?=> |problem| match take problem {
+                HistoryMissing(take file, _) => HistoryMissing(take file, Some(reference.seq)),
+                take other => take other,
+            }
+            journal_apply(path, mut replay, take secured)?
             failure_result_from_rep(catalog.over_ceiling(failure_result_from_rep(journal.journal_account(replay))?, ceiling))?
             frames += 1
         } else if manifest.disk_kind_limit(current.kind) != None {
@@ -31,12 +35,12 @@ fn history_apply_entry(path: String, id: StoreId, reference: pages.HistoryRef, r
     Ok(())
 }
 
-fn history_apply_suffix(mut client: std.object.Client, head: history.HistoryHead, after: u64, chain: List[history.HistoryLink], mut replay: pager.JournalReplay, ceiling: u64, deadline: u64) -> Result[(), Error] waits {
+fn history_apply_suffix(domain: core.Cell[u64], mut client: std.object.Client, head: history.HistoryHead, after: u64, chain: List[history.HistoryLink], mut replay: pager.JournalReplay, ceiling: u64, deadline: u64) -> Result[(), Error] waits {
     for i in 0u64 .. list.len(chain) {
         let reference = history.history_length(chain[i], after + i + 1)
         let name = failure_result_from_rep(history.history_read_key("e-", reference))?
         let raw = failure_result_from_rep(history.history_read_object(mut client, name, reference, deadline))?
-        history_apply_entry(name, store_key_from_rep(head.store), reference, raw, mut replay, ceiling)?
+        history_apply_entry(domain, mut client, deadline, name, store_key_from_rep(head.store), reference, raw, mut replay, ceiling)?
     }
     Ok(())
 }

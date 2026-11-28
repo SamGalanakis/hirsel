@@ -1,0 +1,574 @@
+// §14.4b: a Blobs collection holds large values as fixed-size chunk rows.
+// An upload is staged over many transactions, then attached to its key in
+// one. Every row is an ordinary collection row over the 0x0022 BLOB path, so
+// retention, branches, scrub and Tiered residency apply to it unchanged.
+//
+// Row keys after the 4-byte collection id:
+//   0x00 ‖ key            the key's attached upload id
+//   0x01 ‖ upload         the upload's state
+//   0x02 ‖ upload ‖ n     chunk n
+//   0x03                  the collection's upload lists
+pub opaque type Blobs[K]: shareable + send {
+    binding: ValueCollection[Bytes],
+    key: std.codec.Key[K],
+    limits: BlobLimits
+}
+
+// `chunk` is the size of every chunk but the last. `max` bounds one value.
+pub type BlobLimits: codec + shareable + send {
+    chunk: u32,
+    max: u64
+}
+
+pub type BlobUpload: codec + key + shareable + send {
+    id: u64
+}
+
+// `digest` is the chain d(n) = SHA-256(d(n-1) ‖ SHA-256(chunk n)) from 32
+// zero bytes, so it names the content at this chunk size.
+pub type BlobInfo: codec + key + shareable + send {
+    upload: u64,
+    size: u64,
+    chunk: u32,
+    chunks: u64,
+    digest: Bytes
+}
+
+// The chunks [first, last] that hold `len` bytes from `skip` bytes into `first`.
+pub type BlobSpan: codec + key + shareable + send {
+    first: u64,
+    last: u64,
+    skip: u64,
+    len: u64
+}
+
+type BlobState: key = BlobStaged | BlobAttached | BlobDead
+
+type BlobRow {
+    state: BlobState,
+    chunk: u32,
+    count: u64,
+    size: u64,
+    started: u64,
+    prev: u64,
+    next: u64,
+    digest: Inline[u8, 32]
+}
+
+type BlobLists {
+    next: u64,
+    staged_first: u64,
+    staged_last: u64,
+    dead_first: u64
+}
+
+pub fn blobs_identity[K](b: Blobs[K]) -> (StoreId, u32) {
+    (b.binding.store, b.binding.id)
+}
+
+pub fn declare_blobs[K](mut d: Declare, name: String, take key: std.codec.Key[K], limits: BlobLimits) -> Result[Blobs[K], Error] {
+    if limits.chunk == 0 || limits.max == 0 {
+        return Error(Limit(Value))
+    }
+    let schema = std.codec.key_schema(key) ?=> |_| Schema(0)
+    let collection = declare_value_collection(mut d, name, CatalogBlobs, schema, std.codec.of_bytes())?
+    Ok(Blobs(binding: take collection, key: take key, limits: limits))
+}
+
+/// The digest of one chunk, as the chain folds it.
+pub fn blob_chunk_digest(chunk: Bytes) -> Bytes {
+    let digest = std.sha256.hash(chunk)
+    let mut out: Bytes = list.with_capacity(32)
+    for byte in digest {
+        list.push(mut out, byte)
+    }
+    take out
+}
+
+/// The chunks that cover `len` bytes from `offset`, clipped to the value's
+/// end. None when no byte of the value is in the range.
+pub fn blob_span(of: BlobInfo, offset: u64, len: u64) -> Option[BlobSpan] {
+    if len == 0 || offset >= of.size {
+        return None
+    }
+    let width: u64 = int.widen(of.chunk)
+    let taken = order.min(len, of.size - offset)
+    Some(BlobSpan(first: offset / width, last: (offset + taken - 1) / width, skip: offset % width, len: taken))
+}
+
+fn blob_key(id: u32, tag: u8, rest: u64, tail: bool) -> Result[Bytes, Error] {
+    let mut p = failure_result_from_rep(catalog.prefixed(id, 1 + rest, tail))?
+    list.push(mut p, tag)
+    Ok(take p)
+}
+
+fn blob_upload_key(id: u32, upload: u64, tail: bool) -> Result[Bytes, Error] {
+    let mut p = blob_key(id, 1, 8, tail)?
+    list.put_word_be(mut p, upload)
+    Ok(take p)
+}
+
+fn blob_chunk_key(id: u32, upload: u64, n: u64, tail: bool) -> Result[Bytes, Error] {
+    let mut p = blob_key(id, 2, 16, tail)?
+    list.put_word_be(mut p, upload)
+    list.put_word_be(mut p, n)
+    Ok(take p)
+}
+
+fn blob_head_key[K](b: Blobs[K], k: K, tail: bool) -> Result[Bytes, Error] {
+    let mut p = blob_key(b.binding.id, 0, 8, tail)?
+    std.codec.encode_key(b.key, k, mut p)
+    Ok(take p)
+}
+
+// A stored row is the schema tag, the u32 count, then the payload.
+fn blob_payload(raw: Bytes) -> Result[View[Bytes], Error] in raw {
+    if list.len(raw) < 6 {
+        return Error(Decode(Invalid(0)))
+    }
+    let width: u32 = list.word_le(raw, 2)
+    let wide: u64 = int.widen(width)
+    if wide != list.len(raw) - 6 {
+        return Error(Decode(Invalid(0)))
+    }
+    Ok(list.slice(raw, 6, list.len(raw)))
+}
+
+fn blob_row_bytes(row: BlobRow) -> Bytes {
+    let mut raw: Bytes = list.with_capacity(77)
+    list.push(mut raw, match row.state {
+        BlobStaged => 1u8,
+        BlobAttached => 2u8,
+        BlobDead => 3u8,
+    })
+    list.put_word_le(mut raw, row.chunk)
+    list.put_word_le(mut raw, row.count)
+    list.put_word_le(mut raw, row.size)
+    list.put_word_le(mut raw, row.started)
+    list.put_word_le(mut raw, row.prev)
+    list.put_word_le(mut raw, row.next)
+    for byte in row.digest {
+        list.push(mut raw, byte)
+    }
+    take raw
+}
+
+fn blob_row_parse(stored: Bytes) -> Result[BlobRow, Error] {
+    let raw = blob_payload(stored)?
+    if list.len(raw) != 77 {
+        return Error(Decode(Invalid(0)))
+    }
+    let state = match raw[0] {
+        1 => BlobStaged,
+        2 => BlobAttached,
+        3 => BlobDead,
+        _ => return Error(Decode(Invalid(0))),
+    }
+    let mut digest: Inline[u8, 32] =[0; 32]
+    for i in 0u64 .. 32u64 {
+        digest[i] = raw[45 + i]
+    }
+    Ok(BlobRow(state: state, chunk: list.word_le(raw, 1), count: list.word_le(raw, 5), size: list.word_le(raw, 13), started: list.word_le(raw, 21), prev: list.word_le(raw, 29), next: list.word_le(raw, 37), digest: digest))
+}
+
+fn blob_lists_bytes(lists: BlobLists) -> Bytes {
+    let mut raw: Bytes = list.with_capacity(32)
+    list.put_word_le(mut raw, lists.next)
+    list.put_word_le(mut raw, lists.staged_first)
+    list.put_word_le(mut raw, lists.staged_last)
+    list.put_word_le(mut raw, lists.dead_first)
+    take raw
+}
+
+fn blob_info_of(upload: u64, row: BlobRow) -> BlobInfo {
+    let mut digest: Bytes = list.with_capacity(32)
+    for byte in row.digest {
+        list.push(mut digest, byte)
+    }
+    BlobInfo(upload: upload, size: row.size, chunk: row.chunk, chunks: row.count, digest: take digest)
+}
+
+fn blob_readable[K](tx: Tx, b: Blobs[K]) -> Result[(), Error] {
+    readable_value(tx.info.id.store, txn.tx_roots(tx.inner), b.binding)
+}
+
+fn blob_writable[K](tx: Tx, b: Blobs[K]) -> Result[(), Error] {
+    failure_result_from_rep(txn.check_write_attempt(tx.inner))?
+    blob_readable(tx, b)
+}
+
+fn blob_tail(tx: Tx) -> bool {
+    txn.tx_frame_tail(tx.inner) == pages.OPEN_FRAME_TAIL
+}
+
+fn blob_put[K](mut tx: Tx, b: Blobs[K], take key: Bytes, payload: Bytes) -> Result[(), Error] {
+    if 6 + list.len(payload) > txn.tx_limits(tx.inner).value {
+        return Error(Limit(Value))
+    }
+    let none: List[(u64, indexes.Catalog)] = list.new()
+    let tail = blob_tail(tx)
+    failure_result_from_rep(txn.put_impl(mut tx.inner, b.binding.id, b.binding.readers.current, b.binding.readers.codec, none, take key, payload, tail, point_event))
+}
+
+fn blob_remove[K](mut tx: Tx, b: Blobs[K], key: Bytes) -> Result[bool, Error] {
+    let none: List[(u64, indexes.Catalog)] = list.new()
+    failure_result_from_rep(txn.delete_impl(mut tx.inner, b.binding.id, b.binding.readers.current, none, list.slice(key, 4, list.len(key)), point_event))
+}
+
+fn blob_lists[K](tx: Tx, b: Blobs[K]) -> Result[BlobLists, Error] {
+    let key = blob_key(b.binding.id, 3, 0, false)?
+    let Some(stored) = (txn.fetch_logical(tx.inner, take key, point_event) ?=> failure_from_rep) else {
+        return Ok(BlobLists(next: 1, staged_first: 0, staged_last: 0, dead_first: 0))
+    }
+    let raw = blob_payload(stored)?
+    if list.len(raw) != 32 {
+        return Error(Decode(Invalid(0)))
+    }
+    Ok(BlobLists(next: list.word_le(raw, 0), staged_first: list.word_le(raw, 8), staged_last: list.word_le(raw, 16), dead_first: list.word_le(raw, 24)))
+}
+
+fn blob_keep_lists[K](mut tx: Tx, b: Blobs[K], lists: BlobLists) -> Result[(), Error] {
+    let key = blob_key(b.binding.id, 3, 0, blob_tail(tx))?
+    blob_put(mut tx, b, take key, blob_lists_bytes(lists))
+}
+
+fn blob_row[K](tx: Tx, b: Blobs[K], upload: u64) -> Result[Option[BlobRow], Error] {
+    let key = blob_upload_key(b.binding.id, upload, false)?
+    match (txn.fetch_logical(tx.inner, take key, point_event) ?=> failure_from_rep) {
+        Some(stored) => Ok(Some(blob_row_parse(stored)?)),
+        None => Ok(None),
+    }
+}
+
+fn blob_known_row[K](tx: Tx, b: Blobs[K], upload: u64) -> Result[BlobRow, Error] {
+    match blob_row(tx, b, upload)? {
+        Some(row) => Ok(row),
+        None => Error(Decode(Invalid(0))),
+    }
+}
+
+fn blob_keep_row[K](mut tx: Tx, b: Blobs[K], upload: u64, row: BlobRow) -> Result[(), Error] {
+    let key = blob_upload_key(b.binding.id, upload, blob_tail(tx))?
+    blob_put(mut tx, b, take key, blob_row_bytes(row))
+}
+
+// Remove a Staged upload from the staged list, newest first.
+fn blob_unlink[K](mut tx: Tx, b: Blobs[K], mut lists: BlobLists, row: BlobRow) -> Result[(), Error] {
+    if row.prev == 0 {
+        lists.staged_first = row.next
+    } else {
+        let mut newer = blob_known_row(tx, b, row.prev)?
+        newer.next = row.next
+        blob_keep_row(mut tx, b, row.prev, newer)?
+    }
+    if row.next == 0 {
+        lists.staged_last = row.prev
+    } else {
+        let mut older = blob_known_row(tx, b, row.next)?
+        older.prev = row.prev
+        blob_keep_row(mut tx, b, row.next, older)?
+    }
+    Ok(())
+}
+
+// A dead upload keeps its chunk rows until `blob_sweep` removes them.
+fn blob_kill[K](mut tx: Tx, b: Blobs[K], mut lists: BlobLists, upload: u64, row: BlobRow) -> Result[(), Error] {
+    let dead = BlobRow(state: BlobDead, chunk: row.chunk, count: row.count, size: row.size, started: row.started, prev: 0, next: lists.dead_first, digest: row.digest)
+    lists.dead_first = upload
+    blob_keep_row(mut tx, b, upload, dead)
+}
+
+/// Start a staged upload. Its chunks are invisible until `blob_attach`.
+pub fn blob_begin[K](mut tx: Tx, b: Blobs[K]) -> Result[BlobUpload, Error] {
+    blob_writable(tx, b)?
+    let mut lists = blob_lists(tx, b)?
+    let upload = lists.next
+    if upload == 18446744073709551615 {
+        return Error(Limit(Ids))
+    }
+    let row = BlobRow(state: BlobStaged, chunk: b.limits.chunk, count: 0, size: 0, started: tx.info.at, prev: 0, next: lists.staged_first, digest: [0; 32])
+    if lists.staged_first == 0 {
+        lists.staged_last = upload
+    } else {
+        let mut newest = blob_known_row(tx, b, lists.staged_first)?
+        newest.prev = upload
+        blob_keep_row(mut tx, b, lists.staged_first, newest)?
+    }
+    lists.staged_first = upload
+    lists.next = upload + 1
+    blob_keep_row(mut tx, b, upload, row)?
+    blob_keep_lists(mut tx, b, lists)?
+    Ok(BlobUpload(id: upload))
+}
+
+/// Append the next chunk. Every chunk before the last is exactly the
+/// collection's chunk size; a shorter one ends the upload.
+pub fn blob_append[K](mut tx: Tx, b: Blobs[K], u: BlobUpload, chunk: Bytes) -> Result[BlobInfo, Error] {
+    blob_writable(tx, b)?
+    let Some(take found) = blob_row(tx, b, u.id)? else {
+        return Error(Missing("upload"))
+    }
+    let mut row = take found
+    if row.state != BlobStaged {
+        return Error(Missing("upload"))
+    }
+    let width: u64 = int.widen(row.chunk)
+    let length = list.len(chunk)
+    if length == 0 || length > width || row.size != row.count * width || length > b.limits.max - order.min(row.size, b.limits.max) {
+        return Error(Limit(Value))
+    }
+    let key = blob_chunk_key(b.binding.id, u.id, row.count, blob_tail(tx))?
+    if let Some(_) = txn.tx_frame_bytes(tx.inner) {
+        let tail = blob_tail(tx)
+        failure_result_from_rep(txn.stage_chunk(mut tx.inner, take key, b.binding.readers.current, chunk, tail))?
+    } else {
+        blob_put(mut tx, b, take key, chunk)?
+    }
+    let mut chain = std.sha256.start()
+    for byte in row.digest {
+        std.sha256.add_byte(mut chain, byte)
+    }
+    for byte in std.sha256.hash(chunk) {
+        std.sha256.add_byte(mut chain, byte)
+    }
+    row.digest = std.sha256.finish(chain)
+    row.count += 1
+    row.size += length
+    blob_keep_row(mut tx, b, u.id, row)?
+    Ok(blob_info_of(u.id, row))
+}
+
+/// A staged upload's progress, or None once it is attached, aborted or unknown.
+pub fn blob_staged[K](tx: Tx, b: Blobs[K], u: BlobUpload) -> Result[Option[BlobInfo], Error] {
+    blob_readable(tx, b)?
+    match blob_row(tx, b, u.id)? {
+        Some(row) if row.state == BlobStaged => Ok(Some(blob_info_of(u.id, row))),
+        _ => Ok(None),
+    }
+}
+
+/// Attach a staged upload to `k` in this transaction. A value `k` already
+/// held is detached in the same commit and its chunks are left to `blob_sweep`.
+pub fn blob_attach[K](mut tx: Tx, b: Blobs[K], k: K, u: BlobUpload) -> Result[BlobInfo, Error] {
+    blob_writable(tx, b)?
+    let Some(take found) = blob_row(tx, b, u.id)? else {
+        return Error(Missing("upload"))
+    }
+    let mut row = take found
+    if row.state != BlobStaged {
+        return Error(Missing("upload"))
+    }
+    let mut lists = blob_lists(tx, b)?
+    blob_unlink(mut tx, b, mut lists, row)?
+    let previous = blob_attached(tx, b, k)?
+    if let Some(old) = previous {
+        let dead = blob_known_row(tx, b, old)?
+        blob_kill(mut tx, b, mut lists, old, dead)?
+    }
+    row.state = BlobAttached
+    row.prev = 0
+    row.next = 0
+    blob_keep_row(mut tx, b, u.id, row)?
+    let mut pointer: Bytes = list.with_capacity(8)
+    list.put_word_le(mut pointer, u.id)
+    let key = blob_head_key(b, k, blob_tail(tx))?
+    blob_put(mut tx, b, take key, pointer)?
+    blob_keep_lists(mut tx, b, lists)?
+    Ok(blob_info_of(u.id, row))
+}
+
+/// Abandon a staged upload. False when it is not staged.
+pub fn blob_abort[K](mut tx: Tx, b: Blobs[K], u: BlobUpload) -> Result[bool, Error] {
+    blob_writable(tx, b)?
+    let Some(row) = blob_row(tx, b, u.id)? else {
+        return Ok(false)
+    }
+    if row.state != BlobStaged {
+        return Ok(false)
+    }
+    let mut lists = blob_lists(tx, b)?
+    blob_unlink(mut tx, b, mut lists, row)?
+    blob_kill(mut tx, b, mut lists, u.id, row)?
+    blob_keep_lists(mut tx, b, lists)?
+    Ok(true)
+}
+
+/// Detach the value of `k` in this transaction. False when `k` holds none.
+pub fn blob_erase[K](mut tx: Tx, b: Blobs[K], k: K) -> Result[bool, Error] {
+    blob_writable(tx, b)?
+    let Some(upload) = blob_attached(tx, b, k)? else {
+        return Ok(false)
+    }
+    let mut lists = blob_lists(tx, b)?
+    let row = blob_known_row(tx, b, upload)?
+    blob_kill(mut tx, b, mut lists, upload, row)?
+    let key = blob_head_key(b, k, false)?
+    let _ = blob_remove(mut tx, b, key)?
+    blob_keep_lists(mut tx, b, lists)?
+    Ok(true)
+}
+
+/// One bounded slice of reclaim: staged uploads begun before `stale_before`
+/// are abandoned, then at most `limit` rows of dead uploads are removed.
+/// Returns the uploads abandoned plus the rows removed; zero when none is left.
+pub fn blob_sweep[K](mut tx: Tx, b: Blobs[K], stale_before: u64, limit: u64) -> Result[u64, Error] {
+    blob_writable(tx, b)?
+    if limit == 0 {
+        return Error(Limit(Transaction))
+    }
+    let mut lists = blob_lists(tx, b)?
+    let mut done = 0u64
+    while done < limit && lists.staged_last != 0 {
+        let oldest = lists.staged_last
+        let row = blob_known_row(tx, b, oldest)?
+        if row.started >= stale_before {
+            break
+        }
+        blob_unlink(mut tx, b, mut lists, row)?
+        blob_kill(mut tx, b, mut lists, oldest, row)?
+        done += 1
+    }
+    while done < limit && lists.dead_first != 0 {
+        let upload = lists.dead_first
+        let mut row = blob_known_row(tx, b, upload)?
+        while done < limit && row.count != 0 {
+            row.count -= 1
+            let key = blob_chunk_key(b.binding.id, upload, row.count, false)?
+            let _ = blob_remove(mut tx, b, key)?
+            done += 1
+        }
+        if row.count != 0 {
+            blob_keep_row(mut tx, b, upload, row)?
+            break
+        }
+        if done == limit {
+            blob_keep_row(mut tx, b, upload, row)?
+            break
+        }
+        lists.dead_first = row.next
+        let key = blob_upload_key(b.binding.id, upload, false)?
+        let _ = blob_remove(mut tx, b, key)?
+        done += 1
+    }
+    if done != 0 {
+        blob_keep_lists(mut tx, b, lists)?
+    }
+    Ok(done)
+}
+
+fn blob_attached[K](tx: Tx, b: Blobs[K], k: K) -> Result[Option[u64], Error] {
+    let key = blob_head_key(b, k, false)?
+    let Some(stored) = (txn.fetch_logical(tx.inner, take key, point_event) ?=> failure_from_rep) else {
+        return Ok(None)
+    }
+    let raw = blob_payload(stored)?
+    if list.len(raw) != 8 {
+        return Error(Decode(Invalid(0)))
+    }
+    Ok(Some(list.word_le(raw, 0)))
+}
+
+/// The value attached to `k`, including this transaction's staged writes.
+pub fn blob_stat[K](tx: Tx, b: Blobs[K], k: K) -> Result[Option[BlobInfo], Error] {
+    blob_readable(tx, b)?
+    let Some(upload) = blob_attached(tx, b, k)? else {
+        return Ok(None)
+    }
+    let row = blob_known_row(tx, b, upload)?
+    Ok(Some(blob_info_of(upload, row)))
+}
+
+/// Borrow chunk `n` of an attached or staged value.
+pub fn blob_chunk[K](tx: Tx, b: Blobs[K], of: BlobInfo, n: u64) -> Result[Option[View[Bytes]], Error] in tx {
+    blob_readable(tx, b)?
+    if n >= of.chunks {
+        return Ok(None)
+    }
+    let key = blob_chunk_key(b.binding.id, of.upload, n, false)?
+    match (txn.fetch_logical(tx.inner, take key, point_event) ?=> failure_from_rep) {
+        Some(stored) => Ok(Some(blob_payload(stored)?)),
+        None => Ok(None),
+    }
+}
+
+// A recording names an upload body by this reference instead of holding its
+// bytes: upload u64 ‖ size u64 ‖ chunk u32 ‖ chunks u64 ‖ digest, little-endian.
+// The digest names the content, so a re-run that resolves the reference on
+// its base reads the bytes the recorded call read.
+pub const BLOB_REF_BYTES: u64 = 60
+
+pub fn blob_ref(of: BlobInfo) -> Result[Bytes, Error] {
+    if list.len(of.digest) != 32 {
+        return Error(Decode(Invalid(0)))
+    }
+    let mut raw: Bytes = list.with_capacity(BLOB_REF_BYTES)
+    list.put_word_le(mut raw, of.upload)
+    list.put_word_le(mut raw, of.size)
+    list.put_word_le(mut raw, of.chunk)
+    list.put_word_le(mut raw, of.chunks)
+    list.append(mut raw, of.digest)
+    Ok(take raw)
+}
+
+pub fn blob_ref_info(raw: Bytes) -> Result[BlobInfo, Error] {
+    if list.len(raw) != BLOB_REF_BYTES {
+        return Error(Decode(Invalid(0)))
+    }
+    let digest = failure_result_from_rep(types.copied(list.slice(raw, 28, 60)))?
+    Ok(BlobInfo(upload: list.word_le(raw, 0), size: list.word_le(raw, 8), chunk: list.word_le(raw, 16), chunks: list.word_le(raw, 20), digest: take digest))
+}
+
+/// Whether `of` names a staged or attached upload this transaction reads
+/// with exactly that size and content.
+pub fn blob_resolve[K](tx: Tx, b: Blobs[K], of: BlobInfo) -> Result[bool, Error] {
+    blob_readable(tx, b)?
+    match blob_row(tx, b, of.upload)? {
+        Some(row) if row.state != BlobDead => Ok(blob_info_of(of.upload, row) == of),
+        _ => Ok(false),
+    }
+}
+
+/// The value attached to `k` at `s`.
+pub fn blob_info[K](r: Reader, s: Snapshot, b: Blobs[K], k: K) -> Result[Option[BlobInfo], Error] waits {
+    read_access(r, s)?
+    readable_value(s.store, s.roots, b.binding)?
+    let head = blob_head_key(b, k, false)?
+    let attached = snapshot_point(r, s, head, scoped fn(stored: Option[View[Bytes]]) -> Result[Option[u64], Error] {
+        let Some(found) = stored else {
+            return Ok(None)
+        }
+        let raw = blob_payload(found)?
+        if list.len(raw) != 8 {
+            return Error(Decode(Invalid(0)))
+        }
+        Ok(Some(list.word_le(raw, 0)))
+    })?
+    let Some(upload) = attached else {
+        return Ok(None)
+    }
+    let key = blob_upload_key(b.binding.id, upload, false)?
+    snapshot_point(r, s, key, scoped fn(stored: Option[View[Bytes]]) -> Result[Option[BlobInfo], Error] {
+        let Some(found) = stored else {
+            return Error(Decode(Invalid(0)))
+        }
+        Ok(Some(blob_info_of(upload, blob_row_parse(found)?)))
+    })
+}
+
+/// Chunk `n` of the value `info` names at `s`. A retained Snapshot keeps
+/// reading it after the key is erased or replaced.
+pub fn blob_read[K](r: Reader, s: Snapshot, b: Blobs[K], of: BlobInfo, n: u64) -> Result[Option[Bytes], Error] waits {
+    read_access(r, s)?
+    readable_value(s.store, s.roots, b.binding)?
+    if n >= of.chunks {
+        return Ok(None)
+    }
+    let key = blob_chunk_key(b.binding.id, of.upload, n, false)?
+    snapshot_point(r, s, key, scoped fn(stored: Option[View[Bytes]]) -> Result[Option[Bytes], Error] {
+        let Some(found) = stored else {
+            return Ok(None)
+        }
+        let raw = blob_payload(found)?
+        Ok(Some(failure_result_from_rep(types.copied(raw))?))
+    })
+}

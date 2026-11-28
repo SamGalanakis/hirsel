@@ -3,7 +3,11 @@ type RestoreJournalOutput {
     offset: u64
 }
 
-fn restore_copy_entries(mut src: std.object.Client, dir: Dir, parent: StoreId, row: format.ArchiveBaseRowRep, b: manifest.RestoreBoundary, deadline: u64) -> Result[(u64, u64), Error] waits {
+fn restore_copy_entries(mut src: std.object.Client, dir: Dir, parent: StoreId, inc: Inline[u8, 16], row: format.ArchiveBaseRowRep, b: manifest.RestoreBoundary, deadline: u64) -> Result[(u64, u64), Error] waits {
+    restore_copy_entries_read(std.object.opener(src), dir, parent, inc, row, b, deadline)
+}
+
+fn restore_copy_entries_read(src: std.object.Opener, dir: Dir, parent: StoreId, inc: Inline[u8, 16], row: format.ArchiveBaseRowRep, b: manifest.RestoreBoundary, deadline: u64) -> Result[(u64, u64), Error] waits {
     let ctx = format.DiskContext(store: store_key_to_rep(parent), role: 2, seq: row.first_unit)
     let path = failure_result_from_rep(manifest.journal_path(ctx.seq, ""))?
     let file = failure_result_from_rep(manifest.disk_io(host.open(dir, path, Write)))?
@@ -12,13 +16,13 @@ fn restore_copy_entries(mut src: std.object.Client, dir: Dir, parent: StoreId, r
     restore_output(mut written.file, header)?
     if b.frame_end != 0 {
         let mut last_ref = pages.HistoryRef(seq: b.unit, epoch: b.epoch, len: 0, digest: b.unit_digest)
-        let key = restore_object_key(parent, "e-", last_ref)?
-        let (meta, _) = restore_range(mut src, key, 0, 112, deadline)?
+        let key = restore_object_key(parent, inc, "e-", last_ref)?
+        let (meta, _) = restore_range_read(src, key, 0, 112, deadline)?
         last_ref.len = meta.size
-        let chain = restore_entry_chain(mut src, parent, row, last_ref, deadline)?
+        let chain = restore_entry_chain_read(src, parent, inc, row, last_ref, deadline)?
         for i in 0u64 .. list.len(chain) {
             let unit = history.history_length(chain[i], row.base_ordinal + i + 1)
-            restore_read_entry(mut src, parent, unit, deadline, mut written, scoped fn(mut writer: RestoreJournalOutput, kind: u16, flags: u16, frame_end: u64, payload: Bytes) -> Result[(), Error] waits {
+            restore_read_entry_read(src, parent, inc, unit, deadline, mut written, scoped fn(mut writer: RestoreJournalOutput, kind: u16, flags: u16, frame_end: u64, payload: Bytes) -> Result[(), Error] waits {
                 if kind != 0x0040 && (unit.seq < b.unit || frame_end <= b.frame_end) {
                     let frame = failure_result_from_rep(types.capacity(format.disk_seal(ctx, writer.offset, kind, flags, payload)))?
                     restore_output(mut writer.file, frame)?

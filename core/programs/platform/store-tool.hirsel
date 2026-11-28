@@ -52,6 +52,8 @@ fn store_refusal(e: store.Error) -> String {
         Io(_) => "Io",
         Full(cause) => full_refusal(cause),
         Exists(_) => "Exists",
+        PreviewSource => "PreviewSource",
+        PreviewExpired => "PreviewExpired",
         ExportDirectory => "ExportDirectory",
         Tiered(_) => "Tiered",
         _ => "Refused",
@@ -151,6 +153,7 @@ fn form_text(form: store.EntryForm) -> String {
         AggregateForm => "aggregate",
         CellForm => "cell",
         LogForm => "log",
+        BlobsForm => "blobs",
     }
 }
 

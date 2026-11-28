@@ -1,53 +1,71 @@
-fn restore_segment_key(parent: StoreId, seq: u64, from: u64) -> String {
-    format.archive_key(store_key_to_rep(parent), format.archive_log_journal_rel(seq, from))
+fn restore_segment_key(parent: StoreId, inc: Inline[u8, 16], seq: u64, from: u64) -> String {
+    format.archive_key(store_key_to_rep(parent), inc, format.archive_log_journal_rel(seq, from))
 }
 
-fn restore_sealed_end(mut sink: std.object.Client, parent: StoreId, seq: u64, deadline: u64) -> Result[u64, Error] waits {
-    let key = restore_segment_key(parent, seq, 0)
-    let (_, take raw) = restore_range(mut sink, key, 0, 72, deadline)?
+fn restore_sealed_end(mut sink: std.object.Client, parent: StoreId, inc: Inline[u8, 16], seq: u64, deadline: u64) -> Result[u64, Error] waits {
+    restore_sealed_end_read(std.object.opener(sink), parent, inc, seq, deadline)
+}
+
+fn restore_sealed_end_read(sink: std.object.Opener, parent: StoreId, inc: Inline[u8, 16], seq: u64, deadline: u64) -> Result[u64, Error] waits {
+    let key = restore_segment_key(parent, inc, seq, 0)
+    let (_, take raw) = restore_range_read(sink, key, 0, 72, deadline)?
     let hdr = failure_result_from_rep(manifest.disk_read_header(key, raw, 2, Some(seq), Some(store_key_to_rep(parent))))?
     Ok(hdr.prev_end)
 }
 
 // The Directory key names the first byte of a published chunk. Hash the
 // complete unit before selecting an interior frame. All reads have bounded width.
-fn restore_archive_chunk(mut sink: std.object.Client, parent: StoreId, seq: u64, from: u64, limit: u64, mut walk: RestoreScan, deadline: u64) -> Result[u64, Error] waits {
-    let key = restore_segment_key(parent, seq, from)
-    let (meta, _) = restore_range(mut sink, key, 0, 1, deadline)?
-    if meta.size > limit - from || (from == 0 && meta.size < 72) {
+fn restore_archive_chunk(mut sink: std.object.Client, parent: StoreId, inc: Inline[u8, 16], seq: u64, from: u64, limit: u64, mut walk: RestoreScan, deadline: u64) -> Result[u64, Error] waits {
+    read_archive_chunk(std.object.opener(sink), parent, inc, seq, from, limit, false, deadline, mut walk, scoped fn(mut frame_scan: RestoreScan, key: String, digest: u64, end: u64, kind: u16, raw: Bytes) -> Result[(), Error] {
+        let mut token = frame_scan.base
+        token.boundary.unit = seq
+        token.boundary.unit_digest = digest
+        token.boundary.frame_end = end
+        if format.journal_event_kind(kind) {
+            restore_scan_event(mut frame_scan, token, key, journal_decode(key, kind, raw)?)?
+        } else if kind == 0 || manifest.disk_kind_limit(kind) == None {
+            restore_note(mut frame_scan, token, 0, false)
+        } else {
+            return Error(failure_from_rep(format.disk_fault(key, end, Malformed)))
+        }
+        Ok(())
+    })
+}
+
+fn read_archive_chunk[S](sink: std.object.Opener, parent: StoreId, inc: Inline[u8, 16], seq: u64, from: u64, limit: u64, interior: bool, deadline: u64, mut target: S, visit: scoped fn(mut S, String, u64, u64, u16, Bytes) -> Result[(), Error]) -> Result[u64, Error] waits {
+    let key = restore_segment_key(parent, inc, seq, from)
+    let (meta, _) = restore_range_read(sink, key, 0, 1, deadline)?
+    if meta.size == 0 || (!interior && meta.size > limit - from) || (from == 0 && meta.size < 72) {
         return Error(failure_from_rep(format.disk_fault(key, from, Truncated)))
     }
     let mut state = std.check.start()
     let mut pos = 0u64
     while pos < meta.size {
         let end = pos + order.min(meta.size - pos, 65536u64)
-        let (part, take raw) = restore_range(mut sink, key, pos, end, deadline)?
+        let (part, take raw) = restore_range_read(sink, key, pos, end, deadline)?
         if part.etag != meta.etag || part.size != meta.size {
             return Error(Lost)
         }
         std.check.add(mut state, raw, 0, list.len(raw))
         pos = end
     }
-    let mut token = walk.base
-    token.boundary.unit = seq
-    token.boundary.unit_digest = std.check.finish(state)
+    let digest = std.check.finish(state)
     let ctx = format.DiskContext(store: store_key_to_rep(parent), role: 2, seq)
     pos = 0
     if from == 0 {
-        let (part, take raw) = restore_range(mut sink, key, 0, 72, deadline)?
+        let (part, take raw) = restore_range_read(sink, key, 0, 72, deadline)?
         if part.etag != meta.etag {
             return Error(Lost)
         }
         let _ = failure_result_from_rep(manifest.disk_read_header(key, raw, 2, Some(seq), Some(ctx.store)))?
         pos = 72
-        token.boundary.frame_end = pos
-        restore_note(mut walk, token, 0, false)
+        visit(mut target, key, digest, pos, 0, list.new())?
     }
     while pos < meta.size {
         if meta.size - pos < 16 {
             return Error(failure_from_rep(format.disk_fault(key, from + pos, Truncated)))
         }
-        let (part, take hdr) = restore_range(mut sink, key, pos, pos + 16, deadline)?
+        let (part, take hdr) = restore_range_read(sink, key, pos, pos + 16, deadline)?
         if part.etag != meta.etag {
             return Error(Lost)
         }
@@ -60,7 +78,7 @@ fn restore_archive_chunk(mut sink: std.object.Client, parent: StoreId, seq: u64,
         let raw: Bytes = if fh.size == 0 {
             list.new()
         } else {
-            let (body_meta, take body) = restore_range(mut sink, key, pos + 16, end, deadline)?
+            let (body_meta, take body) = restore_range_read(sink, key, pos + 16, end, deadline)?
             if body_meta.etag != meta.etag {
                 return Error(Lost)
             }
@@ -69,21 +87,15 @@ fn restore_archive_chunk(mut sink: std.object.Client, parent: StoreId, seq: u64,
         if fh.checksum != failure_result_from_rep(types.capacity(format.disk_check(ctx, from + pos, hdr, raw)))? {
             return Error(failure_from_rep(format.disk_fault(key, from + pos, Checksum)))
         }
-        token.boundary.frame_end = from + end
-        if format.journal_event_kind(fh.kind) {
-            let ev = journal_decode(key, fh.kind, raw)?
-            restore_scan_event(mut walk, token, key, take ev)?
-        } else if manifest.disk_kind_limit(fh.kind) != None {
-            return Error(failure_from_rep(format.disk_fault(key, from + pos, Malformed)))
-        } else {
-            restore_note(mut walk, token, 0, false)
+        if from + end <= limit {
+            visit(mut target, key, digest, from + end, fh.kind, raw)?
         }
         pos = end
     }
     Ok(from + meta.size)
 }
 
-fn restore_archive_log(mut sink: std.object.Client, parent: StoreId, first: u64, terminal: u64, bound_end: u64, mut walk: RestoreScan, deadline: u64) -> Result[(), Error] waits {
+fn restore_archive_log(mut sink: std.object.Client, parent: StoreId, inc: Inline[u8, 16], first: u64, terminal: u64, bound_end: u64, mut walk: RestoreScan, deadline: u64) -> Result[(), Error] waits {
     if terminal < first {
         return Error(failure_from_rep(format.disk_fault("archive-head", 72, Order)))
     }
@@ -92,11 +104,11 @@ fn restore_archive_log(mut sink: std.object.Client, parent: StoreId, first: u64,
         let limit = if seq == terminal {
             bound_end
         } else {
-            restore_sealed_end(mut sink, parent, seq + 1, deadline)?
+            restore_sealed_end(mut sink, parent, inc, seq + 1, deadline)?
         }
         let mut from = 0u64
         while from < limit {
-            from = restore_archive_chunk(mut sink, parent, seq, from, limit, mut walk, deadline)?
+            from = restore_archive_chunk(mut sink, parent, inc, seq, from, limit, mut walk, deadline)?
         }
         if seq == terminal {
             break

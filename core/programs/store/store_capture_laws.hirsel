@@ -110,8 +110,8 @@ fn capture_test_catalog(mut m: manifest.PageManifest, id: StoreId, d: Dir) -> Re
     failure_result_from_rep(manifest.disk_write_synced(d, "p-1", raw))?
     let mut pack_rows: List[std.page.Entry] = list.with_capacity(2)
     let page_bytes = list.len(raw) - 72 - 16 * 65
-    list.push(mut pack_rows, std.page.Entry(key: types.key_word(1), cell: InlineValue(manifest.encode_pack_row(pages.PagePack(class: 0, frames: 65, live: page_bytes, payload_bytes: page_bytes, index: 0)))))
-    list.push(mut pack_rows, std.page.Entry(key: types.key_word(2), cell: InlineValue(manifest.encode_pack_row(pages.PagePack(class: 1, frames: 1, live: list.len(payload), payload_bytes: list.len(payload), index: 0)))))
+    list.push(mut pack_rows, std.page.Entry(key: types.key_word(1), cell: InlineValue(manifest.encode_pack_row(pages.PagePack(foreign: None, class: 0, frames: 65, live: page_bytes, payload_bytes: page_bytes, index: 0)))))
+    list.push(mut pack_rows, std.page.Entry(key: types.key_word(2), cell: InlineValue(manifest.encode_pack_row(pages.PagePack(foreign: None, class: 1, frames: 1, live: list.len(payload), payload_bytes: list.len(payload), index: 0)))))
     let listing = failure_result_from_rep(pages.page_result(std.page.encode(pack_rows, 0, 67, Unprefixed)))?
     let mut list_bytes = failure_result_from_rep(types.capacity(format.disk_header_bytes(inventory, 0, 0)))?
     m.pack_root = capture_test_page(mut list_bytes, inventory, listing)?

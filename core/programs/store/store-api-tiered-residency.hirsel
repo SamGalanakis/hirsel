@@ -64,7 +64,7 @@ fn start_residency_pager(mut db: Db) -> Result[(), Error] {
         let state = disk_state(db)
         let o = state.options
         let funding = pager.TieredPagerFunding(cache_bytes: o.cache_bytes, writer_pin_bytes: o.writer_pin_bytes, pager_task_bytes: o.pager_task_bytes, cut_pins: true)
-        failure_result_from_rep(object_writer.start_tiered_pager_link(state.tasks, store_key_to_rep(db.store), state.open, PagerDirectory(d), funding, pager.TIERED_PAGER_QUEUE))?
+        failure_result_from_rep(object_writer.start_tiered_pager_link(state.tasks, store_key_to_rep(db.store), state.open, directory_pager(d, state.preview), funding, pager.TIERED_PAGER_QUEUE))?
     }
     let worker = attach_tiered_pager(mut db, take link)
     write_disk(mut db.disk, take worker, scoped fn(mut state: DiskState, take running: Task[()]) {

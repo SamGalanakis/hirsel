@@ -48,3 +48,77 @@ pub fn join_worker_law(take state: ObjectWriterState) -> Result[(), types.Failur
     let ObjectWriterState(writer: take worker, ..) = take state
     result.unwrap(task.join(take worker))
 }
+
+// A real GROUP introduces and then deletes a chunk between two MARKs. Reclaim
+// sees the post-GROUP MARK as its recovered checkpoint in both passes.
+pub fn law_reclaim_historical_group(mut lane: ObjectJournalSession, key: Bytes, stored: Arc[Bytes]) -> Result[(), types.Failure] waits {
+    let before = history.register_head(lane.register)
+    let due = paused_deadline(lane)
+    let (take mark, take raw) = history.history_checkpoint(mut lane.client, before, due)?
+    let located = history.history_locator(mut lane.client, before, mark, raw, due)?
+    let mut base = history.history_read_manifest(mut lane.client, before.store, mark, before.checkpoint.seq, due)?
+    let (place, take sealed) = pager.seal_direct_chunk(before.store, base.next_pack + 4, base.next_stamp + 4, before.pair.epoch, before.authority_kind, key, stored)?
+    let pack = install_direct_pack(mut lane, place, sealed.wire, due)?
+    let ctx = format.DiskContext(store: before.store, role: 2, seq: before.entry.seq + 1)
+    history.history_packet_header(mut lane.buffers.packet, ctx, before.pair.epoch, before.authority_kind, before.entry)?
+    for n in 1u64 .. 3 {
+        let at = list.len(lane.buffers.packet)
+        list.fill(mut lane.buffers.packet, 16, 0u8)
+        list.put_word_le(mut lane.buffers.packet, 0u32)
+        list.put_word_le(mut lane.buffers.packet, base.branches[0u64].version + n)
+        list.put_word_le(mut lane.buffers.packet, base.branches[0u64].at)
+        list.push(mut lane.buffers.packet, 1u8)
+        list.push(mut lane.buffers.packet, 0u8)
+        list.put_word_le(mut lane.buffers.packet, 1u32)
+        if n == 1 {
+            types.capacity(format.encode_direct_op(mut lane.buffers.packet, key, 0, place))?
+        } else {
+            list.push(mut lane.buffers.packet, 2u8)
+            types.capacity(format.blob(mut lane.buffers.packet, key))?
+            list.put_word_le(mut lane.buffers.packet, (int.truncate(place.len + 1) : u32))
+        }
+        types.capacity(format.history_seal(mut lane.buffers.packet, ctx, at, 0x0011))?
+    }
+    let HistoryApplied(_) = history.history_register_advance(mut lane.client, mut lane.register, lane.authority, mut lane.buffers, due)? else {
+        fail("GROUP publication")
+    }
+    base.branches[0u64].version += 2
+    base.next_stamp = place.stamp + 16
+    base.next_pack = place.pack + 1
+    let name = history.history_read_key("p-", pack)?
+    for keep in[true, false] {
+        let pos = history.register_head(lane.register).entry.seq + 1
+        base.generation += 1
+        base.first_live = pos
+        base.prev_first = pos
+        let m = history.history_create_manifest(mut lane.client, before.store, before.pair.epoch, before.authority_kind, base, mut lane.buffers, due)?
+        let mut rows: List[pages.HistoryRef] = list.new()
+        for (_, row) in history.locator_rows(located) {
+            list.push(mut rows, row)
+        }
+        list.sort(mut rows, fn(a: pages.HistoryRef, b: pages.HistoryRef) -> Order {
+            order.compare(a.seq, b.seq)
+        })
+        let locator = history.history_make_locator(mut lane.client, before.store, pos, before.pair.epoch, before.authority_kind, take rows, mut lane.buffers, due)?
+        let retained = if keep {
+            let mut roots: List[pages.HistoryRef] = list.new()
+            list.push(mut roots, before.checkpoint)
+            history.HistoryRetention(floor: before.checkpoint.seq, earlier: take roots)
+        } else {
+            history.HistoryRetention(floor: pos, earlier: list.new())
+        }
+        let HistoryApplied(_) = history.history_publish_checkpoint(mut lane.client, mut lane.register, lane.authority, m, retained, locator, None, None, mut lane.buffers, due)? else {
+            fail("MARK publication")
+        }
+        let head = history.register_head(lane.register)
+        let captured = ObjectReclaimCapture(head, recovered: head.checkpoint, generation: base.generation, next_pack: base.next_pack, read_packs: list.new())
+        history_execute_reclaim(mut lane, captured)?
+        let got = history.history_fetch(mut lane.client, name, mut lane.buffers.compare, due)
+        match take got {
+            Ok(_) if keep => history.history_object_digest(name, pack, lane.buffers.compare)?,
+            Error(Remote(NotFound)) if !keep => (),
+            _ => fail("reclaim violated the retained GROUP's pack lifetime"),
+        }
+    }
+    Ok(())
+}

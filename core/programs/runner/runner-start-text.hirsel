@@ -98,6 +98,8 @@ fn push_store_error(mut line: String, problem: store.Error) {
         Diverged(_) => string.push(mut line, "the store diverged"),
         Foreign => string.push(mut line, "a handle from another store"),
         MigrationFault => string.push(mut line, "the migration faulted"),
+        PreviewSource => string.push(mut line, "a Preview cannot serve as a backup, export or archive source"),
+        PreviewExpired => string.push(mut line, "the archive no longer holds this Preview"),
         ExportDirectory => string.push(mut line, "an export directory, not a place store"),
         LimitsDiffer(recorded) => {
             string.push(mut line, "the store records limits frame ");

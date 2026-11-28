@@ -7,6 +7,8 @@ pub opaque type PreparedBackup: send {
 
 pub fn prepare_backup(from: Dir, target: Dir, c: Clock) -> Result[(PreparedBackup, Need), DeployError] waits {
     let lock = deploy_result(failure_result_from_rep(capture.backup_lock(from)))?
+    let (_, take image) = deploy_result(read_page_manifest_file(from))?
+    deploy_result(failure_result_from_rep(manifest.independent_source(image.origin)))?
     transfer_result(transfer.require_empty(target, "backup target"))?
     let state = deploy_result(failure_result_from_rep(capture.prepare_locked(c, take lock)))?
     let selected = PreparedCapture(purpose: Copy, state: take state)

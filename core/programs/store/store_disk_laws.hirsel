@@ -230,7 +230,7 @@ pub fn disk_law_frames() -> bool {
     let id = StoreId(hi: 1, lo: 2)
     let ctx = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: 7)
     let raw = result.unwrap(format.disk_header_bytes(ctx, 0, 0))
-    let expected: Inline[u8, 72] =[1, 0, 1, 0, 56, 0, 0, 0, 251, 242, 10, 72, 157, 79, 34, 60, 72, 73, 82, 83, 84, 79, 82, 69, 12, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let expected: Inline[u8, 72] =[1, 0, 1, 0, 56, 0, 0, 0, 144, 22, 123, 214, 174, 146, 112, 102, 72, 73, 82, 83, 84, 79, 82, 69, 15, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     if list.len(raw) != 72 {
         return false
     }

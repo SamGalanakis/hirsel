@@ -427,7 +427,7 @@ pub fn conclude(mut db: Db, take p: Pending, take r: Bytes, reserve: Reserve) ->
 pub fn untried(take c: Completion, take rec: Option[CallRecord], info: CallInfo) -> Pending   // v2.29 AM1: for a position that runs nothing (a gone key)
 pub fn recorded(db: Db, b: Branch, version: u64) -> Result[Option[Recorded], Error] waits   // write barrier, then live segments; None once a taken cut covers the version (W2); v2.29 AM6 (ATTACK-4 M3): with its settle context
 pub type StopKind = Raised | OutOfSteps(u64) | OutOfBytes | Conflict   // v2.59: settle 1's typed stop (format 5, AP1a)
-pub type Recorded { record: CallRecord, settle: u8, branch: Branch, base: u64, at: u64, seed: u64, stop: Option[StopKind] }   // stop is Some exactly for settle 1; settle 0: the frame's own context; 1 a body fault, 2 an admission refusal: the attempted run's
+pub type Recorded { record: CallRecord, claim: Option[Bytes], settle: u8, branch: Branch, base: u64, at: u64, seed: u64, stop: Option[StopKind] }   // stop is Some exactly for settle 1; settle 0: the frame's own context; 1 a body fault, 2 an admission refusal: the attempted run's
 
 pub opaque type Rows[K, V]: send         // Arc shares of a path + bounds + Key[K] + Codec[V]
 pub fn next[K, V](mut r: Rows[K, V]) -> Result[Option[(K, V)], Error]   // v2.56 §13.4: takes a Reader and waits

@@ -515,3 +515,195 @@ fn test_la4_idle_adoption_cut(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     close(take left)?
     close(take right)
 }
+
+// An intact journal frame is the durable reference even after another put to the key.
+fn ap21_direct_fixture(d: Dir, id: types.StoreKey, seq: u64, base: u64, key: Bytes, direct: format.DirectBlob, through: u64) -> Result[u64, Error] waits {
+    let ctx = format.DiskContext(store: id, role: 2, seq)
+    let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
+    let mut wire = if failure_result_from_rep(journal.disk_exists(d, path))? {
+        read_journal_prefix(d, path, 72)?
+    } else {
+        result.unwrap(format.disk_header_bytes(ctx, 0, 0))
+    }
+    for rev in 1u64 .. 3 {
+        let mut body: Bytes = list.new()
+        result.unwrap(format.le(mut body, 0, 4))
+        result.unwrap(format.le(mut body, base + rev, 8))
+        result.unwrap(format.le(mut body, base + rev, 8))
+        result.unwrap(format.le(mut body, 1, 1))
+        result.unwrap(format.le(mut body, 0, 1))
+        result.unwrap(format.le(mut body, 1, 4))
+        if rev == 1 {
+            result.unwrap(format.encode_direct_op(mut body, key, 0, direct))
+        } else {
+            list.push(mut body, 2u8)
+            result.unwrap(format.blob(mut body, key))
+            list.put_word_le(mut body, (int.truncate(direct.len + 1) : u32))
+        }
+        let frame = result.unwrap(format.disk_seal(ctx, list.len(wire), 0x0011, 1, body))
+        list.append(mut wire, frame)
+    }
+    let end = list.len(wire)
+    list.truncate(mut wire, order.min(end, through))
+    failure_result_from_rep(manifest.disk_write_synced(d, path, wire))?
+    Ok(end)
+}
+
+@test
+fn ap21_missing_dependency_before_sweep(d: Dir, c: Clock) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let id = types.StoreKey(hi: 1, lo: 2)
+    let base = manifest.page_manifest_empty(limits_to_rep(small_place_limits()))
+    failure_result_from_rep(manifest.disk_publish_manifest(dir, id, base))?
+    let direct = format.DirectBlob(stamp: 31, len: 8, checksum: 0, pack: 7, offset: 72, epoch: 0, pack_len: 192, digest: 0)
+    let _ = ap21_direct_fixture(dir, id, 1, 0, blob_chunk_key(1, 1, 0, false)?, direct, 4096)?
+    failure_result_from_rep(manifest.disk_write_synced(dir, "p-101", string.as_bytes("orphan")))?
+    match cleanup_directory(dir, c, archive_hold_options(false)) {
+        Error(Corrupt(Fault(file: path, why: Absent, ..))) if path == "p-7" => (),
+        _ => return Error(Foreign),
+    }
+    if !failure_result_from_rep(journal.disk_exists(dir, "p-101"))? {
+        return Error(Foreign)
+    }
+    failure_result_from_rep(manifest.disk_write_synced(dir, "p-7", string.as_bytes("bad pack")))?
+    match cleanup_directory(dir, c, archive_hold_options(false)) {
+        Error(Corrupt(Fault(file: path, ..))) if path == "p-7" => (),
+        _ => return Error(Foreign),
+    }
+    if !failure_result_from_rep(journal.disk_exists(dir, "p-101"))? {
+        return Error(Foreign)
+    }
+    let _ = ap21_direct_fixture(dir, id, 1, 0, blob_chunk_key(1, 1, 0, false)?, direct, 93)?
+    cleanup_directory(dir, c, archive_hold_options(false))?
+    if failure_result_from_rep(journal.disk_exists(dir, "p-7"))? || failure_result_from_rep(journal.disk_exists(dir, "p-101"))? {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+@test
+fn ap21_reopens_overwritten_direct_pack(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let mut db = open(tasks, dir, c, r, archive_hold_options(true))?
+    let mut schema = declare(db, Migrate)?
+    let blobs = declare_blobs(mut schema, "chunks", std.codec.key_u64(), BlobLimits(chunk: 128, max: 512))?
+    let _ = seal(mut db, take schema)?
+    let (_, collection) = blobs_identity(blobs)
+    let _ = checkpoint(mut db)?
+    close(take db)?
+    let (id, take base) = read_page_manifest_file(dir)?
+    let key = blob_chunk_key(collection, 1, 0, false)?
+    let expected = option.unwrap(std.hex.decode(b"010003000000616263"))
+    let seq = base.next_pack + 7
+    let fixed = base.next_stamp + 31
+    let (direct, take packed) = failure_result_from_rep(pager.seal_direct_chunk(store_key_to_rep(id), seq, fixed, 0, 0, key, arc.new(clone(expected))))?
+    failure_result_from_rep(manifest.install_direct_pack(dir, seq, packed.wire))?
+    let _ = ap21_direct_fixture(dir, store_key_to_rep(id), base.first_live, base.branches[0u64].version, key, direct, 4096)?
+    failure_result_from_rep(manifest.disk_write_synced(dir, "p-10001", b"uncommitted"))?
+    let mut reopened = open(tasks, dir, c, r, archive_hold_options(false))?
+    let path = failure_result_from_rep(manifest.paged_pack_path(seq))?
+    if archive_hold_exists(dir, "p-10001")? || !archive_hold_exists(dir, path)? {
+        return Error(Missing("recovered prefix pack inventory"))
+    }
+    {
+        let state = disk_state(reopened).packs
+        if manifest.pack_next(state) != base.next_pack || manifest.pack_allocation_next(state) != seq + 1 || pages.holder_next_node(reopened.holders) <= fixed {
+            return Error(Missing("recovered allocation frontiers"))
+        }
+        let Some(place) = manifest.disk_index_get(manifest.direct_packs(state).stamps, fixed) else {
+            return Error(Missing("overwritten introduction"))
+        }
+        if place.pack != seq || pages.blob_row_prior(snapshot(reopened).roots.collections, key) != 0 {
+            return Error(Missing("overwritten chunk row"))
+        }
+    }
+    let _ = checkpoint(mut reopened)?
+    if archive_hold_exists(dir, path)? {
+        return Error(Missing("covered unleased pack survived retirement"))
+    }
+    close(take reopened)
+}
+
+// Two BLOB frames introduced in one COMMIT share one sealed pack.
+fn ap21_shared_segment(d: Dir, id: types.StoreKey) -> Result[u64, Error] waits {
+    let mut draft = failure_result_from_rep(pager.begin_tiered_pack(id, 7, 4, 4096))?
+    let stored = option.unwrap(std.hex.decode(b"010003000000616263"))
+    let mut offsets: List[u64] = list.new()
+    for i in 0u64 .. 2 {
+        let frame = manifest.PackFrame(stamp: 31 + i, size: 8 + list.len(stored), body: BlobBody(arc.new(clone(stored))))
+        let ptr = failure_result_from_rep(pager.add_tiered_pack_frame(mut draft, frame, 1, blob_chunk_key(1, 1, i, false)?, fn(_stamp: u64) -> std.page.PagePtr {
+            fail("BLOB has no child")
+        }))?
+        list.push(mut offsets, option.unwrap(ptr).offset)
+    }
+    let (take packed, _) = failure_result_from_rep(pager.finish_tiered_pack(take draft))?
+    failure_result_from_rep(manifest.install_direct_pack(d, 7, packed))?
+    let mut body: Bytes = list.new()
+    result.unwrap(format.le(mut body, 0, 4))
+    result.unwrap(format.le(mut body, 1, 8))
+    result.unwrap(format.le(mut body, 1, 8))
+    result.unwrap(format.le(mut body, 1, 1))
+    result.unwrap(format.le(mut body, 0, 1))
+    result.unwrap(format.le(mut body, 2, 4))
+    for i in 0u64 .. 2 {
+        let place = format.DirectBlob(stamp: 31 + i, len: list.len(stored), checksum: std.check.xxh3(stored, 0, list.len(stored)), pack: 7, offset: offsets[i], epoch: 0, pack_len: list.len(packed), digest: std.check.xxh3(packed, 0, list.len(packed)))
+        result.unwrap(format.encode_direct_op(mut body, blob_chunk_key(1, 1, i, false)?, 0, place))
+    }
+    let ctx = format.DiskContext(store: id, role: 2, seq: 1)
+    let mut segment = result.unwrap(format.disk_header_bytes(ctx, 0, 0))
+    list.append(mut segment, result.unwrap(format.disk_seal(ctx, 72, 0x0011, 1, body)))
+    failure_result_from_rep(manifest.disk_write_synced(d, "j-1", segment))?
+    let successor = format.DiskContext(store: id, role: 2, seq: 2)
+    failure_result_from_rep(manifest.disk_write_synced(d, "j-2", result.unwrap(format.disk_header_bytes(successor, list.len(segment), 0))))?
+    Ok(list.len(segment) + list.len(packed))
+}
+
+@test
+fn ap21_historical_pack_budget(d: Dir, c: Clock) -> Result[(), Error] waits {
+    for discount in 0u64 .. 2 {
+        let dir = disk_test_directory(d)
+        let id = types.StoreKey(hi: 3, lo: 7)
+        let mut base = manifest.page_manifest_empty(limits_to_rep(small_place_limits()))
+        base.binding_id = 42
+        failure_result_from_rep(manifest.disk_publish_manifest(dir, id, base))?
+        let units = ap21_shared_segment(dir, id)?
+        let budget = units + archive_hold_file_size(dir, "MANIFEST")? - discount
+        let hold = manifest.recovered_archive_hold(42, Some(budget), 1, list.new())
+        // An active catch-up lease independently owns the same segment and pack.
+        let leased = failure_result_from_rep(manifest.plan_directory_archive_cut(dir, id, hold, None, 1, 1, 2, 1, Some(1), list.new(), map.new(), 4096))?
+        if !map.contains(leased.protected_packs, 7u64) || list.len(leased.kept_receipts) != 1 {
+            return Error(Missing("charged an export dependency twice"))
+        }
+        let detached = failure_result_from_rep(manifest.plan_directory_archive_cut(dir, id, hold, Some(0), 1, 1, 2, 1, Some(1), list.new(), map.new(), 4096))?
+        if !map.contains(detached.protected_packs, 7u64) {
+            return Error(Missing("detach released an export dependency"))
+        }
+        let plan = failure_result_from_rep(manifest.plan_directory_archive_cut(dir, id, hold, None, 1, 1, 2, 1, None, list.new(), map.new(), 4096))?
+        if map.contains(plan.protected_packs, 7u64) != (discount == 0) {
+            return Error(Missing("historical pack budget"))
+        }
+        base.generation = 2
+        base.first_live = 2
+        base.prev_first = plan.new_prev_first
+        base.next_pack = 8
+        base.next_stamp = 33
+        let raw = failure_result_from_rep(manifest.disk_page_manifest_bytes(id, base))?
+        failure_result_from_rep(manifest.publish_directory_cut_manifest(dir, raw, plan))?
+        cleanup_directory(dir, c, archive_hold_options(false))?
+        if archive_hold_exists(dir, "p-7")? != (discount == 0) || archive_hold_exists(dir, "m-1")? != (discount == 0) {
+            return Error(Missing("released or retained direct pack"))
+        }
+        if discount == 0 {
+            failure_result_from_rep(manifest.disk_io(host.remove(dir, "p-7")))?
+            failure_result_from_rep(manifest.disk_write_synced(dir, "p-111", b"orphan"))?
+            match cleanup_directory(dir, c, archive_hold_options(false)) {
+                Error(Corrupt(Fault(file: path, why: Absent, ..))) if path == "p-7" => (),
+                _ => return Error(Missing("missing historical pack")),
+            }
+            if !archive_hold_exists(dir, "p-111")? {
+                return Error(Missing("swept before historical validation"))
+            }
+        }
+    }
+    Ok(())
+}

@@ -39,6 +39,6 @@ pub fn decode_restore_token(text: String) -> Option[RestoreToken] {
     for i in 0u64 .. 16 {
         capture[i] = f.capture[i]
     }
-    let b = manifest.RestoreBoundary(source_kind: f.kind, base_ordinal: f.base, base_digest: f.base_digest, unit: f.unit, epoch: f.epoch, unit_digest: f.unit_digest, frame_end: f.frame_end)
+    let b = format.RestoreBoundary(source_kind: f.kind, base_ordinal: f.base, base_digest: f.base_digest, unit: f.unit, epoch: f.epoch, unit_digest: f.unit_digest, frame_end: f.frame_end)
     Some(RestoreToken(parent: f.parent, binding_id: f.binding_id, capture_attempt: capture, boundary: b))
 }

@@ -6,36 +6,48 @@ fn read_tiered_index_frame(mut input: pager.TieredPagerInput, owner: types.Store
         return Error(format.disk_fault(path, at, Malformed))
     }
     let width = order.min(format.PACK_INDEX_LIMIT + 16, pack.payload_bytes - at)
-    let (take raw, end) = match input {
-        PagerLocal(d) => {
-            let mut opened = match host.open(d, path, Read) {
-                Ok(take fd) => take fd,
-                Error(NotFound) => return Error(format.disk_fault(path, at, Absent)),
-                Error(problem) => return Error(Io(problem)),
-            }
-            let obtained = manifest.read_disk_bytes(mut opened, path, at, width)
-            manifest.disk_io(host.close(take opened))?
-            let wire = obtained?
-            let end = pager.checked_tiered_index(path, owner, request.pack, at, width, wire)?
-            (take wire, end)
-        },
-        PagerObjects(client, op_ms, cache) => {
-            let Some(item) = request.listed.object else {
-                return Error(format.disk_fault(path, at, Absent))
-            }
-            if item.seq != request.pack || item.len != pack.payload_bytes {
-                return Error(format.disk_fault(path, at, Malformed))
-            }
-            let deadline = if request.deadline == 0 {
-                std.object.opener_deadline_ms(client, op_ms)
-            } else {
-                request.deadline
-            }
-            let read = pager.TieredBucketGet(pack_ref: item, window: pager.TieredRange(lo: at, hi: at + width), deadline)
-            read_checked_bucket_window(client, cache, read, scoped fn(wire: Bytes) -> Result[u64, types.Failure] {
-                pager.checked_tiered_index(path, owner, request.pack, at, width, wire)
-            })?
-        },
+    let (take raw, end) = if let Some(row) = pack.foreign {
+        let Some(source) = pager.pager_preview(input) else {
+            return Error(Missing("preview archive"))
+        }
+        if let Some(_) = request.listed.object {
+            return Error(format.disk_fault(path, at, Malformed))
+        }
+        let wire = pager.preview_pack_range(source, request.pack, row, at, at + width, request.deadline)?
+        let end = pager.checked_tiered_index(path, row.parent, request.pack, at, width, wire)?
+        (take wire, end)
+    } else {
+        match input {
+            PagerLocal(d, _) => {
+                let mut opened = match host.open(d, path, Read) {
+                    Ok(take fd) => take fd,
+                    Error(NotFound) => return Error(format.disk_fault(path, at, Absent)),
+                    Error(problem) => return Error(Io(problem)),
+                }
+                let obtained = manifest.read_disk_bytes(mut opened, path, at, width)
+                manifest.disk_io(host.close(take opened))?
+                let wire = obtained?
+                let end = pager.checked_tiered_index(path, owner, request.pack, at, width, wire)?
+                (take wire, end)
+            },
+            PagerObjects(client, op_ms, cache, _) => {
+                let Some(item) = request.listed.object else {
+                    return Error(format.disk_fault(path, at, Absent))
+                }
+                if item.seq != request.pack || item.len != pack.payload_bytes {
+                    return Error(format.disk_fault(path, at, Malformed))
+                }
+                let deadline = if request.deadline == 0 {
+                    std.object.opener_deadline_ms(client, op_ms)
+                } else {
+                    request.deadline
+                }
+                let read = pager.TieredBucketGet(pack_ref: item, window: pager.TieredRange(lo: at, hi: at + width), deadline)
+                read_checked_bucket_window(client, cache, read, scoped fn(wire: Bytes) -> Result[u64, types.Failure] {
+                    pager.checked_tiered_index(path, owner, request.pack, at, width, wire)
+                })?
+            },
+        }
     }
     let mut wire = take raw
     list.truncate(mut wire, end)

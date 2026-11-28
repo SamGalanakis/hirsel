@@ -62,6 +62,11 @@ pub fn journal_apply_ops(file: String, mut ids: u64, mut tree: pages.PageTree, o
                 }
                 pager.journal_collection_descriptor(descriptor)
             }
+            if let Some(_) = op.direct {
+                if kind != BlobsCollection {
+                    return Error(format.disk_fault(file, 0, Malformed))
+                }
+            }
             if let Some(before) = tiered_descriptor {
                 replay_tiered_op(file, mut tree, mut next_stamp, mut account, before, op)?
                 continue
@@ -101,8 +106,26 @@ pub fn journal_apply_ops(file: String, mut ids: u64, mut tree: pages.PageTree, o
                     continue
                 }
             }
-            if op.prior != format.stored_prior(pages.get_page_row(tree, op.key)) {
+            let prior = if kind == BlobsCollection {
+                pages.blob_row_prior(tree, op.key)
+            } else {
+                format.stored_prior(pages.get_page_row(tree, op.key))
+            }
+            if op.prior != prior {
                 return Error(format.disk_fault(file, 0, Malformed))
+            }
+            if let Some(place) = op.direct {
+                let resident: Option[Arc[Bytes]] = match op.value {
+                    Some(bytes_value) => {
+                        if list.len(bytes_value) != place.len || std.check.xxh3(bytes_value, 0, list.len(bytes_value)) != place.checksum {
+                            return Error(format.disk_fault(file, place.offset, Checksum))
+                        }
+                        Some(arc.new(types.copied(bytes_value)?))
+                    },
+                    None => None,
+                }
+                pages.put_direct_page_row(mut tree, op.key, place, take resident, 0, mut next_stamp)?
+                continue
             }
             if kind == CellCollection {
                 if list.len(op.key) != 4 {
@@ -243,9 +266,10 @@ fn replay_row_edit(file: String, mut overlay: Arc[pages.ReplayOverlay], before: 
         }
         seq_bounds = Some(pages.LogBoundsRep(first: window.first, next: following))
     }
-    let (now, added, added_rows): (pages.ReplayValue, u64, u64) = match op.value {
-        Some(value) => (ReplayPut(arc.new(types.copied(value)?)), entry(op.key, value), 1),
-        None => (ReplayAbsent, 0, 0),
+    let (now, added, added_rows): (pages.ReplayValue, u64, u64) = match (view op.direct, view op.value) {
+        (Some(place), _) => (ReplayDirect(arc.share(place)), capture.stored_row_charge(list.len(op.key), place.len), 1),
+        (None, Some(value)) => (ReplayPut(arc.new(types.copied(value)?)), entry(op.key, value), 1),
+        (None, None) => (ReplayAbsent, 0, 0),
     }
     let removed = pager.prior_row_charge(op.key, op.prior)
     let removed_rows = if op.prior == 0 {

@@ -12,7 +12,7 @@ from store_public_contract import declarations
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('lane', type=int, choices=range(1, 15))
+    parser.add_argument('lane', type=int, choices=range(1, 16))
     parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument('--lower', action='append', default=[], metavar='NAME=MODULE',
                         help='a lower-owner move recorded for this lane under MODULES.md §3.5')

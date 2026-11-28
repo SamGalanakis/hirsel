@@ -64,17 +64,30 @@ pub fn archive_store_hex(id: types.StoreKey) -> String {
     take out
 }
 
-pub fn archive_key(id: types.StoreKey, rel: String) -> String {
-    let mut out = string.with_capacity(33 + string.byte_len(rel))
+// §15.7 "Keys": every archive object but the head lives in the directory of
+// the head incarnation its caller read exactly. `rel` empty gives the
+// directory prefix itself.
+pub fn archive_key(id: types.StoreKey, incarnation: Inline[u8, 16], rel: String) -> String {
+    let mut out = string.with_capacity(66 + string.byte_len(rel))
     archive_push_hex_u64(mut out, id.hi)
     archive_push_hex_u64(mut out, id.lo)
+    string.push_char(mut out, '/')
+    let digits = string.as_bytes("0123456789abcdef")
+    for byte in incarnation {
+        string.push_char(mut out, option.unwrap(char.from_u32(int.widen(digits[int.widen(byte >> 4)]))))
+        string.push_char(mut out, option.unwrap(char.from_u32(int.widen(digits[int.widen(byte & 15)]))))
+    }
     string.push_char(mut out, '/')
     string.push(mut out, rel)
     take out
 }
 
 pub fn archive_head_key(id: types.StoreKey) -> String {
-    archive_key(id, string.from("archive-head"))
+    let mut out = string.with_capacity(45)
+    archive_push_hex_u64(mut out, id.hi)
+    archive_push_hex_u64(mut out, id.lo)
+    string.push(mut out, "/archive-head")
+    take out
 }
 
 pub fn archive_index_rel(ordinal: u64, digest: u64) -> String {
@@ -180,6 +193,54 @@ pub type ArchiveIndexSegmentRep: shareable + send {
     spilled_intervals: List[ArchiveIntervalRep]
 }
 
+// Physical coordinates of a verified founding base or a frame in its successor chain.
+// frame_end is zero for the base and otherwise names the end in the native unit.
+pub type RestoreBoundary: key + shareable + send {
+    source_kind: u8,
+    base_ordinal: u64,
+    base_digest: u64,
+    unit: u64,
+    epoch: u64,
+    unit_digest: u64,
+    frame_end: u64
+}
+
+pub type PreviewHoldRep: key + send {
+    child: types.StoreKey,
+    binding_id: u64,
+    boundary: RestoreBoundary,
+    until_ms: u64,
+    stamp: u64
+}
+
+pub const PREVIEW_HOLDS_MAX: u64 = 64
+
+pub const PREVIEW_GRACE_MS: u64 = 60000
+
+const PREVIEW_HOLD_BYTES: u64 = 89
+
+fn put_preview_hold(mut out: Bytes, h: PreviewHoldRep) {
+    list.put_word_le(mut out, h.child.hi)
+    list.put_word_le(mut out, h.child.lo)
+    list.put_word_le(mut out, h.binding_id)
+    let b = h.boundary
+    list.push(mut out, b.source_kind)
+    list.put_word_le(mut out, b.base_ordinal)
+    list.put_word_le(mut out, b.base_digest)
+    list.put_word_le(mut out, b.unit)
+    list.put_word_le(mut out, b.epoch)
+    list.put_word_le(mut out, b.unit_digest)
+    list.put_word_le(mut out, b.frame_end)
+    list.put_word_le(mut out, h.until_ms)
+    list.put_word_le(mut out, h.stamp)
+}
+
+fn read_preview_hold(raw: Bytes, at: u64) -> PreviewHoldRep {
+    let child = types.StoreKey(hi: read_le(raw, at, 8), lo: read_le(raw, at + 8, 8))
+    let b = RestoreBoundary(source_kind: raw[at + 24], base_ordinal: read_le(raw, at + 25, 8), base_digest: read_le(raw, at + 33, 8), unit: read_le(raw, at + 41, 8), epoch: read_le(raw, at + 49, 8), unit_digest: read_le(raw, at + 57, 8), frame_end: read_le(raw, at + 65, 8))
+    PreviewHoldRep(child, binding_id: read_le(raw, at + 16, 8), boundary: b, until_ms: read_le(raw, at + 73, 8), stamp: read_le(raw, at + 81, 8))
+}
+
 pub type ArchiveHeadRep: shareable + send {
     store: types.StoreKey,
     source_kind: u8,
@@ -190,7 +251,9 @@ pub type ArchiveHeadRep: shareable + send {
     through: Option[ArchiveCursorRep],
     floor_base: Option[ArchiveBaseRowRep],
     index_tail: Option[ArchiveIndexRefRep],
-    intervals: List[ArchiveIntervalRep]
+    intervals: List[ArchiveIntervalRep],
+    incarnation: Inline[u8, 16],
+    holds: List[PreviewHoldRep]
 }
 
 pub fn archive_base_summary(base: ArchiveBaseRowRep) -> ArchiveBaseRowRep {
@@ -412,7 +475,11 @@ pub fn encode_archive_head(head: ArchiveHeadRep) -> Result[Bytes, types.Failure]
         return Error(disk_fault("archive-head", 72, Malformed))
     }
     let iv_count = list.len(head.intervals)
-    let est = 32 + ARCHIVE_CURSOR_BYTES + ARCHIVE_BASE_FIXED_BYTES + 25 + iv_count * ARCHIVE_INTERVAL_SUMMARY_BYTES
+    let hold_count = list.len(head.holds)
+    if hold_count > PREVIEW_HOLDS_MAX {
+        return Error(Limit(Manifest))
+    }
+    let est = 52 + hold_count * PREVIEW_HOLD_BYTES + ARCHIVE_CURSOR_BYTES + ARCHIVE_BASE_FIXED_BYTES + 25 + iv_count * ARCHIVE_INTERVAL_SUMMARY_BYTES
     let mut payload: Bytes = list.new()
     types.capacity(list.try_reserve(mut payload, est))?
     list.push(mut payload, head.source_kind)
@@ -449,6 +516,13 @@ pub fn encode_archive_head(head: ArchiveHeadRep) -> Result[Bytes, types.Failure]
     list.put_word_le(mut payload, count_u32)
     for iv in head.intervals {
         put_archive_interval(mut payload, iv)
+    }
+    for i in 0u64 .. 16 {
+        list.push(mut payload, head.incarnation[i])
+    }
+    list.put_word_le(mut payload, (int.narrow(hold_count) : u32))
+    for h in head.holds {
+        put_preview_hold(mut payload, h)
     }
     if 88 + list.len(payload) > ARCHIVE_HEAD_LIMIT {
         return Error(Limit(Manifest))
@@ -536,10 +610,38 @@ pub fn decode_archive_head(key: String, expected_store: types.StoreKey, raw: Byt
     for _ in 0u64 .. iv_count {
         list.push(mut intervals, read_archive_interval(key, p, mut at)?)
     }
-    if at != list.len(p) {
+    if list.len(p) - at < 16 {
         return Error(disk_fault(key, 72 + at, Malformed))
     }
-    Ok(ArchiveHeadRep(store: ctx.store, source_kind, binding_id, holder_epoch, rev, open_gap: gap_byte == 1, through, floor_base: take floor_base, index_tail, intervals: take intervals))
+    let mut incarnation: Inline[u8, 16] =[0; 16]
+    for i in 0u64 .. 16 {
+        incarnation[i] = p[at + i]
+    }
+    if incarnation ==[0u8; 16] {
+        return Error(disk_fault(key, 72 + at, Malformed))
+    }
+    at += 16
+    let hold_count = disk_number(key, p, mut at, 4)?
+    if hold_count > PREVIEW_HOLDS_MAX || list.len(p) - at != hold_count * PREVIEW_HOLD_BYTES {
+        return Error(disk_fault(key, 72 + at, Malformed))
+    }
+    let mut holds: List[PreviewHoldRep] = list.new()
+    types.capacity(list.try_reserve(mut holds, hold_count))?
+    for i in 0u64 .. hold_count {
+        let h = read_preview_hold(p, at)
+        if h.child == ctx.store || h.binding_id == 0 || h.stamp == 0 || h.stamp > rev || h.boundary.source_kind != source_kind || h.boundary.base_ordinal == 0 || h.boundary.unit == 0 {
+            return Error(disk_fault(key, 72 + at, Malformed))
+        }
+        if i != 0 {
+            let prev = holds[i - 1].child
+            if prev.hi > h.child.hi || (prev.hi == h.child.hi && prev.lo >= h.child.lo) {
+                return Error(disk_fault(key, 72 + at, Order))
+            }
+        }
+        list.push(mut holds, h)
+        at += PREVIEW_HOLD_BYTES
+    }
+    Ok(ArchiveHeadRep(store: ctx.store, source_kind, binding_id, holder_epoch, rev, open_gap: gap_byte == 1, through, floor_base: take floor_base, index_tail, intervals: take intervals, incarnation, holds: take holds))
 }
 
 pub fn encode_archive_index(store: types.StoreKey, source_kind: u8, seg: ArchiveIndexSegmentRep) -> Result[Bytes, types.Failure] {

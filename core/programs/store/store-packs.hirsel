@@ -91,7 +91,7 @@ pub fn apply_pack_layout(mut known: PageLocations, layout: PackRun) -> Result[()
             offset += 16 + frame.size
         }
         let frame_count: u32 = int.truncate(pack_plan.end - pack_plan.first)
-        let record = pages.PagePack(class: layout.class, frames: frame_count, live: pack_plan.payload_bytes, payload_bytes: pack_plan.payload_bytes, index: 0)
+        let record = pages.PagePack(foreign: None, class: layout.class, frames: frame_count, live: pack_plan.payload_bytes, payload_bytes: pack_plan.payload_bytes, index: 0)
         types.capacity(disk_index_put(mut known.packs, pack_plan.seq, record, pack_edge_charge))?
     }
     Ok(())
@@ -250,12 +250,30 @@ pub fn moved_frames(known: PageLocations, lists: bool) -> List[u64] {
 }
 
 pub fn encode_pack_row(pack: pages.PagePack) -> Bytes {
-    let mut out: Bytes = list.with_capacity(29)
+    let width = match pack.foreign {
+        None => 30u64,
+        Some(_) => 86u64,
+    }
+    let mut out: Bytes = list.with_capacity(width)
     list.push(mut out, pack.class)
     list.put_word_le(mut out, pack.frames)
     list.put_word_le(mut out, pack.live)
     list.put_word_le(mut out, pack.payload_bytes)
     list.put_word_le(mut out, pack.index)
+    match pack.foreign {
+        None => list.push(mut out, 0u8),
+        Some(ref) => {
+            list.push(mut out, 1u8)
+            list.put_word_le(mut out, ref.parent.hi)
+            list.put_word_le(mut out, ref.parent.lo)
+            for i in 0u64 .. 16 {
+                list.push(mut out, ref.incarnation[i])
+            }
+            list.put_word_le(mut out, ref.epoch)
+            list.put_word_le(mut out, ref.len)
+            list.put_word_le(mut out, ref.digest)
+        },
+    }
     take out
 }
 
@@ -428,4 +446,37 @@ pub fn prepare_page_cut[T](base: PageLocations, mut next_stamp: u64, attempt: sc
     }
     let _ = take marks
     attempt(map.new(), None, mut next_stamp)
+}
+
+// Called under the Directory writer LOCK after reserving seq. CreateNew
+// reserves the final name before rename can replace anything. A crash
+// between reservation and rename leaves only an unreferenced empty file.
+pub fn install_direct_pack(d: Dir, seq: u64, wire: Bytes) -> Result[(), types.Failure] waits {
+    let dest = paged_pack_path(seq)?
+    let tmp = types.capacity(disk_path("p-", seq, ".tmp"))?
+    if let Error(take problem) = disk_write_synced(d, tmp, wire) {
+        let _ = disk_remove_optional(d, tmp)?
+        return Error(take problem)
+    }
+    let reserved = match disk_io(host.open(d, dest, CreateNew)) {
+        Ok(take opened) => take opened,
+        Error(take problem) => {
+            let _ = disk_remove_optional(d, tmp)?
+            return Error(take problem)
+        },
+    }
+    let installed = match disk_io(host.close(take reserved)) {
+        Ok(()) => match disk_io(host.rename(d, tmp, dest)) {
+            Ok(()) => disk_io(host.sync_dir(d)),
+            Error(take problem) => Error(take problem),
+        },
+        Error(take problem) => Error(take problem),
+    }
+    if let Error(take problem) = take installed {
+        let _ = disk_remove_optional(d, tmp)?
+        let _ = disk_remove_optional(d, dest)?
+        disk_io(host.sync_dir(d))?
+        return Error(take problem)
+    }
+    Ok(())
 }

@@ -300,3 +300,12 @@ pub fn close_requests(mut state: PagerState) {
     state.pager_writer = None
     state.pager = None
 }
+
+pub fn reserve_direct_lease(mut state: DiskPagerState) -> Result[(), types.Failure] {
+    prune_leases(mut state)
+    types.capacity(list.try_reserve(mut state.compaction.held, 1))
+}
+
+pub fn hold_direct_lease(mut state: DiskPagerState, inventory: Arc[pages.TieredReadInventory]) {
+    list.push(mut state.compaction.held, arc.share(inventory))
+}

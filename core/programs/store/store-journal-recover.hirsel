@@ -1,7 +1,16 @@
-fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: pager.JournalReplay) -> Result[journal.JournalRecovered, Error] waits {
-    let mut replay = take initial
+type DirectoryJournalPrefix {
+    first: u64,
+    ends: List[u64],
+    introduced: List[Arc[format.DirectBlob]],
+    high_stamp: u64,
+    uncovered: u64
+}
+
+// LOCK excludes new writers. Each segment fence drains writes left by the old
+// writer before we freeze that segment's boundary and collect its introductions.
+fn select_directory_prefix(d: Dir, id: StoreId, first: u64, c: Clock) -> Result[DirectoryJournalPrefix, Error] waits {
     let mut seq = first
-    let mut uncovered = 0u64
+    let mut prefix = DirectoryJournalPrefix(first: first, ends: list.new(), introduced: list.new(), high_stamp: 0, uncovered: 0)
     loop {
         let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
         let mut file = match host.open(d, path, Read) {
@@ -20,8 +29,17 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: page
             None => true,
             Some(_) => false
         }
-        let scanned = journal_scan(mut source, path, id, seq, 72, boundary, final_item, mut replay, scoped fn(mut recovered_state: pager.JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
-            journal_apply(path, mut recovered_state, take event)
+        let scanned = journal_scan(mut source, path, id, seq, 72, boundary, final_item, mut prefix, scoped fn(mut selected: DirectoryJournalPrefix, take event: format.JournalEvent) -> Result[(), Error] {
+            if let Commit(commit) = view event {
+                for op in commit.data {
+                    if let Some(place) = view op.direct {
+                        failure_result_from_rep(types.capacity(list.try_reserve(mut selected.introduced, 1)))?
+                        list.push(mut selected.introduced, arc.share(place))
+                        selected.high_stamp = order.max(selected.high_stamp, place.stamp)
+                    }
+                }
+            }
+            Ok(())
         })
         let consumed_file = format.take_journal_file(take source)
         let mut consumed = take consumed_file
@@ -41,30 +59,60 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: page
                 let next_path = failure_result_from_rep(manifest.journal_path(seq + 1, ""))?
                 if final_item && no_end && seq == first && !failure_result_from_rep(journal.disk_exists(d, next_path))? {
                     if let Error(Corrupt(_)) = failure_result_from_rep(manifest.journal_header(d, store_key_to_rep(id), seq, None)) {
-                        return Ok(journal.JournalRecovered(replay: take replay, seq: seq - 1, end: 0, uncovered: uncovered))
+                        return Ok(take prefix)
                     }
                 }
                 return Error(Corrupt(take fault))
             },
             Error(take e) => return Error(take e)
         }
-        uncovered = int.saturating_add(uncovered, segment_bytes)
+        failure_result_from_rep(types.capacity(list.try_reserve(mut prefix.ends, 1)))?
+        list.push(mut prefix.ends, end)
+        prefix.uncovered = int.saturating_add(prefix.uncovered, segment_bytes)
         if let None = following {
-            return Ok(journal.JournalRecovered(replay: take replay, seq: seq, end: end, uncovered: uncovered))
+            return Ok(take prefix)
         }
         seq += 1
     }
 }
 
-fn capture_scan(id: StoreId, deadline: Option[(Clock, u64)], take walk: journal.CaptureWalk, take initial: pager.JournalReplay) -> Result[pager.JournalReplay, Error] waits {
+fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: pager.JournalReplay) -> Result[journal.JournalRecovered, Error] waits {
+    let prefix = select_directory_prefix(d, id, first, c)?
+    recover_directory_prefix(d, id, take prefix, take initial, None)
+}
+
+fn recover_directory_prefix(d: Dir, id: StoreId, take prefix: DirectoryJournalPrefix, take initial: pager.JournalReplay, preview: Option[View[pager.PreviewRead]]) -> Result[journal.JournalRecovered, Error] waits {
+    let mut replay = take initial
+    replay.next_node = order.max(replay.next_node, prefix.high_stamp)
+    let mut seq = prefix.first - 1
+    let mut end = 0u64
+    for boundary in prefix.ends {
+        seq += 1
+        let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
+        let file = failure_result_from_rep(manifest.disk_io(host.open(d, path, Read)))?
+        let mut input = failure_result_from_rep(journal.journal_input(take file, false))?
+        let _ = journal_scan(mut input, path, id, seq, 72, Some(boundary), false, mut replay, scoped fn(mut state: pager.JournalReplay, take event: format.JournalEvent) -> Result[(), Error] waits {
+            let ready = directory_replay_event(d, id, state, preview, take event)?
+            journal_apply(path, mut state, take ready)
+        })?
+        failure_result_from_rep(manifest.disk_io(host.close(format.take_journal_file(take input))))?
+        end = boundary
+    }
+    let DirectoryJournalPrefix(introduced: take introduced, uncovered, ..) = take prefix
+    Ok(journal.JournalRecovered(replay: take replay, seq: seq, end: end, uncovered, introduced: take introduced))
+}
+
+fn capture_scan(dir: Dir, id: StoreId, deadline: Option[(Clock, u64)], take walk: journal.CaptureWalk, take initial: pager.JournalReplay) -> Result[pager.JournalReplay, Error] waits {
     let journal.CaptureWalk(segments: take selected, torn_tail: torn_tail, ..) = take walk
     let mut segments = take selected
     let segment_count = list.len(segments)
+    let mut replay = take initial
+    let fixed = capture_fixed_stamps(id, mut segments, torn_tail, replay.limits, deadline)?
+    replay.next_node = order.max(replay.next_node, fixed)
     // Scan the oldest segment first and transfer each descriptor once.
     for i in 0u64 .. segment_count / 2 {
         list.swap(mut segments, i, segment_count - i - 1)
     }
-    let mut replay = take initial
     while let Some(take segment) = list.pop(mut segments) {
         failure_result_from_rep(format.check_journal_deadline(deadline))?
         let journal.CaptureSegment(file: take opened, seq: seq, boundary: stored_end) = take segment
@@ -81,8 +129,8 @@ fn capture_scan(id: StoreId, deadline: Option[(Clock, u64)], take walk: journal.
         let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
         let mut source = failure_result_from_rep(journal.journal_input_with_deadline(take opened, torn, deadline))?
         failure_result_from_rep(journal.journal_refresh_size(mut source, boundary))?
-        let scanned = journal_scan(mut source, path, id, seq, 72, boundary, torn, mut replay, scoped fn(mut recovered_state: pager.JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
-            journal_apply(path, mut recovered_state, take event)
+        let scanned = journal_scan(mut source, path, id, seq, 72, boundary, torn, mut replay, scoped fn(mut recovered_state: pager.JournalReplay, take event: format.JournalEvent) -> Result[(), Error] waits {
+            journal_apply(path, mut recovered_state, capture_directory_event(dir, id, deadline, take event)?)
         })
         let consumed = format.take_journal_file(take source)
         let mut file = take consumed

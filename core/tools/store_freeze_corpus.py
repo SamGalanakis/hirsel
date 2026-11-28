@@ -101,15 +101,15 @@ def load_frozen_dir(corpus_dir):
     return dir_files, bucket_objects, dir_dump, bucket_dump
 
 
-def update_hirsel_toml(root, fmt):
-    toml_path = root / 'core/programs/store/hirsel.hcfg'
-    text = toml_path.read_text(encoding='utf-8')
-    target = f'"store_corpus_format{fmt}.hirsel" = "store"'
-    replaced, count = re.subn(r'"store_corpus_format[0-9]+\.hirsel" = "store"', target, text)
-    if count == 0:
-        raise ValueError(f'{toml_path}: missing store_corpus_format*.hirsel entry')
+def update_fixture_source(root, fmt):
+    manifest_path = root / 'core/programs/store/hirsel.hcfg'
+    text = manifest_path.read_text(encoding='utf-8')
+    target = f'("store_corpus_format{fmt}.hirsel", "store")'
+    replaced, count = re.subn(r'\("store_corpus_format[0-9]+\.hirsel", "store"\)', target, text)
+    if count != 1:
+        raise ValueError(f'{manifest_path}: expected one store_corpus_format*.hirsel entry, found {count}')
     if replaced != text:
-        toml_path.write_text(replaced, encoding='utf-8')
+        manifest_path.write_text(replaced, encoding='utf-8')
 
 
 def freeze(args):
@@ -195,7 +195,7 @@ def freeze(args):
             render_fixture_module(fmt, dir_files, bucket_objects, dir_dump, bucket_dump),
             encoding='utf-8',
         )
-        update_hirsel_toml(root, fmt)
+        update_fixture_source(root, fmt)
         dir_bytes = sum(len(raw) for _, raw in dir_files)
         bucket_bytes = sum(len(raw) for _, raw in bucket_objects)
         print(

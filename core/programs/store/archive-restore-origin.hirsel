@@ -1,14 +1,6 @@
-// Physical coordinates of a verified founding base or a frame in its successor chain.
-// frame_end is zero for the base and otherwise names the end in the native unit.
-pub type RestoreBoundary: key + shareable + send {
-    source_kind: u8,
-    base_ordinal: u64,
-    base_digest: u64,
-    unit: u64,
-    epoch: u64,
-    unit_digest: u64,
-    frame_end: u64
-}
+pub type RestoreBoundary = format.RestoreBoundary
+
+pub type RestoreIntent: key + send = Successor | Preview(Inline[u8, 16], u64)
 
 pub type RestoreOrigin: shareable + send {
     parent: types.StoreKey,
@@ -18,14 +10,24 @@ pub type RestoreOrigin: shareable + send {
     at: u64,
     boundary: RestoreBoundary,
     attempt: Inline[u8, 16],
-    capture_attempt: Inline[u8, 16]
+    capture_attempt: Inline[u8, 16],
+    intent: RestoreIntent
 }
 
 pub const RESTORE_ORIGIN_KIND: u16 = 0x0071
 
-pub const RESTORE_ORIGIN_PAYLOAD: u64 = 125
+pub const RESTORE_ORIGIN_PAYLOAD: u64 = 150
 
 pub const RESTORE_ORIGIN_FRAME: u64 = 16 + RESTORE_ORIGIN_PAYLOAD
+
+pub fn independent_source(origin: Option[RestoreOrigin]) -> Result[(), types.Failure] {
+    if let Some(found) = origin {
+        if let Preview(_, _) = found.intent {
+            return Error(PreviewSource)
+        }
+    }
+    Ok(())
+}
 
 pub fn restore_origin_bytes(origin: Option[RestoreOrigin]) -> u64 {
     match origin {
@@ -68,6 +70,24 @@ pub fn restore_origin_payload(o: RestoreOrigin) -> Result[Bytes, types.Failure] 
     for i in 0u64 .. 16 {
         list.push(mut body, o.capture_attempt[i])
     }
+    match o.intent {
+        Successor => {
+            list.push(mut body, 0u8)
+            list.put_word_le(mut body, 0u64)
+            list.put_word_le(mut body, 0u64)
+            list.put_word_le(mut body, 0u64)
+        },
+        Preview(incarnation, stamp) => {
+            if incarnation ==[0u8; 16] || stamp == 0 || o.binding_id == 0 {
+                return Error(format.disk_fault("RESTORE_ORIGIN", 125, Malformed))
+            }
+            list.push(mut body, 1u8)
+            for i in 0u64 .. 16 {
+                list.push(mut body, incarnation[i])
+            }
+            list.put_word_le(mut body, stamp)
+        },
+    }
     Ok(take body)
 }
 
@@ -87,7 +107,7 @@ pub fn restore_origin_from_payload(payload: Bytes) -> Option[RestoreOrigin] {
     }
     let parent = types.StoreKey(hi: format.read_le(payload, 0, 8), lo: format.read_le(payload, 8, 8))
     let source_kind = payload[44]
-    let b = RestoreBoundary(source_kind, base_ordinal: format.read_le(payload, 45, 8), base_digest: format.read_le(payload, 53, 8), unit: format.read_le(payload, 61, 8), epoch: format.read_le(payload, 69, 8), unit_digest: format.read_le(payload, 77, 8), frame_end: format.read_le(payload, 85, 8))
+    let b = format.RestoreBoundary(source_kind, base_ordinal: format.read_le(payload, 45, 8), base_digest: format.read_le(payload, 53, 8), unit: format.read_le(payload, 61, 8), epoch: format.read_le(payload, 69, 8), unit_digest: format.read_le(payload, 77, 8), frame_end: format.read_le(payload, 85, 8))
     if b.base_ordinal == 0 || b.unit == 0 || source_kind > format.ARCHIVE_SOURCE_OBJECTS {
         return None
     }
@@ -101,5 +121,15 @@ pub fn restore_origin_from_payload(payload: Bytes) -> Option[RestoreOrigin] {
     if binding_id != 0 && capture_attempt !=[0u8; 16] {
         return None
     }
-    Some(RestoreOrigin(parent, binding_id, branch: int.truncate(format.read_le(payload, 24, 4)), version: format.read_le(payload, 28, 8), at: format.read_le(payload, 36, 8), boundary: b, attempt, capture_attempt))
+    let mut incarnation: Inline[u8, 16] =[0; 16]
+    for i in 0u64 .. 16 {
+        incarnation[i] = payload[126 + i]
+    }
+    let stamp = format.read_le(payload, 142, 8)
+    let intent: RestoreIntent = match payload[125u64] {
+        0 if incarnation ==[0u8; 16] && stamp == 0 => Successor,
+        1 if incarnation !=[0u8; 16] && stamp != 0 && binding_id != 0 => Preview(incarnation, stamp),
+        _ => return None,
+    }
+    Some(RestoreOrigin(parent, binding_id, branch: int.truncate(format.read_le(payload, 24, 4)), version: format.read_le(payload, 28, 8), at: format.read_le(payload, 36, 8), boundary: b, attempt, capture_attempt, intent))
 }

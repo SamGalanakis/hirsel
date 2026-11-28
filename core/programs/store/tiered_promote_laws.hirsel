@@ -87,7 +87,7 @@ fn test_l88_promotion_converges_tiered_stamps(d: Dir, tasks: Tasks) -> Result[()
     let mut packs: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
     for ptr in[old, moved, parent, sibling] {
         let width: u64 = int.widen(ptr.len)
-        let metadata = pages.PagePack(class: 3, frames: 1, live: width, payload_bytes: 116 + width, index: 88 + width)
+        let metadata = pages.PagePack(foreign: None, class: 3, frames: 1, live: width, payload_bytes: 116 + width, index: 88 + width)
         let (take revised, _) = std.omap.insert(mut ids, packs, ptr.pack, pages.TieredPagerPack(inventory: metadata, object: None))
         packs = take revised
     }

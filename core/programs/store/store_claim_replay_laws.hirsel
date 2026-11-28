@@ -1,0 +1,206 @@
+// A keyed call is re-executed from its journal frame: the claim key is the
+// key of the claims edit that carries the CALL fields (http.md K-4), so it is
+// read apart from the entry key, and the re-run compares the claim's reply.
+fn claim_replay_failed(_stop: Stop) -> Bytes {
+    b"failed"
+}
+
+@test
+fn claim_replay_reconstructs_keyed_call(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let mut options = journal_crash_options()
+    options.resident_limit = 134217728
+    let mut db = open(tasks, directory, c, r, options)?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let digest = request_digest(b"charge", b"args")
+    let policy = claim_law_policy()
+    let first = claim_law_key(b"one")
+    let second = claim_law_key(b"two")
+    let record = KeyedCallRecord(entry: b"charge", args: b"args", revision: None, code: b"0123456789abcdef")
+    let plan = Plan(n_e: 1048576, s_e: 30000, reply_max: 64)
+    let no_stream_record: Option[CallRecord] = None
+    let Accepted(one) = admit_claim(mut db, first, digest, b"args", Some(clone(policy)))? else {
+        fail("first admit")
+    }
+    let done = serve(mut db, keyed_completion(take one, clone(record)), plan, clone(no_stream_record), rows, fn(mut tx: Tx, data: Table[u64, u64]) -> Result[Bytes, Bytes] {
+        let _ = result.unwrap(put(mut tx, data, 1u64, 77u64))
+        Ok(b"done")
+    })
+    let Ok(Committed(success)) = done else {
+        fail("keyed success did not commit")
+    }
+    let success_mark = version(snapshot(db))
+    durable(mut db, success.ticket)?
+    let Accepted(two) = admit_claim(mut db, second, digest, b"args", Some(clone(policy)))? else {
+        fail("second admit")
+    }
+    let denied = serve(mut db, keyed_completion(take two, clone(record)), plan, take no_stream_record, rows, fn(mut tx: Tx, data: Table[u64, u64]) -> Result[Bytes, Bytes] {
+        let _ = result.unwrap(put(mut tx, data, 2u64, 88u64))
+        Error(b"denied")
+    })
+    let Ok(Kept(typed_error)) = denied else {
+        fail("keyed error did not keep its reply")
+    }
+    let error_mark = version(snapshot(db))
+    durable(mut db, typed_error.ticket)?
+    let Ok(prepared) = prepare_reexecute(db, main_branch(db), success_mark)? else {
+        fail("the normal replay entry missed a keyed call")
+    }
+    if replay_claim(prepared) != Some(claim_key_bytes(first)?) {
+        fail("the normal replay entry lost the claim")
+    }
+    let Ok(source) = prepare_reexecute_claim(db, success_mark)? else {
+        fail("the keyed replay source is missing")
+    }
+    let Some(claim) = replay_claim(source) else {
+        fail("the keyed replay source has no claim key")
+    }
+    let parts = claim_key_parts(claim)?
+    let call = replay_record(source)
+    if call.claim != Some(clone(claim)) || claim != claim_key_bytes(first)? || parts.op != first.op || parts.caller != first.caller || parts.key != first.key || call.record.key != b"charge" || call.record.args != b"args" || call.record.stream.caller != first.caller || call.record.code != record.code || call.base + 1 != success_mark {
+        fail("the keyed replay source changed the call's identity")
+    }
+    let same = reexecute_claim(db, success_mark, plan, claim_replay_failed, rows, fn(_call, mut tx, data) -> Result[Bytes, Bytes] {
+        let _ = result.unwrap(put(mut tx, data, 1u64, 77u64))
+        Ok(b"done")
+    })?
+    let other_reply = reexecute_claim(db, success_mark, plan, claim_replay_failed, rows, fn(_call, mut tx, data) -> Result[Bytes, Bytes] {
+        let _ = result.unwrap(put(mut tx, data, 1u64, 77u64))
+        Ok(b"gone")
+    })?
+    let other_write = reexecute_claim(db, success_mark, plan, claim_replay_failed, rows, fn(_call, mut tx, data) -> Result[Bytes, Bytes] {
+        let _ = result.unwrap(put(mut tx, data, 1u64, 78u64))
+        Ok(b"done")
+    })?
+    let kept = reexecute_claim(db, error_mark, plan, claim_replay_failed, rows, fn(_call, mut tx, data) -> Result[Bytes, Bytes] {
+        let _ = result.unwrap(put(mut tx, data, 2u64, 88u64))
+        Error(b"denied")
+    })?
+    let kept_changed = reexecute_claim(db, error_mark, plan, claim_replay_failed, rows, fn(_call, mut tx, data) -> Result[Bytes, Bytes] {
+        Ok(b"denied")
+    })?
+    let unrecorded = reexecute_claim(db, success_mark - 1, plan, claim_replay_failed, rows, fn(_call, mut tx, data) -> Result[Bytes, Bytes] {
+        Ok(b"done")
+    })?
+    if !verdict_is(same, Same) || !verdict_is(other_reply, Different(Reply)) || !verdict_is(other_write, Different(Writes)) || !verdict_is(kept, Same) || !verdict_is(kept_changed, Same) {
+        fail("a keyed re-run gave the wrong verdict")
+    }
+    let Unknown(NotRecorded) = unrecorded else {
+        fail("a frame without a keyed call was replayed")
+    }
+    close(take db)
+}
+
+// The entry of the by-reference law: it resolves the upload its argument
+// names, reads every chunk, attaches it, and replies with what it read.
+fn claim_replay_upload_entry(mut tx: Tx, b: Blobs[u64], reference: Bytes) -> Result[Bytes, Bytes] {
+    let of = match blob_ref_info(reference) {
+        Ok(take named) => take named,
+        Error(_) => return Error(b"malformed"),
+    }
+    if !result.unwrap(blob_resolve(tx, b, of)) {
+        return Error(b"unresolved")
+    }
+    let mut sum = 0u64
+    for n in 0u64 .. of.chunks {
+        match blob_chunk(tx, b, of, n) {
+            Ok(Some(chunk)) => {
+                for byte in chunk {
+                    sum += int.widen(byte)
+                }
+            },
+            _ => fail("by-reference law: a named chunk is missing"),
+        }
+    }
+    let _ = result.unwrap(blob_attach(mut tx, b, 9u64, BlobUpload(id: of.upload)))
+    let mut reply: Bytes = list.with_capacity(8)
+    list.put_word_le(mut reply, sum)
+    Ok(take reply)
+}
+
+// A recording holds an upload body as its 60-byte reference. The attaching
+// call's frame does not grow with the body, and the re-run reads the body
+// through the reference on the recorded base.
+@test
+fn claim_replay_reads_upload_by_reference(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let mut options = journal_crash_options()
+    options.resident_limit = 134217728
+    let mut db = open(tasks, directory, c, r, options)?
+    let mut schema = declare(db, Migrate)?
+    let b = declare_blobs(mut schema, "bodies", std.codec.key_u64(), BlobLimits(chunk: BLOB_LAW_CHUNK, max: 65536))?
+    let _ = seal(mut db, take schema)?
+    let u = blob_law_begin(mut db, b)?
+    let _ = blob_law_append(mut db, b, u, 0, 8, 1024)?
+    let staged = blob_law_append(mut db, b, u, 8, 1, 100)?
+    let reference = blob_ref(staged)?
+    if list.len(reference) != BLOB_REF_BYTES || blob_ref_info(reference)? != staged || staged.size != 8292 {
+        fail("the reference does not name the staged upload")
+    }
+    let mut expected = 0u64
+    for n in 0u64 .. 9u64 {
+        let width = if n == 8 {
+            100u64
+        } else {
+            1024u64
+        }
+        for byte in blob_law_chunk(n, width) {
+            expected += int.widen(byte)
+        }
+    }
+    let mut expected_reply: Bytes = list.with_capacity(8)
+    list.put_word_le(mut expected_reply, expected)
+    let digest = request_digest(b"upload", reference)
+    let policy = claim_law_policy()
+    let first = claim_law_key(b"body")
+    let record = KeyedCallRecord(entry: b"upload", args: clone(reference), revision: None, code: b"0123456789abcdef")
+    let plan = Plan(n_e: 1048576, s_e: 1000000, reply_max: 64)
+    let no_stream_record: Option[CallRecord] = None
+    let Accepted(one) = admit_claim(mut db, first, digest, reference, Some(clone(policy)))? else {
+        fail("by-reference admit")
+    }
+    durable(mut db, claim_ticket(one))?
+    let before = accounts(db).journal
+    let done = serve(mut db, keyed_completion(take one, clone(record)), plan, take no_stream_record, (copy_env(b), copy_env(reference)), fn(mut tx: Tx, env: (Blobs[u64], Bytes)) -> Result[Bytes, Bytes] {
+        claim_replay_upload_entry(mut tx, env.0, env.1)
+    })
+    let Ok(Committed(success)) = done else {
+        fail("the by-reference call did not commit")
+    }
+    let mark = version(snapshot(db))
+    durable(mut db, success.ticket)?
+    let frame = accounts(db).journal - before
+    if frame == 0 || frame >= 1024 {
+        fail("the attaching frame grew with the upload body")
+    }
+    let Some(kept_call) = recorded_claim(db, mark)? else {
+        fail("the by-reference call record is missing")
+    }
+    if kept_call.call.args != reference {
+        fail("the recording does not hold the reference")
+    }
+    let attached = blob_info(reader(db, 0u64)?, snapshot(db), b, 9u64)?
+    if attached != Some(clone(staged)) {
+        fail("the kept_call call did not attach the named upload")
+    }
+    let same = reexecute_claim(db, mark, plan, claim_replay_failed, copy_env(b), fn(call, mut tx, target) -> Result[Bytes, Bytes] {
+        claim_replay_upload_entry(mut tx, target, call.record.args)
+    })?
+    let mut other: BlobInfo = clone(staged)
+    other.digest = blob_chunk_digest(b"another body")
+    let other_reference = blob_ref(other)?
+    let renamed = reexecute_claim(db, mark, plan, claim_replay_failed, (copy_env(b), copy_env(other_reference)), fn(_call, mut tx, env) -> Result[Bytes, Bytes] {
+        claim_replay_upload_entry(mut tx, env.0, env.1)
+    })?
+    if !verdict_is(same, Same) || !verdict_is(renamed, Different(Reply)) {
+        fail("a by-reference re-run gave the wrong verdict")
+    }
+    let Duplicate(saved) = admit_claim(mut db, first, digest, reference, Some(take policy))? else {
+        fail("the by-reference reply was not kept")
+    }
+    if saved != expected_reply {
+        fail("the by-reference call read other bytes")
+    }
+    close(take db)
+}

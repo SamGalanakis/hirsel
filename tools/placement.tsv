@@ -217,11 +217,11 @@ describe_capture	store-capture-describe.hirsel	store	store	-
 describe_acquire	store-capture-describe.hirsel	capture	capture	L7
 describe_suffix	store-capture-describe.hirsel	capture	store	-	public root type in signature or result
 describe_lines	store-capture-describe.hirsel	capture	store	-	public root type in signature or result
-CaptureOp	store-capture-journal.hirsel	capture	capture	L7
-CaptureOps	store-capture-journal.hirsel	capture	capture	L7
-capture_data_ops	store-capture-journal.hirsel	capture	capture	L7
-capture_blob_width	store-capture-journal.hirsel	capture	capture	L7
-capture_next_op	store-capture-journal.hirsel	capture	capture	L7
+CaptureOp	store-capture-journal.hirsel	capture	format	L7	Format 15 journal wire shared by manifest retention and capture
+CaptureOps	store-capture-journal.hirsel	capture	format	L7	Format 15 journal wire shared by manifest retention and capture
+capture_data_ops	store-capture-journal.hirsel	capture	format	L7	Format 15 journal wire shared by manifest retention and capture
+capture_blob_width	store-capture-journal.hirsel	capture	format	L7	Format 15 journal wire shared by manifest retention and capture
+capture_next_op	store-capture-journal.hirsel	capture	format	L7	Format 15 journal wire shared by manifest retention and capture
 CaptureChunk	store-capture-journal.hirsel	capture	capture	L7
 new_capture_chunk	store-capture-journal.hirsel	capture	capture	L7
 capture_chunk_at	store-capture-journal.hirsel	capture	capture	L7
@@ -3208,3 +3208,34 @@ bulk_declared_index	maintenance-index-build.hirsel	maintenance	maintenance	L14	L
 define_empty_tiered_index	maintenance-index-build.hirsel	maintenance	maintenance	L14	L14 maintenance module
 due_rows	maintenance-expiry.hirsel	maintenance	maintenance	L14	L14 maintenance module
 expiry_entries	maintenance-expiry.hirsel	maintenance	maintenance	L14	L14 maintenance module
+Blobs	store-blobs.hirsel	store	store	L15	Format 15
+BlobLimits	store-blobs.hirsel	store	store	L15	Format 15
+BlobUpload	store-blobs.hirsel	store	store	L15	Format 15
+BlobInfo	store-blobs.hirsel	store	store	L15	Format 15
+BlobSpan	store-blobs.hirsel	store	store	L15	Format 15
+declare_blobs	store-blobs.hirsel	store	store	L15	Format 15
+blob_begin	store-blobs.hirsel	store	store	L15	Format 15
+blob_append	store-blobs.hirsel	store	store	L15	Format 15
+blob_attach	store-blobs.hirsel	store	store	L15	Format 15
+blob_erase	store-blobs.hirsel	store	store	L15	Format 15
+blob_span	store-blobs.hirsel	store	store	L15	Format 15
+blob_read	store-blobs.hirsel	store	store	L15	Format 15
+blob_ref	store-blobs.hirsel	store	store	L15	Format 15
+blob_resolve	store-blobs.hirsel	store	store	L15	Format 15
+RestoreIntent	archive-restore-origin.hirsel	manifest	manifest	L15	Format 15
+PreviewHold	archive-review.hirsel	store	store	L15	Format 15
+PreviewError	archive-review.hirsel	store	store	L15	Format 15
+preview_admit	archive-review.hirsel	store	store	L15	Format 15
+preview_check	archive-review.hirsel	store	store	L15	Format 15
+preview_extend	archive-review.hirsel	store	store	L15	Format 15
+preview_release	archive-review.hirsel	store	store	L15	Format 15
+PreviewHoldRep	archive-format.hirsel	format	format	L15	Format 15
+Witness	store-witness.hirsel	store	store	L15	Format 15
+WitnessFrame	store-witness.hirsel	store	store	L15	Format 15
+SliceVerdict	store-witness.hirsel	store	store	L15	Format 15
+declare_witness	store-witness.hirsel	store	store	L15	Format 15
+capture_witness	store-witness.hirsel	store	store	L15	Format 15
+replay_witness	store-witness.hirsel	store	store	L15	Format 15
+prepare_reexecute_claim	store-reexec.hirsel	store	store	L15	Format 15
+replay_claim	store-reexec.hirsel	store	store	L15	Format 15
+claim_key_parts	store-reexec.hirsel	store	store	L15	Format 15

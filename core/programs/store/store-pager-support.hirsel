@@ -212,7 +212,16 @@ fn encode_stream_ops(mut payload: Bytes, ops: pages.DataRows, stream_count: u64,
     Ok(())
 }
 
+// A writer claim keeps every pack introduced since the selected MARK. A
+// fresh replay after a head change or stamp collision starts a fresh set.
+pub type ClaimPacks {
+    disk: manifest.PackDiskState,
+    generation: u64,
+    checkpoint: Option[Arc[pages.TieredReadInventory]]
+}
+
 pub type JournalReplay {
+    claim_packs: Option[ClaimPacks],
     state: pages.State,
     immutable: bool,
     names: Map[String, u32],
@@ -243,7 +252,7 @@ pub fn journal_replay(take state: pages.State, next_node: u64, limits: types.Lim
         Ok((take names, total))
     })?
     let tiered = ReplayTieredAccount(total: 0, exact: list.len(state.tips) == 1 && list.len(state.pins) == 0)
-    Ok(JournalReplay(state: take state, immutable: false, names: take names, record_bytes: total, next_node: next_node, tiered: tiered, forked: list.new(), superseded: list.new(), deferred_frees: list.new(), limits: limits))
+    Ok(JournalReplay(claim_packs: None, state: take state, immutable: false, names: take names, record_bytes: total, next_node: next_node, tiered: tiered, forked: list.new(), superseded: list.new(), deferred_frees: list.new(), limits: limits))
 }
 
 // The call multiplexer (§13.3a): the Db task's queue of served calls whose

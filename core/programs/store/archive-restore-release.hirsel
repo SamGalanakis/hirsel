@@ -71,7 +71,7 @@ pub fn published_restore(dir: Dir, token: RestoreToken, branch_id: u32, selected
         return Ok(None)
     }
     let (id, take m) = read_page_manifest_file(dir)?
-    let expected = manifest.RestoreOrigin(parent: store_key_to_rep(token.parent), binding_id: token.binding_id, branch: branch_id, version: selected_version, at, boundary: token.boundary, attempt, capture_attempt: token.capture_attempt)
+    let expected = manifest.RestoreOrigin(parent: store_key_to_rep(token.parent), binding_id: token.binding_id, branch: branch_id, version: selected_version, at, boundary: token.boundary, attempt, capture_attempt: token.capture_attempt, intent: Successor)
     if id == token.parent || !restore_same_origin(m, expected) {
         return Error(Foreign)
     }

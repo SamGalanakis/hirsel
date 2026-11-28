@@ -91,14 +91,14 @@ fn format12_manifest() -> Bytes {
     take raw
 }
 
-// §13.1 Format 14 MANIFEST with the in-prefix fields replaced by a zero
+// §13.1 current MANIFEST with the in-prefix fields replaced by a zero
 // binding_id. The frame checks use libxxhash, independent of the encoder.
-fn format14_manifest() -> Bytes {
+fn current_manifest_vector() -> Bytes {
     let words: Inline[u64, 76] =[
         0x0000003800010001,
-        0x327c4caf22dd8b88,
+        0x4033654e2bfb850a,
         0x45524f5453524948,
-        0x000000010000000e,
+        0x000000010000000f,
         0x0000000000000001,
         0x0000000000000002,
         0x0000000000000000,
@@ -428,7 +428,7 @@ fn format14_page_index() -> Bytes {
     take raw
 }
 
-fn format14_manifest_law() -> Result[(), Error] {
+fn current_manifest_vector_law() -> Result[(), Error] {
     let path = "MANIFEST"
     let id = StoreId(hi: 1, lo: 2)
     // A Format 12 MANIFEST is refused with Unsupported(12).
@@ -436,11 +436,17 @@ fn format14_manifest_law() -> Result[(), Error] {
         Error(Unsupported(12)) => (),
         _ => return Error(Foreign),
     }
-    let mut retired = format14_manifest()
+    let mut retired = current_manifest_vector()
     list.set_word_le(mut retired, 24, 13u32)
     list.set_word_le(mut retired, 8, 0x385c623e93bae484u64)
     match disk_read_page_manifest(path, retired) {
         Error(Unsupported(13)) => (),
+        _ => return Error(Foreign),
+    }
+    list.set_word_le(mut retired, 24, 14u32)
+    list.set_word_le(mut retired, 8, 0x327c4caf22dd8b88u64)
+    match disk_read_page_manifest(path, retired) {
+        Error(Unsupported(14)) => (),
         _ => return Error(Foreign),
     }
     let mut m = manifest.page_manifest_empty(limits_to_rep(default_limits()))
@@ -457,7 +463,7 @@ fn format14_manifest_law() -> Result[(), Error] {
     let roots: pages.LocatedRoots = clone(m.branches[0].roots)
     list.push(mut m.pins, manifest.LocatedPin(owner: ProjectorPin, name: "p", branch: 0, version: 9, roots: roots, watermark: 92))
     let raw = failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(id), m))?
-    if raw != format14_manifest() {
+    if raw != current_manifest_vector() {
         return Error(Foreign)
     }
     let (_, take parsed) = disk_read_page_manifest(path, raw)?
@@ -486,14 +492,14 @@ fn format14_manifest_law() -> Result[(), Error] {
     if bound_roundtrip.binding_id != 0x0123456789abcdefu64 {
         return Error(Foreign)
     }
-    let token = manifest.RestoreBoundary(source_kind: 0, base_ordinal: 8, base_digest: 71, unit: 12, epoch: 0, unit_digest: 72, frame_end: 300)
-    bound_manifest.origin = Some(manifest.RestoreOrigin(parent: types.StoreKey(hi: 3, lo: 4), binding_id: 0, branch: 2, version: 9, at: 100, boundary: token, attempt: [7; 16], capture_attempt: [19; 16]))
+    let token = format.RestoreBoundary(source_kind: 0, base_ordinal: 8, base_digest: 71, unit: 12, epoch: 0, unit_digest: 72, frame_end: 300)
+    bound_manifest.origin = Some(manifest.RestoreOrigin(parent: types.StoreKey(hi: 3, lo: 4), binding_id: 0, branch: 2, version: 9, at: 100, boundary: token, attempt: [7; 16], capture_attempt: [19; 16], intent: Successor))
     let child_raw = failure_result_from_rep(manifest.disk_page_manifest_bytes(store_key_to_rep(id), bound_manifest))?
     let (_, take child) = disk_read_page_manifest(path, child_raw)?
     let Some(origin) = child.origin else {
         fail("a restored MANIFEST lost RESTORE_ORIGIN")
     }
-    if list.len(child_raw) != list.len(bound_raw) + 141 || origin.parent != types.StoreKey(hi: 3, lo: 4) || origin.binding_id != 0 || origin.branch != 2 || origin.version != 9 || origin.at != 100 || origin.boundary != token || origin.attempt !=[7u8; 16] || origin.capture_attempt !=[19u8; 16] {
+    if list.len(child_raw) != list.len(bound_raw) + 166 || origin.parent != types.StoreKey(hi: 3, lo: 4) || origin.binding_id != 0 || origin.branch != 2 || origin.version != 9 || origin.at != 100 || origin.boundary != token || origin.attempt !=[7u8; 16] || origin.capture_attempt !=[19u8; 16] {
         fail("RESTORE_ORIGIN changed its parent, selected transition or attempt")
     }
     let mut overflow = failure_result_from_rep(types.copied(payload))?
@@ -505,8 +511,8 @@ fn format14_manifest_law() -> Result[(), Error] {
 }
 
 fn format14_pack_row_law() -> Result[(), Error] {
-    let expected: Inline[u8, 29] =[4, 2, 0, 0, 0, 82, 4, 0, 0, 0, 0, 0, 0, 58, 6, 0, 0, 0, 0, 0, 0, 220, 5, 0, 0, 0, 0, 0, 0]
-    let mut raw: Bytes = list.with_capacity(29)
+    let expected: Inline[u8, 30] =[4, 2, 0, 0, 0, 82, 4, 0, 0, 0, 0, 0, 0, 58, 6, 0, 0, 0, 0, 0, 0, 220, 5, 0, 0, 0, 0, 0, 0, 0]
+    let mut raw: Bytes = list.with_capacity(30)
     for byte in expected {
         list.push(mut raw, byte)
     }
@@ -587,7 +593,7 @@ fn format14_index_law() -> Result[(), Error] {
 
 @test
 fn disk_test_format14() -> Result[(), Error] {
-    format14_manifest_law()?
+    current_manifest_vector_law()?
     format14_pack_row_law()?
     format14_index_law()
 }

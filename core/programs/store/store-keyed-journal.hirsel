@@ -49,15 +49,17 @@ pub fn encode_keyed_edits(mut raw: Bytes, edits: List[KeyedEdit]) -> Result[(), 
         list.push(mut raw, edit.tree)
         match edit.value {
             Some(value) => {
-                let kind = match edit.call {
-                    Some(_) => 3u8,
-                    None => 1u8
-                }
-                list.push(mut raw, kind)
-                blob(mut raw, edit.key)?
-                blob(mut raw, value)?
                 if let Some(call) = edit.call {
+                    list.push(mut raw, 3u8)
+                    blob(mut raw, value)?
+                    // In Format 15 the claim key opens the keyed CALL. It
+                    // also identifies the claims row receiving this reply.
+                    blob(mut raw, edit.key)?
                     encode_call_fields(mut raw, call.record.entry, call.record.args, call.record.revision, call.record.code, call.settlement)?
+                } else {
+                    list.push(mut raw, 1u8)
+                    blob(mut raw, edit.key)?
+                    blob(mut raw, value)?
                 }
             },
             None => {

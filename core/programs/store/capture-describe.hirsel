@@ -45,7 +45,7 @@ pub fn describe_adjust(path: String, at: u64, value: u64, delta: i64) -> Result[
     Ok(total)
 }
 
-fn describe_delta(mut folded: DescribeFold, path: String, at: u64, raw: Bytes, op: CaptureOp) -> Result[(), types.Failure] {
+fn describe_delta(mut folded: DescribeFold, path: String, at: u64, raw: Bytes, op: format.CaptureOp) -> Result[(), types.Failure] {
     let (id, is_put, key_len, value_len, prior, observed_next, floor, dropped) = match op {
         CaptureTrim(collection_id, boundary, amount) => (collection_id, false, 0u64, 0u64, 0u64, 0u64, boundary, amount),
         CapturePut(key_at, width, value, before) => {
@@ -59,6 +59,7 @@ fn describe_delta(mut folded: DescribeFold, path: String, at: u64, raw: Bytes, o
             }
             (collection_id, true, width, value, before, next_seq, 0u64, 0u64)
         },
+        CaptureDirect(key_at, width, before, place) => (list.word_be(raw, key_at), true, width, place.len, before, 0u64, 0u64, 0u64),
         CaptureDelete(key_at, width, before) => {
             let collection_id: u32 = list.word_be(raw, key_at)
             (collection_id, false, width, 0u64, before, 0u64, 0u64, 0u64)
@@ -105,8 +106,8 @@ pub fn describe_commit(mut folded: DescribeFold, path: String, at: u64, _kind: u
     if int.checked_add(folded.head, 1) != Some(head) {
         return Error(format.disk_fault(path, at, Gap(head)))
     }
-    let mut ops = capture_data_ops(path, raw)?
-    while let Some(op) = capture_next_op(path, raw, folded.value_limit, mut ops)? {
+    let mut ops = format.capture_data_ops(path, raw)?
+    while let Some(op) = format.capture_next_op(path, raw, folded.value_limit, mut ops)? {
         describe_delta(mut folded, path, at + 16 + ops.at, raw, op)?
     }
     folded.head = head

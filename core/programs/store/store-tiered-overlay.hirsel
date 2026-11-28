@@ -8,6 +8,7 @@ pub fn replay_overlay_at(overlay: Arc[pages.ReplayOverlay], logical: Bytes) -> O
 
 fn replay_value_width(stored: pages.ReplayValue) -> u64 {
     match stored {
+        ReplayDirect(_) => format.DIRECT_BLOB_BYTES,
         ReplayPut(bytes_value) => list.len(bytes_value),
         ReplayAbsent => 0,
     }
@@ -15,6 +16,7 @@ fn replay_value_width(stored: pages.ReplayValue) -> u64 {
 
 fn replay_value_prior(stored: pages.ReplayValue) -> u32 {
     match stored {
+        ReplayDirect(place) => int.truncate(1 + place.len),
         ReplayPut(bytes_value) => int.truncate(1 + list.len(bytes_value)),
         ReplayAbsent => 0,
     }
@@ -59,7 +61,7 @@ pub fn replay_overlay_count(overlay: Arc[pages.ReplayOverlay], low: Bytes, high:
         let mut added = 0u64
         let mut removed = 0u64
         while let Some((_, row)) = std.omap.next(mut walked) {
-            if let ReplayPut(_) = row.now {
+            if replay_value_prior(row.now) != 0 {
                 added += 1
             }
             if row.base != 0 {

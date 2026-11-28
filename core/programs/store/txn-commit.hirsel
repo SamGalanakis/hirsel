@@ -93,6 +93,8 @@ fn materialize_row(mut tree: pages.PageTree, op: format.DataOp, memory_only: boo
         let kind = pages.collection_kind(tree, list.slice(op.key, 0, 4))
         if kind == Some(CellCollection) {
             return match op.value {
+                Some(PendingChunk(_)) => fail("store: chunk in Cell"),
+                Some(SealedChunk(_)) => fail("store: chunk in Cell"),
                 Some(PageValue(raw)) => apply_cell(mut tree, op.key, Some(view raw), None, first, mut draw),
                 Some(BlobBody(raw)) => apply_cell(mut tree, op.key, Some(view raw), Some(view raw), first, mut draw),
                 None => apply_cell(mut tree, op.key, None, None, first, mut draw),
@@ -100,6 +102,8 @@ fn materialize_row(mut tree: pages.PageTree, op: format.DataOp, memory_only: boo
         }
         if kind == Some(LogCollection) {
             return match op.value {
+                Some(PendingChunk(_)) => fail("store: chunk in Log"),
+                Some(SealedChunk(_)) => fail("store: chunk in Log"),
                 Some(PageValue(raw)) => journal.apply_log_append(mut tree, op.key, raw, None, first, mut draw),
                 Some(BlobBody(raw)) => journal.apply_log_append(mut tree, op.key, raw, Some(view raw), first, mut draw),
                 None => fail("store: Log append has no value"),
@@ -107,6 +111,8 @@ fn materialize_row(mut tree: pages.PageTree, op: format.DataOp, memory_only: boo
         }
     }
     match op.value {
+        Some(PendingChunk(raw)) => pages.put_shared_page_row(mut tree, op.key, raw, first, mut draw),
+        Some(SealedChunk(chunk)) => pages.put_direct_page_row(mut tree, op.key, chunk.place, Some(arc.share(chunk.stored)), first, mut draw),
         Some(PageValue(raw)) => pages.put_page_row(mut tree, op.key, raw, first, mut draw),
         Some(BlobBody(raw)) => pages.put_shared_page_row(mut tree, op.key, raw, first, mut draw),
         None => {
@@ -127,6 +133,8 @@ fn materialize_collection_batch(mut tree: pages.PageTree, operations: pages.Data
 fn visit_materialized_edit(operations: pages.DataRows, order: format.DataOrder, slot: u64, visit: scoped fn(std.page.SourceEdit) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
     let op = pager.ordered_row(operations, order, slot)
     let value: Option[(View[Bytes], Option[View[Arc[Bytes]]])] = match view op.value {
+        Some(PendingChunk(raw)) => Some((view raw, Some(raw))),
+        Some(SealedChunk(chunk)) => Some((view chunk.stored, Some(view chunk.stored))),
         Some(PageValue(raw)) => Some((raw, None)),
         Some(BlobBody(raw)) => Some((view raw, Some(raw))),
         None => None,
@@ -333,7 +341,7 @@ pub fn prepare_metered_pages[R, A, Outcome, Failure](base: pages.Roots, issued: 
                 Some(_) => true,
                 None => false,
             }
-            if !memory_only {
+            if !memory_only && !pages.draft_has_chunks(prepared.ops) {
                 prepared.inline_plan = plan_inline_draft(prepared, base, mut draw)?
             }
             if let None = prepared.inline_plan {

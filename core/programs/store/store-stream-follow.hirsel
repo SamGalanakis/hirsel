@@ -1,6 +1,6 @@
 // Applies any remaining slices of a sealed `(sid, inc)` tail in `[from_seq, cutoff]`
 // that landed after step 1 stopped and before the claim's cutoff (Case B).
-fn stream_follow_apply_sealed_range(mut client: std.object.Client, mut buffers: host_stream.TailBuffers, root: String, place_prefix: String, head_witness: Bytes, authority_kind: u8, st: format.SealedTail, from_seq: u64, store: StoreId, epoch: u64, mut replay: pager.JournalReplay, ceiling: u64, deadline: u64) -> Result[bool, Error] waits {
+fn stream_follow_apply_sealed_range(domain: core.Cell[u64], mut client: std.object.Client, mut buffers: host_stream.TailBuffers, root: String, place_prefix: String, head_witness: Bytes, authority_kind: u8, st: format.SealedTail, from_seq: u64, store: StoreId, epoch: u64, mut replay: pager.JournalReplay, ceiling: u64, deadline: u64) -> Result[bool, Error] waits {
     let dir = host_stream.stream_key(root, host_stream.stream_dir(host_stream_id_to_rep(host_stream_id_from_rep(st.tail.sid))))
     let mut seal_lane = failure_result_from_rep(host_stream.stream_lane(host_stream_id_to_rep(host_stream_id_from_rep(st.tail.sid)), authority_kind, 2, store_key_to_rep(store)))?
     seal_lane.dir = string.from(dir)
@@ -12,7 +12,7 @@ fn stream_follow_apply_sealed_range(mut client: std.object.Client, mut buffers: 
             0
         }
         let ok = host_stream.stream_at_root(mut client, scoped fn(mut c: std.object.Client) -> Result[bool, Error] waits {
-            match stream_tail_batch(mut c, mut seal_lane, mut buffers, place_prefix, head_witness, host_stream_id_from_rep(st.tail.sid), st.tail.inc, seq, store, epoch, skip, 18446744073709551615u64, true, false, mut replay, ceiling, deadline)? {
+            match stream_tail_batch(domain, mut c, mut seal_lane, mut buffers, place_prefix, head_witness, host_stream_id_from_rep(st.tail.sid), st.tail.inc, seq, store, epoch, skip, 18446744073709551615u64, true, false, mut replay, ceiling, deadline)? {
                 TailRead(_) => Ok(true),
                 TailHeadMoved => Ok(false),
                 _ => Error(failure_from_rep(format.disk_fault("batch", 0, Absent))),
@@ -70,8 +70,8 @@ fn stream_follow_capture(mut source: history.ObjectPackRead, previous: Option[Ar
     let mut scratch = disk_allocation(fn() -> Result[Bytes, Error] {
         Ok(list.with_capacity(history.HISTORY_HEAD_LIMIT))
     })?
-    let mut cur_head: history.HistoryHead = history.HistoryHead(authority_kind: source.authority_kind, store: types.StoreKey(hi: 0, lo: 0), pair: history.HistoryPair(epoch: 0, holder: types.StoreKey(hi: 0, lo: 0)), activation: 0, entry: pages.HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0u64), checkpoint: pages.HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0u64), floor: 0, binding:[0u8; 32], origin: None)
-    let mut cur_tag = std.object.ETag(octets:[0u8; 64], len: 0)
+    let mut cur_head: history.HistoryHead = history.HistoryHead(authority_kind: source.authority_kind, store: types.StoreKey(hi: 0, lo: 0), pair: history.HistoryPair(epoch: 0, holder: types.StoreKey(hi: 0, lo: 0)), activation: 0, entry: pages.HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0u64), checkpoint: pages.HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0u64), floor: 0, binding: [0u8; 32], origin: None)
+    let mut cur_tag = std.object.ETag(octets: [0u8; 64], len: 0)
     let mut cur_attach: Option[format.Attach] = None
     let mut cur_bytes: Bytes = list.new()
     let mut scan_from = 0u64
@@ -207,23 +207,29 @@ fn stream_follow_capture(mut source: history.ObjectPackRead, previous: Option[Ar
         // Step 4: decide by the four cases of §12.11.9.
         if scratch == cur_bytes {
             let clean = lane.reg.inc == tail.inc && !lane.reg.collecting && !host_stream.stream_follow_reg_has_row(lane.reg, store_key_to_rep(store_key_from_rep(store)), epoch)
-            if clean {
-                for item in slices {
-                    stream_tail_apply(item.key, item.slice, item.row, item.batch_seq, store_key_from_rep(store), epoch, item.skip, mut replay, avail)?
+            if !clean {
+                // Case D: the hold or incarnation prevents publication.
+                if require_fresh {
+                    return Error(Behind(Position(store: store_key_from_rep(store), branch: 0, version: replay.state.tips[0].head)))
                 }
+                if advanced_anything {
+                    return stream_follow_wrap_capture(cur_head, cur_tag, take cur_attach, take cur_bytes, scan_from, take replay)
+                }
+                return Ok(None)
+            }
+            let mut current = true
+            for item in slices {
+                current = stream_tail_apply(source.direct_floor, mut source.client, "", cur_bytes, source.deadline, item.key, item.slice, item.row, item.batch_seq, store_key_from_rep(store), epoch, item.skip, mut replay, avail)?
+                if !current {
+                    break
+                }
+            }
+            if current {
                 if list.len(slices) == 0 && !advanced_anything && stop_seq == scan_from {
                     return Ok(None)
                 }
                 return stream_follow_wrap_capture(cur_head, cur_tag, take cur_attach, take cur_bytes, stop_seq, take replay)
             }
-            // Case D: hold present or inc changed with head still Hd -> publish nothing new.
-            if require_fresh {
-                return Error(Behind(Position(store: store_key_from_rep(store), branch: 0, version: replay.state.tips[0].head)))
-            }
-            if advanced_anything {
-                return stream_follow_wrap_capture(cur_head, cur_tag, take cur_attach, take cur_bytes, scan_from, take replay)
-            }
-            return Ok(None)
         }
         // Head changed: check Case B (epoch > e with sealed containing (S, inc, ..., cutoff k)).
         let after_head = after_cap.head
@@ -240,14 +246,17 @@ fn stream_follow_capture(mut source: history.ObjectPackRead, previous: Option[Ar
             let st_j = na.sealed[j]
             let cutoff = st_j.cutoff
             let after_bytes = failure_result_from_rep(types.copied(scratch))?
+            let mut case_b_ok = true
             for item in slices {
                 if item.batch_seq <= cutoff {
-                    stream_tail_apply(item.key, item.slice, item.row, item.batch_seq, store_key_from_rep(store), epoch, item.skip, mut replay, avail)?
+                    case_b_ok = stream_tail_apply(source.direct_floor, mut source.client, "", after_bytes, source.deadline, item.key, item.slice, item.row, item.batch_seq, store_key_from_rep(store), epoch, item.skip, mut replay, avail)?
+                    if !case_b_ok {
+                        break
+                    }
                 }
             }
-            let mut case_b_ok = true
-            if stop_seq <= cutoff {
-                case_b_ok = stream_follow_apply_sealed_range(mut source.client, mut buffers, root, place_prefix, after_bytes, source.authority_kind, st_j, stop_seq, store_key_from_rep(store), epoch, mut replay, avail, source.deadline)?
+            if case_b_ok && stop_seq <= cutoff {
+                case_b_ok = stream_follow_apply_sealed_range(source.direct_floor, mut source.client, mut buffers, root, place_prefix, after_bytes, source.authority_kind, st_j, stop_seq, store_key_from_rep(store), epoch, mut replay, avail, source.deadline)?
             }
             if case_b_ok {
                 let chain = failure_result_from_rep(history.history_suffix(mut source.client, after_head, cur_head.entry, source.deadline))?
@@ -263,10 +272,10 @@ fn stream_follow_capture(mut source: history.ObjectPackRead, previous: Option[Ar
                         let lo = done_seq - base_seq
                         let hi = st.at - base_seq
                         let part = list.slice(chain, lo, hi)
-                        history_apply_suffix(mut source.client, after_head, done_seq, part, mut replay, avail, source.deadline)?
+                        history_apply_suffix(source.direct_floor, mut source.client, after_head, done_seq, part, mut replay, avail, source.deadline)?
                         done_seq = st.at
                     }
-                    if !stream_apply_sealed_tail(mut source.client, mut buffers, root, place_prefix, after_bytes, source.authority_kind, st, store_key_from_rep(store), mut replay, avail, source.deadline)? {
+                    if !stream_apply_sealed_tail(source.direct_floor, mut source.client, mut buffers, root, place_prefix, after_bytes, source.authority_kind, st, store_key_from_rep(store), mut replay, avail, source.deadline)? {
                         case_b_ok = false
                         break
                     }
@@ -276,7 +285,7 @@ fn stream_follow_capture(mut source: history.ObjectPackRead, previous: Option[Ar
                     let lo = done_seq - base_seq
                     let hi = after_head.entry.seq - base_seq
                     let rest = list.slice(chain, lo, hi)
-                    history_apply_suffix(mut source.client, after_head, done_seq, rest, mut replay, avail, source.deadline)?
+                    history_apply_suffix(source.direct_floor, mut source.client, after_head, done_seq, rest, mut replay, avail, source.deadline)?
                 }
             }
             if case_b_ok {

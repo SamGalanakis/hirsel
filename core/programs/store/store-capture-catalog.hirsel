@@ -136,7 +136,7 @@ fn capture_catalog_fields[T, S](mut target: T, mut source: S, path: String, offs
     let id: u32 = int.truncate(number(mut target, mut source, capture_catalog_advance(path, offset, mut pos, 4)?, 4)?)
     let owner: u32 = int.truncate(number(mut target, mut source, capture_catalog_advance(path, offset, mut pos, 4)?, 4)?)
     let epoch = number(mut target, mut source, capture_catalog_advance(path, offset, mut pos, 8)?, 8)?
-    if kind < 1 || kind > 4 || id == 0 || epoch == 0 || (kind == 2 && owner == 0) {
+    if kind < 1 || kind > 5 || id == 0 || epoch == 0 || (kind == 2 && owner == 0) {
         return Error(format.disk_fault(path, offset, Malformed))
     }
     let key_width = number(mut target, mut source, capture_catalog_advance(path, offset, mut pos, 4)?, 4)?

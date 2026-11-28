@@ -1,0 +1,278 @@
+// One immutable archive incarnation and hold for the lifetime of a child open.
+// The Opener grants range reads only. There is no parent client on a child writer.
+pub opaque type PreviewRead: send {
+    reader: std.object.Opener,
+    parent: types.StoreKey,
+    incarnation: Inline[u8, 16],
+    hold: format.PreviewHoldRep,
+    base: format.ArchiveBaseRowRep,
+    packs: Arc[Map[u64, format.ArchivePackRefRep]],
+    data: Arc[Map[u64, pages.PagePack]],
+    direct: Arc[Map[u64, format.DirectBlob]],
+    frontier: (u64, u64),
+    op_ms: u64
+}
+
+pub fn share_preview(source: PreviewRead) -> PreviewRead {
+    PreviewRead(reader: std.object.share_opener(source.reader), parent: source.parent, incarnation: source.incarnation, hold: source.hold, base: format.archive_base_summary(source.base), packs: arc.share(source.packs), data: arc.share(source.data), direct: arc.share(source.direct), frontier: source.frontier, op_ms: source.op_ms)
+}
+
+pub fn held_preview_head(reader: std.object.Opener, parent: types.StoreKey, inc: Inline[u8, 16], hold: format.PreviewHoldRep, due: u64) -> Result[format.ArchiveHeadRep, types.Failure] waits {
+    let key = format.archive_head_key(parent)
+    let request = std.object.GetRange(key: clone(key), lo: 0, hi: 18446744073709551615u64, buffer: manifest.disk_read_buffer(format.ARCHIVE_HEAD_LIMIT)?, deadline: due)
+    let (take result, take raw) = std.object.read_range(reader, take request)
+    match take result {
+        Ok(meta) if meta.size == list.len(raw) && meta.etag.len != 0 => (),
+        Ok(_) => return Error(Lost),
+        Error(NotFound) => return Error(PreviewExpired),
+        Error(take e) => return Error(Remote(take e)),
+    }
+    let head = format.decode_archive_head(key, parent, raw)?
+    let mut listed = false
+    if head.incarnation == inc {
+        for row in head.holds {
+            if row.child == hold.child && row.stamp == hold.stamp {
+                if row.binding_id != hold.binding_id || row.boundary != hold.boundary || head.binding_id != hold.binding_id || head.source_kind != hold.boundary.source_kind {
+                    return Error(Lost)
+                }
+                listed = true
+                break
+            }
+        }
+    }
+    if listed {
+        Ok(take head)
+    } else {
+        Error(PreviewExpired)
+    }
+}
+
+fn preview_range(reader: std.object.Opener, parent: types.StoreKey, inc: Inline[u8, 16], hold: format.PreviewHoldRep, path: String, size: u64, lo: u64, hi: u64, due: u64) -> Result[Bytes, types.Failure] waits {
+    if hi > size || lo >= hi {
+        return Error(format.disk_fault(path, lo, Malformed))
+    }
+    let request = std.object.GetRange(key: clone(path), lo, hi, buffer: manifest.disk_read_buffer(hi - lo)?, deadline: due)
+    let (take got, take raw) = std.object.read_range(reader, take request)
+    match take got {
+        Ok(meta) if meta.size == size && list.len(raw) == hi - lo => Ok(take raw),
+        Ok(_) => Error(format.disk_fault(path, lo, Truncated)),
+        Error(NotFound) => {
+            let _ = held_preview_head(reader, parent, inc, hold, due)?
+            Error(Lost)
+        },
+        Error(take problem) => Error(Remote(take problem)),
+    }
+}
+
+pub fn preview_open(reader: std.object.Opener, child: types.StoreKey, origin: manifest.RestoreOrigin, op_ms: u64) -> Result[PreviewRead, types.Failure] waits {
+    let Preview(inc, stamp) = origin.intent else {
+        return Error(Foreign)
+    }
+    let parent = origin.parent
+    let b = origin.boundary
+    let hold = format.PreviewHoldRep(child, binding_id: origin.binding_id, boundary: b, until_ms: 0, stamp)
+    let due = std.object.opener_deadline_ms(reader, op_ms)
+    let head = held_preview_head(reader, parent, inc, hold, due)?
+    let Some(floor) = view head.floor_base else {
+        return Error(Lost)
+    }
+    let mut cursor = head.index_tail
+    let mut packs: Map[u64, format.ArchivePackRefRep] = map.new()
+    while let Some(ref) = cursor {
+        if ref.ordinal < floor.frontier.first_index_ordinal || ref.ordinal == 0 || ref.len < 88 || ref.len > format.ARCHIVE_INDEX_LIMIT {
+            return Error(format.disk_fault("archive-index", 0, Order))
+        }
+        let key = format.archive_key(parent, inc, format.archive_index_rel(ref.ordinal, ref.digest))
+        let raw = preview_range(reader, parent, inc, hold, key, ref.len, 0, ref.len, due)?
+        let page = format.decode_archive_index(key, parent, ref, raw)?
+        if raw[29u64] != b.source_kind {
+            return Error(format.disk_fault(key, 29, Header))
+        }
+        for row in page.bases {
+            if row.base_ordinal != b.base_ordinal {
+                continue
+            }
+            if row.digest != b.base_digest {
+                return Error(format.disk_fault(key, 72, Checksum))
+            }
+            types.capacity(map.try_reserve(mut packs, list.len(row.packs)))?
+            for p in row.packs {
+                if map.contains(packs, p.seq) {
+                    return Error(format.disk_fault(key, 72, Order))
+                }
+                map.insert(mut packs, p.seq, p)
+            }
+            if !row.pack_continuation {
+                if row.frontier.first_index_ordinal != ref.ordinal {
+                    return Error(format.disk_fault(key, 72, Order))
+                }
+                return Ok(PreviewRead(reader: std.object.share_opener(reader), parent, incarnation: inc, hold, base: format.archive_base_summary(row), packs: arc.new(take packs), data: arc.new(map.new()), direct: arc.new(map.new()), frontier: (0, 0), op_ms))
+            }
+        }
+        if let Some(prev) = page.prev {
+            if prev.ordinal != ref.ordinal - 1 {
+                return Error(format.disk_fault(key, 72, Order))
+            }
+        }
+        cursor = page.prev
+    }
+    Error(Lost)
+}
+
+pub fn preview_pack_ref(source: PreviewRead, seq: u64) -> Result[pages.ForeignPack, types.Failure] {
+    let Some(p) = map.get(source.packs, seq) else {
+        return Error(format.disk_fault("archive-index", seq, Absent))
+    }
+    Ok(pages.ForeignPack(parent: source.parent, incarnation: source.incarnation, epoch: p.epoch, len: p.len, digest: p.digest))
+}
+
+pub fn preview_pack_key(source: PreviewRead, seq: u64, row: pages.ForeignPack) -> Result[String, types.Failure] {
+    if row != preview_pack_ref(source, seq)? {
+        return Error(format.disk_fault("pack list", seq, Malformed))
+    }
+    let rel = if source.hold.boundary.source_kind == format.ARCHIVE_SOURCE_LOG {
+        if row.epoch != 0 {
+            return Error(format.disk_fault("pack list", seq, Malformed))
+        }
+        format.archive_log_pack_rel(seq, row.digest)
+    } else {
+        let mut name = string.with_capacity(60)
+        history_fill_key(mut name, "p-", pages.HistoryRef(seq, epoch: row.epoch, len: row.len, digest: row.digest))
+        take name
+    }
+    Ok(format.archive_key(row.parent, row.incarnation, rel))
+}
+
+pub fn preview_pack_range(source: PreviewRead, seq: u64, row: pages.ForeignPack, lo: u64, hi: u64, deadline: u64) -> Result[Bytes, types.Failure] waits {
+    let key = preview_pack_key(source, seq, row)?
+    let due = if deadline == 0 {
+        std.object.opener_deadline_ms(source.reader, source.op_ms)
+    } else {
+        deadline
+    }
+    let header = preview_range(source.reader, row.parent, row.incarnation, source.hold, key, row.len, 0, 72, due)?
+    let _ = if source.hold.boundary.source_kind == format.ARCHIVE_SOURCE_LOG {
+        manifest.disk_read_header(key, header, 3, Some(seq), Some(row.parent))?.context
+    } else {
+        manifest.history_object_context(key, row.parent, 3, pages.HistoryRef(seq, epoch: row.epoch, len: row.len, digest: row.digest), header)?
+    }
+    let raw = preview_range(source.reader, row.parent, row.incarnation, source.hold, key, row.len, lo, hi, due)?
+    if lo == 0 && hi == row.len && std.check.xxh3(raw, 0, row.len) != row.digest {
+        return Error(format.disk_fault(key, 0, Checksum))
+    }
+    Ok(take raw)
+}
+
+pub fn require_preview(source: Option[View[PreviewRead]], child: types.StoreKey, origin: Option[manifest.RestoreOrigin]) -> Result[(), types.Failure] {
+    if let Some(o) = origin {
+        if let Preview(inc, stamp) = o.intent {
+            let Some(s) = source else {
+                return Error(Missing("preview archive"))
+            }
+            if s.hold.child != child || s.parent != o.parent || s.incarnation != inc || s.hold.stamp != stamp || s.hold.binding_id != o.binding_id || s.hold.boundary != o.boundary {
+                return Error(Foreign)
+            }
+            return Ok(())
+        }
+    }
+    if let Some(_) = source {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+pub fn preview_memory_pack(source: PreviewRead, seq: u64, pack: pages.PagePack, next_stamp: u64) -> Result[manifest.LoadedPack, types.Failure] waits {
+    let Some(row) = pack.foreign else {
+        return Error(Foreign)
+    }
+    let key = preview_pack_key(source, seq, row)?
+    let max_frame = if pack.class == 0 {
+        manifest.PAGE_LIMIT
+    } else {
+        manifest.BLOB_LIMIT
+    }
+    let count: u64 = int.widen(pack.frames)
+    if (pack.class > 1 && pack.class != 4) || row.len > 72 + count * (16 + max_frame) + manifest.UNKNOWN_ROOM {
+        return Error(format.disk_fault(key, 0, Malformed))
+    }
+    let raw = preview_pack_range(source, seq, row, 0, row.len, 0)?
+    let ctx = format.DiskContext(store: row.parent, role: 3, seq)
+    let payloads = manifest.index_pack_frames(key, ctx, pack, next_stamp, raw)?
+    Ok(manifest.LoadedPack(class: pack.class, payloads: take payloads, raw: take raw))
+}
+
+pub fn preview_base(source: PreviewRead) -> View[format.ArchiveBaseRowRep] in source {
+    view source.base
+}
+
+pub fn preview_recheck(source: PreviewRead) -> Result[(), types.Failure] waits {
+    let _ = held_preview_head(source.reader, source.parent, source.incarnation, source.hold, std.object.opener_deadline_ms(source.reader, source.op_ms))?
+    Ok(())
+}
+
+pub fn preview_data_inventory(mut source: PreviewRead, take data: Map[u64, pages.PagePack], refs: List[Arc[format.DirectBlob]], next_pack: u64, next_stamp: u64) -> Result[(), types.Failure] {
+    let mut stamps: Map[u64, format.DirectBlob] = map.new()
+    let mut rows = take data
+    let mut first = (next_pack, next_stamp)
+    if list.len(refs) != 0 {
+        let mut packs: Map[u64, format.ArchivePackRefRep] = clone(source.packs)
+        let blank = manifest.genesis_pack_disk()
+        let introduced = manifest.candidate_direct_packs(blank, refs)?
+        for ref in refs {
+            if ref.stamp < next_stamp || ref.pack < next_pack || map.contains(stamps, ref.stamp) || (ref.epoch == 0) != (source.hold.boundary.source_kind == format.ARCHIVE_SOURCE_LOG) {
+                return Error(format.disk_fault("archive journal", ref.offset, Order))
+            }
+            first = (order.max(first.0, catalog.stamp_after(ref.pack)?), order.max(first.1, catalog.stamp_after(ref.stamp)?))
+            types.capacity(map.try_reserve(mut stamps, 1))?
+            map.insert(mut stamps, ref.stamp, clone(ref))
+        }
+        let mut all = std.omap.range(introduced.rows.values, Unbounded, Unbounded)
+        while let Some((seq, row)) = std.omap.next(mut all) {
+            if map.contains(packs, seq) || map.contains(rows, seq) {
+                return Error(format.disk_fault("archive journal", seq, Order))
+            }
+            types.capacity(map.try_reserve(mut packs, 1))?
+            types.capacity(map.try_reserve(mut rows, 1))?
+            map.insert(mut packs, seq, format.ArchivePackRefRep(seq, epoch: row.epoch, len: row.pack.inventory.payload_bytes, digest: row.digest))
+            map.insert(mut rows, seq, row.pack.inventory)
+        }
+        source.packs = arc.new(take packs)
+    }
+    source.frontier = first
+    source.direct = arc.new(take stamps)
+    source.data = arc.new(take rows)
+    Ok(())
+}
+
+pub fn preview_frontier(source: PreviewRead) -> (u64, u64) {
+    source.frontier
+}
+
+pub fn preview_introduction(source: PreviewRead, p: format.DirectBlob) -> Result[Option[pages.ForeignPack], types.Failure] {
+    let Some(original) = map.get(source.direct, p.stamp) else {
+        return Ok(None)
+    }
+    if original != p {
+        return Error(format.disk_fault("archive journal", p.offset, Malformed))
+    }
+    Ok(Some(preview_pack_ref(source, p.pack)?))
+}
+
+pub fn preview_check_pack(source: PreviewRead, seq: u64, pack: pages.PagePack) -> Result[(), types.Failure] {
+    let Some(row) = pack.foreign else {
+        return Error(Foreign)
+    }
+    let _ = preview_pack_key(source, seq, row)?
+    let Some(original) = map.get(source.data, seq) else {
+        return Error(format.disk_fault("pack list", seq, Absent))
+    }
+    if original.class != pack.class || original.frames != pack.frames || original.payload_bytes != pack.payload_bytes || original.index != pack.index {
+        return Error(format.disk_fault("pack list", seq, Malformed))
+    }
+    Ok(())
+}
+
+pub fn preview_scrub_input(source: PreviewRead, seq: u64, row: pages.ForeignPack) -> Result[(String, format.JournalInput), types.Failure] {
+    let path = preview_pack_key(source, seq, row)?
+    Ok((take path, format.object_scrub_input(std.object.share_opener(source.reader), source.op_ms, row.len, row.digest, manifest.disk_read_buffer(65536)?)))
+}

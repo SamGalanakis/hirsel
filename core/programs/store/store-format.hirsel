@@ -43,12 +43,14 @@ pub type DataOp: shareable + send {
 
 // Inline pages copy the bytes into the page image. Overflow pages share the
 // body with the staged operation.
-pub type StagedValue: shareable + send = PageValue(Bytes) | BlobBody(Arc[Bytes])
+pub type StagedValue: shareable + send = PageValue(Bytes) | BlobBody(Arc[Bytes]) | PendingChunk(Arc[Bytes]) | SealedChunk(Arc[DirectWrite])
 
 pub fn staged_bytes(value: StagedValue) -> View[Bytes] in value {
     match value {
         PageValue(raw) => view raw,
         BlobBody(raw) => view raw,
+        PendingChunk(raw) => view raw,
+        SealedChunk(chunk) => view chunk.stored,
     }
 }
 
@@ -63,6 +65,8 @@ pub fn data_op_size(operation: DataOp, stream: bool) -> u64 {
     }) + list.len(operation.key)
     match operation.value {
         None => size,
+        Some(PendingChunk(_)) => size + DIRECT_BLOB_BYTES,
+        Some(SealedChunk(_)) => size + DIRECT_BLOB_BYTES,
         Some(raw) => size + 4 + list.len(staged_bytes(raw)),
     }
 }
@@ -92,6 +96,9 @@ pub fn blob(mut out: Bytes, b: Bytes) -> Result[(), Capacity] {
 }
 
 pub fn encode_data_op(mut payload: Bytes, key: Bytes, value: Option[StagedValue], prior: Option[u32]) -> Result[(), Capacity] {
+    if let Some(SealedChunk(chunk)) = value {
+        return encode_direct_op(mut payload, key, option.unwrap(prior), chunk.place)
+    }
     let tag: u64 = match value {
         Some(_) => 1,
         None => 2
@@ -143,7 +150,7 @@ pub fn read_le(raw: Bytes, at: u64, width: u64) -> u64 {
 }
 
 // Store disk format. STORE-SPEC §2.3 and §11.10.
-pub const DISK_FORMAT: u64 = 14
+pub const DISK_FORMAT: u64 = 15
 
 pub type DiskContext {
     store: types.StoreKey,
@@ -334,6 +341,7 @@ pub type JournalTrim: shareable + send {
 pub type JournalOp: shareable + send {
     key: Bytes,
     value: Option[Bytes],
+    direct: Option[Arc[DirectBlob]],
     prior: u32,
     trim: Option[JournalTrim]
 }
@@ -371,6 +379,7 @@ pub fn journal_ops(file: String, raw: Bytes, stream: bool, mut at: u64, mut call
         9u64
     })?
     let mut ops: List[JournalOp] = list.new()
+    let mut identities: Option[DirectIdentities] = None
     let value_limit = if stream {
         1048576u64
     } else {
@@ -387,10 +396,10 @@ pub fn journal_ops(file: String, raw: Bytes, stream: bool, mut at: u64, mut call
             let floor = word_be(raw, at + 4)
             let dropped = word_be(raw, at + 12)
             at += 20
-            list.push(mut ops, JournalOp(key: take key, value: None, prior: 0, trim: Some(JournalTrim(floor: floor, dropped: dropped))))
+            list.push(mut ops, JournalOp(key: take key, value: None, direct: None, prior: 0, trim: Some(JournalTrim(floor: floor, dropped: dropped))))
             continue
         }
-        if kind < 1 || kind > 3 {
+        if kind < 1 || kind > 4 || (stream && kind == 4) {
             return Error(disk_fault(file, op_at, Malformed))
         }
         let key = disk_blob(file, raw, mut at, 4096)?
@@ -401,6 +410,12 @@ pub fn journal_ops(file: String, raw: Bytes, stream: bool, mut at: u64, mut call
         }
         if prior > types.FORMAT_VALUE_MAX + 1 {
             return Error(disk_fault(file, op_at, Malformed))
+        }
+        if kind == 4 {
+            let place = decode_direct_blob(file, raw, mut at, key, value_limit)?
+            record_direct_identity(file, op_at, mut identities, place)?
+            list.push(mut ops, JournalOp(key: take key, value: None, direct: Some(arc.new(place)), prior: int.truncate(prior), trim: None))
+            continue
         }
         let value: Option[Bytes] = if kind == 2 {
             None
@@ -417,7 +432,7 @@ pub fn journal_ops(file: String, raw: Bytes, stream: bool, mut at: u64, mut call
             }
             Some(take stored)
         }
-        list.push(mut ops, JournalOp(key: take key, value: take value, prior: int.truncate(prior), trim: None))
+        list.push(mut ops, JournalOp(key: take key, value: take value, direct: None, prior: int.truncate(prior), trim: None))
     }
     Ok(take ops)
 }
@@ -479,6 +494,11 @@ pub fn replay_within_limits(file: String, limits: types.LimitsRep, commit: Journ
         return Error(disk_fault(file, 0, Malformed))
     }
     for op in commit.data {
+        if let Some(place) = op.direct {
+            if place.len > limits.value {
+                return Error(disk_fault(file, 0, Malformed))
+            }
+        }
         if let Some(value) = view op.value {
             if list.len(value) > limits.value {
                 return Error(disk_fault(file, 0, Malformed))
@@ -504,8 +524,10 @@ pub fn round8(n: u64) -> u64 {
     ((n + 7) / 8) * 8
 }
 
+type InputSource = LocalInput(HostFile) | ObjectInput(std.object.Opener, u64, u64, std.check.Xxh3, u64)
+
 pub opaque type JournalInput {
-    file: HostFile,
+    source: InputSource,
     size: u64,
     base: u64,
     aligned: bool,
@@ -685,7 +707,11 @@ pub fn open_journal_input(take file: HostFile, flush: bool, deadline: Option[(Cl
     if list.len(chunk) != 0u64 {
         list.clear(mut chunk)
     }
-    Ok(JournalInput(file: take opened, size: file_stat.size, base: 0, aligned: false, chunk: take chunk, copy_to: None, deadline))
+    Ok(JournalInput(source: LocalInput(take opened), size: file_stat.size, base: 0, aligned: false, chunk: take chunk, copy_to: None, deadline))
+}
+
+pub fn object_scrub_input(take reader: std.object.Opener, op_ms: u64, size: u64, digest: u64, take chunk: Bytes) -> JournalInput {
+    JournalInput(source: ObjectInput(take reader, op_ms, digest, std.check.start(), 0), size, base: 0, aligned: false, chunk: take chunk, copy_to: None, deadline: None)
 }
 
 pub fn open_device_input(take file: HostFile, make_chunk: scoped fn() -> Result[Bytes, types.Failure]) -> Result[JournalInput, types.Failure] waits {
@@ -707,12 +733,26 @@ pub fn journal_input_copy_to(mut input: JournalInput, take output: HostFile) {
 }
 
 pub fn with_journal_file[T](mut input: JournalInput, read: scoped[view] fn(mut HostFile) -> T waits) -> T waits {
-    read(mut input.file)
+    match input.source {
+        LocalInput(mut file) => read(mut file),
+        ObjectInput(_, _, _, _, _) => fail("local journal file required"),
+    }
 }
 
 pub fn take_journal_file(take input: JournalInput) -> HostFile {
-    let JournalInput(file: take file, ..) = take input
+    let JournalInput(source: take source, ..) = take input
+    let LocalInput(take file) = take source else {
+        fail("local journal file required")
+    }
     take file
+}
+
+pub fn close_scrub_input(take input: JournalInput) -> Result[(), types.Failure] waits {
+    let JournalInput(source: take source, ..) = take input
+    if let LocalInput(take file) = take source {
+        host.close(take file) ?=> Io
+    }
+    Ok(())
 }
 
 pub fn take_journal_copy(take input: JournalInput) -> Option[HostFile] {
@@ -742,7 +782,30 @@ pub fn refill_journal_chunk(mut input: JournalInput, path: String, offset: u64) 
     // A frame may span several chunks. The previous read has already
     // returned before this refill can submit the next one.
     check_journal_deadline(input.deadline)?
-    if (host.read_at(mut input.file, base, mut input.chunk) ?=> Io) <= offset - base {
+    let size = input.size
+    let count = match input.source {
+        LocalInput(mut file) => host.read_at(mut file, base, mut input.chunk) ?=> Io,
+        ObjectInput(reader, op_ms, expected, mut digest, mut consumed) => {
+            if base != consumed || base >= size {
+                return Error(disk_fault(path, base, Order))
+            }
+            let hi = base + order.min(list.capacity(input.chunk), size - base)
+            let req = std.object.GetRange(key: string.from(path), lo: base, hi, buffer: replace(mut input.chunk, list.new()), deadline: std.object.opener_deadline_ms(reader, op_ms))
+            let (take got, take raw) = std.object.read_range(reader, take req)
+            input.chunk = take raw
+            let meta = (take got) ?=> Remote
+            if meta.size != size || list.len(input.chunk) != hi - base {
+                return Error(disk_fault(path, base, Truncated))
+            }
+            std.check.add(mut digest, input.chunk, 0, hi - base)
+            consumed = hi
+            if hi == size && std.check.finish(digest) != expected {
+                return Error(disk_fault(path, 0, Checksum))
+            }
+            hi - base
+        },
+    }
+    if count <= offset - base {
         return Error(disk_fault(path, offset, Truncated))
     }
     // The pack envelope consumes the entire file in order. Copy each
@@ -762,7 +825,9 @@ pub fn refill_journal_chunk(mut input: JournalInput, path: String, offset: u64) 
 pub fn refresh_journal_size(mut input: JournalInput, boundary: Option[u64]) -> Result[(), types.Failure] waits {
     if let Some(d) = boundary {
         if d > input.size {
-            input.size = (host.stat_file(mut input.file) ?=> Io).size
+            if let LocalInput(mut file) = input.source {
+                input.size = (host.stat_file(mut file) ?=> Io).size
+            }
         }
     }
     Ok(())

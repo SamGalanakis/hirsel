@@ -1,12 +1,12 @@
 fn check_call_fields(path: String, raw: Bytes, mut at: u64) -> Result[RequestDigest, Error] {
     let (key, end_key) = failure_result_from_rep(capture.check_journal_blob(path, raw, mut at, 16777280))?
     let (args, end_args) = failure_result_from_rep(capture.check_journal_blob(path, raw, mut at, 16777280))?
-    let rev = failure_result_from_rep(capture.capture_blob_width(path, raw, mut at, 32))?
+    let rev = failure_result_from_rep(format.capture_blob_width(path, raw, mut at, 32))?
     if rev != 0 && rev != 32 {
         return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
     at += rev
-    let code = failure_result_from_rep(capture.capture_blob_width(path, raw, mut at, 48))?
+    let code = failure_result_from_rep(format.capture_blob_width(path, raw, mut at, 48))?
     if !format.call_code_size(code) {
         return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
     }
@@ -101,6 +101,23 @@ fn check_keyed_ops(path: String, raw: Bytes, mut at: u64) -> Result[bool, Error]
             _ => return Error(failure_from_rep(format.disk_fault(path, at - 1, Malformed))),
         }
         let kind = failure_result_from_rep(format.disk_number(path, raw, mut at, 1))?
+        if kind == 3 {
+            if tree != int.widen(format.CLAIMS) || saw_call {
+                return Error(failure_from_rep(format.disk_fault(path, at - 1, Malformed)))
+            }
+            let (first, end) = failure_result_from_rep(capture.check_journal_blob(path, raw, mut at, 41 + CLAIM_DONE_MAX))?
+            let claim = claim_parse(list.slice(raw, first, end)) ?=> |_| failure_from_rep(format.disk_fault(path, at, Malformed))
+            let (start, claim_end) = failure_result_from_rep(capture.check_journal_blob(path, raw, mut at, key_max))?
+            let key = list.slice(raw, start, claim_end)
+            let op_end = failure_result_from_rep(txn.claim_op_end(key))?
+            let _ = failure_result_from_rep(txn.claim_principal_end(key, op_end))?
+            let digest = check_call_fields(path, raw, mut at)?
+            if !claim.replied || RequestDigest(b: claim.digest) != digest {
+                return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
+            }
+            saw_call = true
+            continue
+        }
         let (key, end_key) = failure_result_from_rep(capture.check_journal_blob(path, raw, mut at, key_max))?
         if key == end_key {
             return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
@@ -119,22 +136,13 @@ fn check_keyed_ops(path: String, raw: Bytes, mut at: u64) -> Result[bool, Error]
             2 => {
                 deleted = true
             },
-            3 if tree == int.widen(format.CLAIMS) && !saw_call => {
-                let (first, end) = failure_result_from_rep(capture.check_journal_blob(path, raw, mut at, 41 + CLAIM_DONE_MAX))?
-                let claim = claim_parse(list.slice(raw, first, end)) ?=> |_| failure_from_rep(format.disk_fault(path, at, Malformed))
-                let digest = check_call_fields(path, raw, mut at)?
-                if !claim.replied || RequestDigest(b: claim.digest) != digest {
-                    return Error(failure_from_rep(format.disk_fault(path, at, Malformed)))
-                }
-                saw_call = true
-            },
             _ => return Error(failure_from_rep(format.disk_fault(path, at, Malformed))),
         }
     }
     Ok(deleted)
 }
 
-fn check_journal_commit(mut state: capture.CheckJournal, path: String, offset: u64, raw: Bytes) -> Result[(), Error] {
+fn check_journal_commit(dir: Dir, id: types.StoreKey, target: Option[Dir], mut state: capture.CheckJournal, path: String, offset: u64, raw: Bytes) -> Result[(), Error] waits {
     let mut at = 0u64
     let branch_id: u32 = int.truncate(failure_result_from_rep(format.disk_number(path, raw, mut at, 4))?)
     let head_version = failure_result_from_rep(format.disk_number(path, raw, mut at, 8))?
@@ -159,8 +167,12 @@ fn check_journal_commit(mut state: capture.CheckJournal, path: String, offset: u
         match tag {
             0 => {
                 let op_count = failure_result_from_rep(format.disk_count(path, raw, mut at, 9))?
-                let mut ops = capture.CaptureOps(at: at, left: op_count)
-                while let Some(_) = failure_result_from_rep(capture.capture_next_op(path, raw, state.limits.value, mut ops))? {}
+                let mut ops = format.CaptureOps(at: at, left: op_count, identities: None)
+                while let Some(op) = failure_result_from_rep(format.capture_next_op(path, raw, state.limits.value, mut ops))? {
+                    if let CaptureDirect(_, _, _, place) = op {
+                        let _ = failure_result_from_rep(manifest.read_directory_direct(dir, id, place, target, false, None))?
+                    }
+                }
                 at = ops.at
             },
             1 => check_stream_ops(path, raw, mut at, false)?,
@@ -185,7 +197,7 @@ fn check_journal_commit(mut state: capture.CheckJournal, path: String, offset: u
     Ok(())
 }
 
-fn check_journal(mut p: PreparedCapture, mut spent: u64) -> Result[u64, Error] waits {
+fn check_journal(mut p: PreparedCapture, target: Option[Dir], mut spent: u64) -> Result[u64, Error] waits {
     let mut state = {
         let m = capture.prepared_manifest(p.state)
         let mut state = capture.CheckJournal(
@@ -203,10 +215,12 @@ fn check_journal(mut p: PreparedCapture, mut spent: u64) -> Result[u64, Error] w
         })
         take state
     }
+    let dir = capture.prepared_dir(p.state)
+    let id = capture.prepared_id(p.state)
     for i in 0u64 .. capture.prepared_segment_count(p.state) {
-        let (size, _) = failure_result_from_rep(capture.scan_prepared_segment(mut p.state, i, KeepEvents, mut state, fn(mut replay: capture.CheckJournal, path: String, at: u64, kind: u16, raw: Bytes) -> Result[(), types.Failure] {
+        let (size, _) = failure_result_from_rep(capture.scan_prepared_segment(mut p.state, i, KeepEvents, mut state, scoped fn(mut replay: capture.CheckJournal, path: String, at: u64, kind: u16, raw: Bytes) -> Result[(), types.Failure] waits {
             let checked = if kind == 0x0011 {
-                failure_result_to_rep(check_journal_commit(mut replay, path, at, raw))
+                failure_result_to_rep(check_journal_commit(dir, id, target, mut replay, path, at, raw))
             } else {
                 capture.check_journal_fork(mut replay, path, at, raw)
             }

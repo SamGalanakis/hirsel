@@ -46,6 +46,9 @@ fn declare_value_collection[V](mut d: Declare, name: String, take form: indexes.
             if map.contains(d.tables, existing.id) {
                 return Error(Exists(failure_result_from_rep(catalog.named(name))?))
             }
+            if existing.key != key_schema {
+                return Error(Changed(failure_result_from_rep(catalog.named(name))?))
+            }
             (take existing, false)
         },
         None => {

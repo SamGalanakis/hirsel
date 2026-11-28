@@ -1,5 +1,5 @@
 // Directory source-side durable archive holds, unified cleanup & bind/detach cuts (§15.7).
-type ArchiveOpenMode = ServingDefault | ServingBound(u64, Option[u64]) | ServingDetach
+type ArchiveOpenMode = ServingDefault | ServingPreview(pager.PreviewRead) | ServingBound(u64, Option[u64]) | ServingDetach
 
 fn disk_live_pack_seqs(packs: manifest.PackDiskState) -> Result[List[u64], Error] {
     let carried = manifest.pack_carried(packs)
@@ -36,15 +36,36 @@ fn combine_segment_lease(export_span: Option[(u64, u64)], archive_seg_first: Opt
     }
 }
 
-fn plan_dir_cut_archive(d: Dir, db: Db, layout: manifest.PagedCutLayout, seq: u64, ordinary_prev_first: u64, manifest_estimate: u64) -> Result[manifest.DirArchiveCutPlan, Error] waits {
+fn plan_dir_cut_archive(d: Dir, db: Db, layout: manifest.PagedCutLayout, compaction: pager.TieredCompaction, seq: u64, ordinary_prev_first: u64, manifest_estimate: u64) -> Result[manifest.DirArchiveCutPlan, Error] waits {
     let state = disk_state(db)
     let old_packs = disk_live_pack_seqs(state.packs)?
-    let next_packs = layout_live_packs(layout)?
+    let mut next_packs = layout_live_packs(layout)?
+    if state.archive_hold.binding_id != 0 {
+        for held in compaction.held {
+            let mut cursor = std.omap.range(held.packs, Unbounded, Unbounded)
+            while let Some((pack_seq, _)) = std.omap.next(mut cursor) {
+                failure_result_from_rep(types.capacity(map.try_reserve(mut next_packs, 1)))?
+                map.insert(mut next_packs, pack_seq, ())
+            }
+        }
+        for scrub in manifest.pack_scrubs(state.packs) {
+            failure_result_from_rep(types.capacity(map.try_reserve(mut next_packs, list.len(scrub.packs))))?
+            for pack_seq in scrub.packs {
+                map.insert(mut next_packs, pack_seq, ())
+            }
+        }
+        if let Some(held) = transfer.active_lease(state.transfer) {
+            failure_result_from_rep(types.capacity(map.try_reserve(mut next_packs, list.len(held.packs))))?
+            for pack_seq in held.packs {
+                map.insert(mut next_packs, pack_seq, ())
+            }
+        }
+    }
     let export_first: Option[u64] = match transfer.active_lease(state.transfer) {
         Some(held) => Some(held.first),
         None => None,
     }
-    failure_result_from_rep(manifest.plan_directory_archive_cut(d, state.archive_hold, state.pending_binding, db.accounting.checkpointed, journal.first_live(state.retention), seq, ordinary_prev_first, export_first, old_packs, next_packs, manifest_estimate))
+    failure_result_from_rep(manifest.plan_directory_archive_cut(d, store_key_to_rep(db.store), state.archive_hold, state.pending_binding, db.accounting.checkpointed, journal.first_live(state.retention), seq, ordinary_prev_first, export_first, old_packs, next_packs, manifest_estimate))
 }
 
 fn retire_dir_cut_with_holds(db: Db, delta: HolderDelta, layout: manifest.PagedCutLayout, holders: List[manifest.HeldPage], compaction: pager.TieredCompaction, archive_plan: manifest.DirArchiveCutPlan, ordinary_prev_first: u64, seq: u64) -> Result[(manifest.PackDiskState, pager.TieredCompaction, journal.DiskRemovals), Error] {
@@ -52,7 +73,7 @@ fn retire_dir_cut_with_holds(db: Db, delta: HolderDelta, layout: manifest.PagedC
     let old_hold_prev = disk_state(db).archive_hold.prev_first
     let first_check = order.min(ordinary_prev_first, order.min(old_hold_prev, archive_plan.new_prev_first))
     disk_allocation(scoped fn() -> Result[(manifest.PackDiskState, pager.TieredCompaction, journal.DiskRemovals), Error] {
-        failure_result_from_rep(journal.cut_retirement_with_holds(layout, holders, transfer.active_lease(disk_state(db).transfer), manifest.pack_scrubs(disk_state(db).packs), compaction, span, Some(view archive_plan.protected_packs), first_check, seq))
+        failure_result_from_rep(journal.cut_retirement_with_holds(layout, holders, transfer.active_lease(disk_state(db).transfer), manifest.pack_scrubs(disk_state(db).packs), compaction, span, Some(view archive_plan.protected_packs), Some(manifest.direct_packs(disk_state(db).packs)), first_check, seq))
     })
 }
 
@@ -81,11 +102,22 @@ fn disk_start_with_mode(d: Dir, c: Clock, r: Random, options: Options, mode: Arc
         Ok((id, take page_record)) => {
             failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(options.expect), store_key_to_rep(id)))?
             failure_result_from_rep(types.check_limits(optional_limits_to_rep(options.limits), page_record.limits))?
-            let (take validated, take kept_receipts) = select_page_manifest_holds(d, id, take page_record)?
+            if let ServingBound(..) = mode {
+                failure_result_from_rep(manifest.independent_source(page_record.origin))?
+            }
+            let preview = match mode {
+                ServingPreview(source) => Some(view source),
+                _ => None,
+            }
+            let (take validated, take prefix, take holds) = select_page_manifest_holds(d, id, take page_record, c, preview)?
             let bound_id = validated.manifest.binding_id
             if bound_id != 0 {
                 match mode {
-                    ServingDefault => return Error(Missing("archive")),
+                    ServingDefault => {
+                        clean_selected_directory(d, id, validated, prefix, take holds)?
+                        return Error(Missing("archive"))
+                    },
+                    ServingPreview(_) => return Error(PreviewSource),
                     ServingBound(want_binding, _) => if want_binding != bound_id {
                         return Error(Conflict("archive binding"))
                     },
@@ -98,9 +130,12 @@ fn disk_start_with_mode(d: Dir, c: Clock, r: Random, options: Options, mode: Arc
             if !tiered_open_funded(options) && pages.holders_tiered(loaded.all) {
                 return Error(Missing("cache_bytes"))
             }
-            (take loaded, take kept_receipts)
+            (take loaded, take prefix, take holds)
         },
         Error(Io(NotFound)) => {
+            if let ServingPreview(_) = mode {
+                return Error(NotFound)
+            }
             if let Some(_) = options.expect {
                 return Error(NotFound)
             }
@@ -121,7 +156,7 @@ fn disk_start_with_mode(d: Dir, c: Clock, r: Random, options: Options, mode: Arc
         },
         Error(take problem) => return Error(take problem),
     }
-    let (take loaded_init, take kept_receipts) = take loaded_pair
+    let (take loaded_init, take prefix, take holds) = take loaded_pair
     let mut loaded = take loaded_init
     let manifested = disk_allocation(scoped fn() -> Result[pages.State, Error] {
         failure_result_from_rep(types.capacity(manifest.manifest_state(loaded.manifest, loaded.all)))
@@ -132,8 +167,12 @@ fn disk_start_with_mode(d: Dir, c: Clock, r: Random, options: Options, mode: Arc
     })?
     let recorded_after = manifested.tips[0u64].head
     let initial = failure_result_from_rep(pager.journal_replay_manifest(take manifested, loaded.manifest))?
-    let recovered = journal_recover(d, store_key_from_rep(loaded.store), loaded.manifest.first_live, c, take initial)?
-    let journal.JournalRecovered(replay: take replay, seq: last_seq, end: last_end, uncovered: uncovered) = take recovered
+    let preview = match mode {
+        ServingPreview(s) => Some(view s),
+        _ => None
+    }
+    let recovered = recover_directory_prefix(d, store_key_from_rep(loaded.store), take prefix, take initial, preview)?
+    let journal.JournalRecovered(replay: take replay, seq: last_seq, end: last_end, uncovered: uncovered, introduced: take introduced) = take recovered
     let live_bytes = failure_result_from_rep(journal.journal_account(replay))?
     let pager.JournalReplay(state: take state, next_node: next_node, tiered: tiered, forked: take forked, ..) = take replay
     failure_result_from_rep(txn.check_stream_quota(state.tips[0u64].roots.streams, options.streams_max))?
@@ -145,14 +184,22 @@ fn disk_start_with_mode(d: Dir, c: Clock, r: Random, options: Options, mode: Arc
     let Some(seq) = int.checked_add(last_seq, 1) else {
         return Error(Limit(Ids))
     }
+    let manifest.DiskLoaded(store: id, manifest: take page_record, lists: take lists, locations: take locations, ..) = take loaded
+    let mut page_disk = manifest.recovered_pack_disk(page_record, take locations, take lists, take owners, take forked)
+    failure_result_from_rep(manifest.seed_direct_rows(mut page_disk, introduced, scoped fn(p: format.DirectBlob) -> Result[Option[pages.ForeignPack], types.Failure] {
+        match preview {
+            Some(s) => pager.preview_introduction(s, p),
+            None => Ok(None)
+        }
+    }))?
+    failure_result_from_rep(manifest.carry_historical_packs(mut page_disk, holds.protected_packs))?
+    let kept_receipts = failure_result_from_rep(manifest.cleanup_page_manifest_with_holds(d, page_record, take holds))?
     // Fence the removal of an orphan END before making its successor HEADER.
     let orphan_end = failure_result_from_rep(types.capacity(manifest.disk_path("j-", seq, ".end")))?
     let _ = failure_result_from_rep(manifest.disk_remove_optional(d, orphan_end))?
     failure_result_from_rep(manifest.disk_io(host.sync_dir(d)))?
     let mut creation = failure_result_from_rep(journal.disk_creation_block())?
-    let (take segment, take end_file, take header) = failure_result_from_rep(journal.disk_new_segment(d, c, loaded.store, seq, last_end, mut creation))?
-    let manifest.DiskLoaded(store: id, manifest: take page_record, lists: take lists, locations: take locations, ..) = take loaded
-    let page_disk = manifest.recovered_pack_disk(page_record, take locations, take lists, take owners, take forked)
+    let (take segment, take end_file, take header) = failure_result_from_rep(journal.disk_new_segment(d, c, id, seq, last_end, mut creation))?
     Ok(journal.DiskStartup(store: id, fence: page_record.fence, state: take state, live: live_bytes, tiered: tiered.total, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: page_record.next_table, generation: page_record.generation, cut_first: page_record.first_live, archive_prev_first: page_record.prev_first, binding_id: page_record.binding_id, held_receipts: take kept_receipts, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take page_disk, limits: page_record.limits))
 }
 
@@ -176,7 +223,11 @@ fn open_directory_with_mode(tasks: Tasks, d: Dir, c: Clock, r: Random, options: 
     }
     failure_result_from_rep(object_writer.open_checks(options.group_commits, options.group_bytes, optional_limits_to_rep(options.limits), options.checkpoint_bytes, options.journal_limit))?
     let session = disk_session_with_mode(d, c, r, options, mode)?
-    let mut db = open_started(tasks, d, c, options, cadence_spec, take session)?
+    let preview: Option[pager.PreviewRead] = match mode {
+        ServingPreview(source) => Some(pager.share_preview(source)),
+        _ => None,
+    }
+    let mut db = open_started(tasks, d, c, r, options, cadence_spec, take session, take preview)?
     if let ServingBound(_, hold_bytes) = mode {
         edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
             if let Some(limit) = hold_bytes {
@@ -206,7 +257,8 @@ pub fn cleanup_directory(d: Dir, c: Clock, options: Options) -> Result[(), Error
     let (id, take page_record) = read_page_manifest_file(d)?
     failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(options.expect), store_key_to_rep(id)))?
     failure_result_from_rep(types.check_limits(optional_limits_to_rep(options.limits), page_record.limits))?
-    let _ = select_page_manifest_holds(d, id, take page_record)?
+    let (take validated, take prefix, take holds) = select_page_manifest_holds(d, id, take page_record, c, None)?
+    clean_selected_directory(d, id, validated, prefix, take holds)?
     drop(take lock)
     Ok(())
 }
@@ -248,6 +300,7 @@ pub fn bind_archive_hold(mut db: Db, binding_id: u64, hold_bytes: Option[u64]) -
     if binding_id == 0 {
         return Error(Missing("binding_id"))
     }
+    failure_result_from_rep(manifest.independent_source(manifest.pack_restore_origin(disk_state(db).packs)))?
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         state.pending_binding = Some(binding_id)
         if let Some(limit) = hold_bytes {
@@ -316,4 +369,56 @@ fn note_directory_archive_ack(mut db: Db, acked_gen: u64, acked_digest: u64, ack
         state.archive_hold.receipts = take kept
     })
     failure_result_from_rep(manifest.remove_archive_receipts(d, unlink_gens))
+}
+
+fn disk_start(d: Dir, c: Clock, r: Random, options: Options) -> Result[journal.DiskStartup, Error] waits {
+    disk_start_with_mode(d, c, r, options, ServingDefault)
+}
+
+fn disk_session(d: Dir, clock: Clock, r: Random, options: Options) -> Result[journal.DiskSession, Error] waits {
+    disk_session_with_mode(d, clock, r, options, ServingDefault)
+}
+
+fn open_started(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options, cadence_spec: journal.JournalCadence, take session: journal.DiskSession, take preview: Option[pager.PreviewRead]) -> Result[Db, Error] waits {
+    let journal.DiskSession(lock: take lock, startup: take startup) = take session
+    let zero_extension = failure_result_from_rep(manifest.disk_io(host.zero_extension(d)))?
+    let journal.DiskStartup(store: store, fence: fence, state: take recovered, live: live_bytes, tiered: tiered, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, archive_prev_first: archive_prev_first, binding_id: binding_id, held_receipts: take held_receipts, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take page_disk, limits: limits) = take startup
+    let id = store_key_from_rep(store)
+    let mut db = disk_allocation(scoped fn() -> Result[Db, Error] {
+        Ok(empty_db(c, id, options))
+    })?
+    let mut state = take recovered
+    let mut reader_state = pager.disk_pager_state(None)
+    if std.omap.len(manifest.direct_packs(page_disk).rows.values) != 0 {
+        let base = failure_result_from_rep(history.recovered_tiered_inventory(manifest.pack_locations(page_disk), None, generation, next_node))?
+        seed_direct_snapshots(page_disk, Some(take base), generation, next_node, mut state, mut reader_state)?
+    }
+    open_heads(mut db, take state)?
+    db.accounting.resident = live_bytes
+    rebuild_keyed_credit(mut db, uncovered, options.journal_limit)?
+    // The pager starts before the journal tasks, so a refusal leaves none. It
+    // reserves C + K + P (§1.1); a queued Cold frame needs it to drain (§13.6).
+    let pager_task: Option[Task[()]] = if store_has_tiered(db) || std.page.count(std.page.image_of(manifest.pack_lists(page_disk).deferred)) != 0 {
+        let funding = pager.TieredPagerFunding(cache_bytes: options.cache_bytes, writer_pin_bytes: options.writer_pin_bytes, pager_task_bytes: options.pager_task_bytes, cut_pins: true)
+        let authority = directory_pager(d, preview)
+        let link = failure_result_from_rep(object_writer.start_tiered_pager_link(tasks, store_key_to_rep(id), seq, take authority, funding, pager.TIERED_PAGER_QUEUE))?
+        Some(attach_tiered_pager(mut db, take link))
+    } else {
+        None
+    }
+    if let Some(take worker) = take pager_task {
+        pager.set_worker(mut reader_state, take worker)
+    }
+    catalog.restore_fence(mut db.schema, fence)
+    db.limits = limits_from_rep(limits)
+    pages.set_next_node(mut db.holders, next_node)
+    catalog.set_next_table(mut db.schema, next_table)
+    db.accounting.tiered = tiered
+    db.accounting.page_resident = resident_pages
+    db.accounting.checkpointed = generation
+    let start = journal.DirJournalStart(lock: take lock, seq: seq, uncovered: uncovered, creation: take creation, segment: take segment, end_file: take end_file, header: take header)
+    let directory = failure_result_from_rep(journal.start_directory(tasks, d, c, store, options.group_commits, options.group_bytes, cadence_spec, zero_extension, take start))?
+    let archive_hold = manifest.recovered_archive_hold(binding_id, None, archive_prev_first, take held_receipts)
+    db.disk = Some(DiskState(scrub_reader: None, preview: take preview, random: r, open: seq, options: clone(options), transfer: transfer.new_state(), retention: journal.record_retention(cut_first, recorded_after), packs: take page_disk, archive_hold: take archive_hold, pending_binding: None, archiver: None, backend: DirBackend(take directory), tasks, tiered: take reader_state))
+    Ok(take db)
 }

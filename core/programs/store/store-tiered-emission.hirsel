@@ -161,7 +161,7 @@ pub fn planned_tiered_pack(layout: TieredPackRun, pack: manifest.PlannedPack) ->
             index_bytes += width - common
         }
     }
-    pages.PagePack(class: layout.class, frames: int.truncate(total), live: pack.payload_bytes, payload_bytes: index_at + index_bytes, index: index_at)
+    pages.PagePack(foreign: None, class: layout.class, frames: int.truncate(total), live: pack.payload_bytes, payload_bytes: index_at + index_bytes, index: index_at)
 }
 
 pub fn encode_tiered_cut_pack(id: types.StoreKey, layout: TieredPackRun, pack: manifest.PlannedPack, mut emitted: Map[u64, std.page.PagePtr]) -> Result[(Bytes, pages.PagePack), types.Failure] {

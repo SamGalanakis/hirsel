@@ -12,7 +12,24 @@ pub(super) struct Expiry {
     archive: Archive,
     cutoff_kind: String,
     cutoff: String,
-    approved: Floor,
+    approved: FloorPlan,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PreviewHold {
+    child: String,
+    base: String,
+    until_ms: String,
+    stamp: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FloorPlan {
+    #[serde(flatten)]
+    boundary: Floor,
+    // Decisions saved before Preview holds retain their original plan digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limiting_holds: Option<Vec<PreviewHold>>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq)]
@@ -59,14 +76,14 @@ impl Expiry {
         let args = [
             self.cutoff_kind.clone(),
             self.cutoff.clone(),
-            self.approved.etag.clone(),
-            self.approved.floor.clone(),
-            self.approved.previous.clone(),
+            self.approved.boundary.etag.clone(),
+            self.approved.boundary.floor.clone(),
+            self.approved.boundary.previous.clone(),
         ];
         let raw = self.archive.query("apply-expiry", &args, true)?;
         let mut floor: Floor = serde_json::from_value(raw).map_err(Failure::damaged)?;
         let deleted = std::mem::replace(&mut floor.deleted, "0".into());
-        if floor != self.approved {
+        if floor != self.approved.boundary {
             return Err(Failure::damaged(
                 "expiry response differs from the approved floor",
             ));

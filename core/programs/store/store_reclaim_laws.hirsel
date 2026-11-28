@@ -206,3 +206,92 @@ fn bucket_test_m2_reclaim_preview_and_purge(c: Clock, r: Random, tasks: Tasks) -
     }
     Ok(())
 }
+
+@test
+fn ap21_bucket_group_below_recovered_checkpoint(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 3470, None, list.new())
+    let client = bucket_law_client_lanes(sim, tasks, "s3.test", 1, true, 1)?
+    let mut writer = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), c, r, object_law_options(1)) ?=> |Refusal(error: take problem, ..)| take problem
+    let mut schema = declare(writer, Migrate)?
+    let blobs = declare_blobs(mut schema, "chunks", std.codec.key_u64(), BlobLimits(chunk: 128, max: 512))?
+    let _ = seal(mut writer, take schema)?
+    let _ = checkpoint(mut writer)?
+    let (_, collection) = blobs_identity(blobs)
+    let key = blob_chunk_key(collection, 1, 0, false)?
+    let stored = option.unwrap(std.hex.decode(b"010003000000616263"))
+    let (take parked, take resume) = take_object_journal(mut writer)?
+    let mut lane = take parked
+    let checked = failure_result_from_rep(object_writer.law_reclaim_historical_group(mut lane, key, arc.new(take stored)))
+    failure_result_from_rep(object_writer.return_object_journal(take lane, resume))?
+    close(take writer)?
+    let _ = bucket_law_finish(take sim)
+    take checked
+}
+
+@test
+fn ap21_bucket_attached_slice_cursors(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 3471, None, list.new())
+    let mut client = bucket_law_client_lanes(sim, tasks, "s3.test", 1, true, 1)?
+    let mut head = stream_law_head(5)
+    head.pair.epoch = 2
+    let sid = host_stream_id_to_rep(stream_law_sid())
+    let root = string.from("stream")
+    let dir = host_stream.stream_key(root, host_stream.stream_dir(sid))
+    let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let key = blob_chunk_key(1, 1, 0, false)?
+    for epoch in 1u64 .. 3 {
+        let mut slices: List[format.BatchSlice] = list.new()
+        for hi in[head.store.hi, head.store.hi + 1] {
+            let store = types.StoreKey(hi, lo: head.store.lo)
+            let ctx = format.DiskContext(store, role: format.ROLE_BATCH, seq: epoch)
+            let mut octets: Bytes = list.new()
+            for i in 0u64 .. 2 {
+                let mut body: Bytes = list.new()
+                list.put_word_le(mut body, 0u32)
+                list.put_word_le(mut body, i + 1)
+                list.put_word_le(mut body, epoch)
+                list.push(mut body, 1u8)
+                list.push(mut body, 0u8)
+                list.put_word_le(mut body, 1u32)
+                let pack = epoch * 10 + (hi - head.store.hi) * 100 + i
+                let direct = format.DirectBlob(stamp: pack, len: 8, checksum: 0, pack, offset: 72, epoch, pack_len: 192, digest: pack)
+                result.unwrap(format.encode_direct_op(mut body, key, 0, direct))
+                let frame = result.unwrap(format.disk_seal(ctx, list.len(octets), 0x0011, 1, body))
+                list.append(mut octets, frame)
+            }
+            list.push(mut slices, format.BatchSlice(store, epoch, frames: 2, octets: take octets))
+        }
+        let mut raw: Bytes = list.with_capacity(format.stream_batch_size(slices) + format.BINDING_BYTES)
+        failure_result_from_rep(format.stream_batch_encode(mut raw, sid, epoch, epoch, 1, 1, slices))?
+        let mut batch = string.with_capacity(48)
+        format.stream_batch_key(mut batch, epoch, epoch)
+        let path = host_stream.stream_key(dir, batch)
+        let mut compare: Bytes = list.with_capacity(list.len(raw))
+        failure_result_from_rep(host_stream.stream_at_root(mut client, scoped fn(mut access: std.object.Client) -> Result[(), types.Failure] waits {
+            history.history_create(mut access, path, mut raw, mut compare, due)
+        }))?
+    }
+    let sealed = format.SealedTail(tail: format.StreamRef(sid, inc: 1, from_seq: 1, from_frame: 1), cutoff: 1, at: 5)
+    let current_tail = format.StreamRef(sid, inc: 2, from_seq: 2, from_frame: 1)
+    let mut tails: List[format.SealedTail] = list.new()
+    list.push(mut tails, sealed)
+    let mut batches: List[u64] = list.new()
+    list.push(mut batches, 1u64)
+    list.push(mut batches, 2u64)
+    let attach = format.Attach(settles: 0, live: Some(current_tail), sealed: take tails)
+    let mut keep: Map[String, ()] = map.new()
+    failure_result_from_rep(host_stream.reclaim_attached_packs(mut client, head, attach, root, batches, mut keep, due))?
+    let _ = take client
+    let _ = bucket_law_finish(take sim)
+    if map.len(keep) != 2 {
+        fail("reclaim included a settled frame or another Place")
+    }
+    for epoch in 1u64 .. 3 {
+        let seq = epoch * 10 + 1
+        let name = history.history_key("p-", pages.HistoryRef(seq, epoch, len: 192, digest: seq))
+        if !map.contains(keep, name) {
+            fail("reclaim omitted a pack past the settlement cursor")
+        }
+    }
+    Ok(())
+}

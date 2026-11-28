@@ -1,0 +1,67 @@
+// Work only on the private, bounded journal copy. An object pack's authority
+// HEADER changes when translated to a Directory image. Preserve its payload
+// and fixed stamps, and record the translated pack's digest in that copy.
+fn restore_direct_prefix(dir: Dir, id: types.StoreKey, first: u64, terminal: u64, end: u64, objects: bool, read_pack: scoped fn(format.DirectBlob) -> Result[Bytes, Error] waits) -> Result[(), Error] waits {
+    let mut seq = first
+    loop {
+        let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
+        let mut file = failure_result_from_rep(manifest.disk_io(host.open(dir, path, ReadWrite)))?
+        let limit = if seq == terminal {
+            end
+        } else {
+            let Some(header) = failure_result_from_rep(manifest.journal_header(dir, id, seq + 1, None))? else {
+                return Error(Lost)
+            }
+            header.prev_end
+        }
+        let ctx = format.DiskContext(store: id, role: 2, seq)
+        let mut at = 72u64
+        let mut translated = false
+        while at < limit {
+            let hdr = failure_result_from_rep(manifest.read_disk_bytes(mut file, path, at, 16))?
+            let fh = failure_result_from_rep(manifest.disk_read_frame_head(path, hdr, at))?
+            if limit - at < 16 || fh.size > limit - at - 16 {
+                return Error(failure_from_rep(format.disk_fault(path, at, Truncated)))
+            }
+            if fh.kind == 0x0011 {
+                let mut body = failure_result_from_rep(manifest.read_disk_bytes(mut file, path, at + 16, fh.size))?
+                if fh.checksum != failure_result_from_rep(types.capacity(format.disk_check(ctx, at, hdr, body)))? {
+                    return Error(failure_from_rep(format.disk_fault(path, at, Checksum)))
+                }
+                let mut ops = failure_result_from_rep(format.capture_data_ops(path, body))?
+                let mut changed = false
+                while let Some(op) = failure_result_from_rep(format.capture_next_op(path, body, types.FORMAT_VALUE_MAX, mut ops))? {
+                    if let CaptureDirect(_, _, _, place) = op {
+                        let pack_path = failure_result_from_rep(manifest.paged_pack_path(place.pack))?
+                        let mut packed = read_pack(place)?
+                        let _ = failure_result_from_rep(history.verify_direct_pack(objects, pack_path, id, place, packed))?
+                        if objects {
+                            let header = failure_result_from_rep(types.capacity(format.disk_header_bytes(format.DiskContext(store: id, role: 3, seq: place.pack), 0, 0)))?
+                            for i in 0u64 .. 72 {
+                                packed[i] = header[i]
+                            }
+                            list.set_word_le(mut body, ops.at - 24, 0u64)
+                            list.set_word_le(mut body, ops.at - 8, std.check.xxh3(packed, 0, list.len(packed)))
+                            changed = true
+                        }
+                        failure_result_from_rep(manifest.disk_write_synced(dir, pack_path, packed))?
+                    }
+                }
+                if changed {
+                    let sealed = failure_result_from_rep(types.capacity(format.disk_seal(ctx, at, fh.kind, fh.flags, body)))?
+                    host.write_at(mut file, at, sealed) ?=> |problem| Io(problem.error)
+                    translated = true
+                }
+            }
+            at += 16 + fh.size
+        }
+        if translated {
+            failure_result_from_rep(manifest.disk_io(host.sync(mut file)))?
+        }
+        failure_result_from_rep(manifest.disk_io(host.close(take file)))?
+        if seq == terminal {
+            return Ok(())
+        }
+        seq += 1
+    }
+}

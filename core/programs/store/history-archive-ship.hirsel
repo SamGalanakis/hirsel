@@ -150,8 +150,8 @@ fn dir_segment_exists(d: Dir, seq: u64) -> Result[bool, types.Failure] waits {
     journal.disk_exists(d, path)
 }
 
-fn dir_verify_sink_base_intact(mut sink: std.object.Client, store: types.StoreKey, cur: format.ArchiveCursorRep, deadline: u64) -> Result[(), types.Failure] waits {
-    let m_key = format.archive_key(store, format.archive_log_manifest_rel(cur.gen, cur.digest))
+fn dir_verify_sink_base_intact(mut sink: std.object.Client, store: types.StoreKey, inc: Inline[u8, 16], cur: format.ArchiveCursorRep, deadline: u64) -> Result[(), types.Failure] waits {
+    let m_key = format.archive_key(store, inc, format.archive_log_manifest_rel(cur.gen, cur.digest))
     let mut m_raw = manifest.disk_read_buffer(cur.len)?
     match history_fetch(mut sink, m_key, mut m_raw, deadline) {
         Ok(_) => {
@@ -165,11 +165,40 @@ fn dir_verify_sink_base_intact(mut sink: std.object.Client, store: types.StoreKe
     }
 }
 
+fn archive_incarnation(r: Random) -> Result[Inline[u8, 16], types.Failure] {
+    let mut raw: Bytes = list.new()
+    types.capacity(list.try_reserve(mut raw, 16))?
+    host.random(r, mut raw)
+    let mut id: Inline[u8, 16] =[0; 16]
+    for i in 0u64 .. 16 {
+        id[i] = raw[i]
+    }
+    if id ==[0u8; 16] {
+        return Error(Undecided)
+    }
+    Ok(id)
+}
+
+// §15.7 "Keys", creation order. The first write of an archive is a head that
+// publishes nothing: every object is then stored in that head's directory,
+// and creators that race converge on one incarnation. A creator that loses
+// uses the head it finds and draws none.
+fn archive_create_head(r: Random, mut sink: std.object.Client, store: types.StoreKey, source_kind: u8, binding_id: u64, holder_epoch: u64, deadline: u64) -> Result[(format.ArchiveHeadRep, std.object.ETag), types.Failure] waits {
+    let candidate = format.ArchiveHeadRep(store, source_kind, binding_id, holder_epoch, rev: 1, open_gap: false, through: None, floor_base: None, index_tail: None, intervals: list.new(), incarnation: archive_incarnation(r)?, holds: list.new())
+    match archive_head_cas(mut sink, store, Absent, candidate, deadline)? {
+        ArchiveCasApplied(tag) => Ok((take candidate, tag)),
+        ArchiveCasConflict(take other, tag) => Ok((take other, tag)),
+        ArchiveCasUncertain => Error(Undecided),
+    }
+}
+
 // Uploads a log@1 base (`p-<seq>-<xxh3>`, `m-<gen>-<xxh3>`), checks A2
 // no-relisting against any prior advertised base, spills `index-` segment(s),
 // and CASes `archive-head`.
-fn archive_publish_dir_base(d: Dir, store: types.StoreKey, binding_id: u64, mut sink: std.object.Client, take existing: Option[(format.ArchiveHeadRep, std.object.ETag)], m_raw: Bytes, m_rec: manifest.PageManifest, m_path: String, continuous: bool, deadline: u64, take trace_in: List[ArchiveTraceEvent]) -> Result[ArchiveStepResult, types.Failure] waits {
+fn archive_publish_dir_base(d: Dir, store: types.StoreKey, binding_id: u64, mut sink: std.object.Client, take existing: (format.ArchiveHeadRep, std.object.ETag), m_raw: Bytes, m_rec: manifest.PageManifest, m_path: String, continuous: bool, deadline: u64, take trace_in: List[ArchiveTraceEvent]) -> Result[ArchiveStepResult, types.Failure] waits {
     let mut trace = take trace_in
+    let (take prev_head, tag) = take existing
+    let inc = prev_head.incarnation
     let pack_seqs = manifest.validate_receipt_packs(d, store, m_path, m_rec)?
     let mut pack_refs: List[format.ArchivePackRefRep] = list.new()
     types.capacity(list.try_reserve(mut pack_refs, list.len(pack_seqs)))?
@@ -187,7 +216,7 @@ fn archive_publish_dir_base(d: Dir, store: types.StoreKey, binding_id: u64, mut 
         manifest.disk_io(host.close(take f))?
         let _ = manifest.disk_read_header(p_path, list.slice(p_raw, 0, 72), 3, Some(seq), Some(store))?
         let p_digest = std.check.xxh3(p_raw, 0, size)
-        let p_key = format.archive_key(store, format.archive_log_pack_rel(seq, p_digest))
+        let p_key = format.archive_key(store, inc, format.archive_log_pack_rel(seq, p_digest))
         match archive_put_immutable(mut sink, p_key, take p_raw, deadline)? {
             UnitStored => (),
             UnitDiverged(_) => return Error(Diverged(0)),
@@ -200,7 +229,7 @@ fn archive_publish_dir_base(d: Dir, store: types.StoreKey, binding_id: u64, mut 
     }
     let m_len = list.len(m_raw)
     let m_digest = std.check.xxh3(m_raw, 0, m_len)
-    let m_key = format.archive_key(store, format.archive_log_manifest_rel(m_rec.generation, m_digest))
+    let m_key = format.archive_key(store, inc, format.archive_log_manifest_rel(m_rec.generation, m_digest))
     match archive_put_immutable(mut sink, m_key, clone(m_raw), deadline)? {
         UnitStored => (),
         UnitDiverged(_) => return Error(Diverged(0)),
@@ -212,30 +241,22 @@ fn archive_publish_dir_base(d: Dir, store: types.StoreKey, binding_id: u64, mut 
     let main_at = m_rec.branches[0u64].at
     let mut base_row = format.ArchiveBaseRowRep(base_ordinal: m_rec.generation, epoch: 0, digest: m_digest, len: m_len, first_unit: m_rec.first_live, main_version: main_ver, main_at, frontier, pack_continuation: false, packs: take pack_refs)
     // A2: check against preceding advertised base (including across a Gap!).
-    if let Some((prev_head, _)) = view existing {
-        if let Some(prev_tail) = prev_head.index_tail {
-            let (take prev_base, take prev_packs) = archive_load_latest_base(mut sink, store, prev_tail, deadline)?
-            archive_check_no_relisting(prev_base, prev_packs, base_row)?
-        }
+    if let Some(prev_tail) = prev_head.index_tail {
+        let (take prev_base, take prev_packs) = archive_load_latest_base(mut sink, store, inc, prev_tail, deadline)?
+        archive_check_no_relisting(prev_base, prev_packs, base_row)?
     }
     let cursor = format.ArchiveCursorRep(source_kind: format.ARCHIVE_SOURCE_LOG, ordinal: m_rec.first_live, sub: 0, gen: m_rec.generation, digest: m_digest, len: m_len, main_version: main_ver, main_at)
-    let (pre, prev_tail, rev, take floor_opt, take next_ivs, take spilled_ivs): (std.object.Precondition, Option[format.ArchiveIndexRefRep], u64, Option[format.ArchiveBaseRowRep], List[format.ArchiveIntervalRep], List[format.ArchiveIntervalRep]) = match take existing {
-        None => {
-            let mut ivs: List[format.ArchiveIntervalRep] = list.new()
-            types.capacity(list.try_reserve(mut ivs, 1))?
-            list.push(mut ivs, format.ArchiveIntervalRep(first_base: format.archive_base_summary(base_row), through: cursor, closed_by_gap: false))
-            (Absent, None, 1u64, None, take ivs, list.new())
-        },
-        Some((take prev_head, tag)) => {
-            let (take ivs, take spilled): (List[format.ArchiveIntervalRep], List[format.ArchiveIntervalRep]) = if continuous && list.len(prev_head.intervals) > 0 {
-                (extend_head_interval(prev_head.intervals, cursor)?, list.new())
-            } else {
-                append_head_interval(prev_head.intervals, format.ArchiveIntervalRep(first_base: format.archive_base_summary(base_row), through: cursor, closed_by_gap: false))?
-            }
-            (Match(tag), prev_head.index_tail, prev_head.rev + 1, clone(prev_head.floor_base), take ivs, take spilled)
-        },
+    let (take next_ivs, take spilled_ivs): (List[format.ArchiveIntervalRep], List[format.ArchiveIntervalRep]) = if continuous && list.len(prev_head.intervals) > 0 {
+        (extend_head_interval(prev_head.intervals, cursor)?, list.new())
+    } else {
+        append_head_interval(prev_head.intervals, format.ArchiveIntervalRep(first_base: format.archive_base_summary(base_row), through: cursor, closed_by_gap: false))?
     }
-    let (new_tail, first_ord) = archive_spill_base_index(mut sink, store, format.ARCHIVE_SOURCE_LOG, prev_tail, base_row, spilled_ivs, deadline)?
+    let pre: std.object.Precondition = Match(tag)
+    let prev_tail = prev_head.index_tail
+    let rev = prev_head.rev + 1
+    let floor_opt: Option[format.ArchiveBaseRowRep] = clone(prev_head.floor_base)
+    let holds: List[format.PreviewHoldRep] = clone(prev_head.holds)
+    let (new_tail, first_ord) = archive_spill_base_index(mut sink, store, inc, format.ARCHIVE_SOURCE_LOG, prev_tail, base_row, spilled_ivs, deadline)?
     base_row.frontier.first_index_ordinal = first_ord
     let floor_base = match take floor_opt {
         Some(take fb) => Some(take fb),
@@ -250,7 +271,7 @@ fn archive_publish_dir_base(d: Dir, store: types.StoreKey, binding_id: u64, mut 
     if cur_check.binding_id != binding_id {
         return Error(Fenced(0))
     }
-    let candidate = format.ArchiveHeadRep(store, source_kind: format.ARCHIVE_SOURCE_LOG, binding_id, holder_epoch: 0, rev, open_gap: false, through: Some(cursor), floor_base: take floor_base, index_tail: Some(new_tail), intervals: take final_ivs)
+    let candidate = format.ArchiveHeadRep(store, source_kind: format.ARCHIVE_SOURCE_LOG, binding_id, holder_epoch: 0, rev, open_gap: false, through: Some(cursor), floor_base: take floor_base, index_tail: Some(new_tail), intervals: take final_ivs, incarnation: inc, holds: take holds)
     let acked_prev_seg = if m_rec.first_live > 0 {
         m_rec.first_live - 1
     } else {
@@ -273,6 +294,11 @@ fn archive_publish_dir_base(d: Dir, store: types.StoreKey, binding_id: u64, mut 
 
 fn archive_commit_gap(mut sink: std.object.Client, store: types.StoreKey, source_kind: u8, binding_id: u64, holder_epoch: u64, prev_head: format.ArchiveHeadRep, tag: std.object.ETag, deadline: u64, take trace_in: List[ArchiveTraceEvent]) -> Result[ArchiveStepResult, types.Failure] waits {
     let mut trace = take trace_in
+    match archive_check_promised_direct(mut sink, prev_head, deadline) {
+        Error(Remote(NotFound)) => return Error(Lost),
+        Error(take problem) => return Error(take problem),
+        Ok(()) => (),
+    }
     let closed_ivs = close_head_interval_gap(prev_head.intervals)?
     let after_cursor = match prev_head.through {
         Some(c) => if source_kind == format.ARCHIVE_SOURCE_LOG {
@@ -286,7 +312,7 @@ fn archive_commit_gap(mut sink: std.object.Client, store: types.StoreKey, source
         },
         None => 0u64,
     }
-    let candidate = format.ArchiveHeadRep(store, source_kind, binding_id, holder_epoch, rev: prev_head.rev + 1, open_gap: true, through: prev_head.through, floor_base: clone(prev_head.floor_base), index_tail: prev_head.index_tail, intervals: take closed_ivs)
+    let candidate = format.ArchiveHeadRep(store, source_kind, binding_id, holder_epoch, rev: prev_head.rev + 1, open_gap: true, through: prev_head.through, floor_base: clone(prev_head.floor_base), index_tail: prev_head.index_tail, intervals: take closed_ivs, incarnation: prev_head.incarnation, holds: clone(prev_head.holds))
     match archive_head_cas(mut sink, store, Match(tag), candidate, deadline)? {
         ArchiveCasApplied(_) => {
             push_trace(mut trace, TraceGap(after_cursor))
@@ -302,41 +328,74 @@ fn archive_commit_gap(mut sink: std.object.Client, store: types.StoreKey, source
     }
 }
 
+pub fn kept_preview_holds(holds: List[format.PreviewHoldRep], now_ms: u64) -> Result[List[format.PreviewHoldRep], types.Failure] {
+    let mut kept: List[format.PreviewHoldRep] = list.new()
+    types.capacity(list.try_reserve(mut kept, list.len(holds)))?
+    for h in holds {
+        if now_ms < h.until_ms || now_ms - h.until_ms < format.PREVIEW_GRACE_MS {
+            list.push(mut kept, h)
+        }
+    }
+    Ok(take kept)
+}
+
+fn retire_preview_tick(mut sink: std.object.Client, head: format.ArchiveHeadRep, tag: std.object.ETag, deadline: u64) -> Result[bool, types.Failure] waits {
+    if list.len(head.holds) == 0 {
+        return Ok(false)
+    }
+    let kept = kept_preview_holds(head.holds, std.object.client_wall_ms(sink))?
+    if list.len(kept) == list.len(head.holds) {
+        return Ok(false)
+    }
+    let mut candidate: format.ArchiveHeadRep = clone(head)
+    candidate.rev = history_next_id(head.rev)?
+    candidate.holds = take kept
+    let _ = archive_head_cas(mut sink, head.store, Match(tag), candidate, deadline)?
+    Ok(true)
+}
+
 // Performs one bounded archive step for a Directory (`log@1`) store.
-pub fn archive_step_directory(d: Dir, store: types.StoreKey, binding_id: u64, allow_rebind: bool, mut sink: std.object.Client, deadline: u64) -> Result[ArchiveStepResult, types.Failure] waits {
+pub fn archive_step_directory(r: Random, d: Dir, store: types.StoreKey, binding_id: u64, allow_rebind: bool, mut sink: std.object.Client, deadline: u64) -> Result[ArchiveStepResult, types.Failure] waits {
     let trace: List[ArchiveTraceEvent] = list.new()
     let (take cur_raw, take cur_manifest, take cur_path) = read_dir_manifest_candidate(d, store, None)?
     if cur_manifest.binding_id != binding_id {
         return Error(Fenced(0))
     }
-    let existing = archive_head_fetch(mut sink, store, deadline)?
-    let Some((take prev_head, tag)) = take existing else {
-        // No archive-head yet: publish the current MANIFEST as the initial base.
-        return archive_publish_dir_base(d, store, binding_id, mut sink, None, take cur_raw, take cur_manifest, take cur_path, false, deadline, take trace)
+    let (take prev_head, tag) = match archive_head_fetch(mut sink, store, deadline)? {
+        Some(take found) => take found,
+        None => archive_create_head(r, mut sink, store, format.ARCHIVE_SOURCE_LOG, binding_id, 0, deadline)?,
     }
+    let inc = prev_head.incarnation
     if prev_head.source_kind != format.ARCHIVE_SOURCE_LOG {
         return Error(format.disk_fault("archive-head", 72, Malformed))
     }
     let need_rebind_gap = check_archive_authority(prev_head, binding_id, 0, allow_rebind)?
+    if retire_preview_tick(mut sink, prev_head, tag, deadline)? {
+        return Ok(empty_step_result(None))
+    }
     if need_rebind_gap && !prev_head.open_gap && prev_head.through != None {
         return archive_commit_gap(mut sink, store, format.ARCHIVE_SOURCE_LOG, binding_id, 0, prev_head, tag, deadline, take trace)
     }
     if prev_head.open_gap || prev_head.through == None {
-        return archive_publish_dir_base(d, store, binding_id, mut sink, Some((take prev_head, tag)), take cur_raw, take cur_manifest, take cur_path, false, deadline, take trace)
+        return archive_publish_dir_base(d, store, binding_id, mut sink, (take prev_head, tag), take cur_raw, take cur_manifest, take cur_path, false, deadline, take trace)
     }
     let cur = option.unwrap(prev_head.through)
     // Check if current segment `cur.ordinal` is available on source or staged on sink.
     let seg_present = dir_segment_exists(d, cur.ordinal)?
     if !seg_present {
         // Check if already staged at sink before declaring a budget Gap.
-        let staged_key = format.archive_key(store, format.archive_log_journal_rel(cur.ordinal, cur.sub))
-        let mut staged_raw = manifest.disk_read_buffer(65536)?
-        match history_fetch(mut sink, staged_key, mut staged_raw, deadline) {
-            Ok(_) => {
+        let staged_key = format.archive_key(store, inc, format.archive_log_journal_rel(cur.ordinal, cur.sub))
+        match archive_read_staged(mut sink, staged_key, 18446744073709551615u64, deadline) {
+            Ok(take staged_raw) => {
                 let (new_ver, new_at) = archive_verify_journal_chunk(staged_key, store, cur.ordinal, cur.sub, staged_raw, cur.main_version, cur.main_at)?
+                archive_secure_direct(DirectoryPacks(d), mut sink, prev_head, staged_key, staged_raw, if cur.sub == 0 {
+                    72u64
+                } else {
+                    0u64
+                }, deadline)?
                 let next_cur = format.ArchiveCursorRep(source_kind: format.ARCHIVE_SOURCE_LOG, ordinal: cur.ordinal, sub: cur.sub + list.len(staged_raw), gen: cur.gen, digest: cur.digest, len: cur.len, main_version: new_ver, main_at: new_at)
                 let next_ivs = extend_head_interval(prev_head.intervals, next_cur)?
-                let cand = format.ArchiveHeadRep(store, source_kind: format.ARCHIVE_SOURCE_LOG, binding_id, holder_epoch: 0, rev: prev_head.rev + 1, open_gap: false, through: Some(next_cur), floor_base: clone(prev_head.floor_base), index_tail: prev_head.index_tail, intervals: take next_ivs)
+                let cand = format.ArchiveHeadRep(store, source_kind: format.ARCHIVE_SOURCE_LOG, binding_id, holder_epoch: 0, rev: prev_head.rev + 1, open_gap: false, through: Some(next_cur), floor_base: clone(prev_head.floor_base), index_tail: prev_head.index_tail, intervals: take next_ivs, incarnation: prev_head.incarnation, holds: clone(prev_head.holds))
                 return match archive_head_cas(mut sink, store, Match(tag), cand, deadline)? {
                     ArchiveCasApplied(_) => Ok(ArchiveStepResult(advanced: true, gap_committed: false, head: Some(take cand), acked_gen: cur.gen, acked_digest: cur.digest, acked_seg: if cur.ordinal > 0 {
                         cur.ordinal - 1
@@ -353,7 +412,7 @@ pub fn archive_step_directory(d: Dir, store: types.StoreKey, binding_id: u64, al
             },
             Error(Remote(NotFound)) => {
                 // Never mask sink corruption of a committed base as a budget Gap (L-A3).
-                dir_verify_sink_base_intact(mut sink, store, cur, deadline)?
+                dir_verify_sink_base_intact(mut sink, store, inc, cur, deadline)?
                 return archive_commit_gap(mut sink, store, format.ARCHIVE_SOURCE_LOG, binding_id, 0, prev_head, tag, deadline, take trace)
             },
             Error(take problem) => return Error(take problem),
@@ -373,14 +432,19 @@ pub fn archive_step_directory(d: Dir, store: types.StoreKey, binding_id: u64, al
             let chunk_raw = manifest.read_disk_bytes(mut f, seg_path, cur.sub, bound_end - cur.sub)?
             manifest.disk_io(host.close(take f))?
             let (chk_ver, chk_at) = archive_verify_journal_chunk(seg_path, store, cur.ordinal, cur.sub, chunk_raw, cur.main_version, cur.main_at)?
-            let (new_sub, fin_ver, fin_at) = match archive_put_journal_chunk(mut sink, store, cur.ordinal, cur.sub, take chunk_raw, cur.main_version, cur.main_at, deadline)? {
+            let (new_sub, fin_ver, fin_at) = match archive_put_journal_chunk(mut sink, store, inc, cur.ordinal, cur.sub, clone(chunk_raw), cur.main_version, cur.main_at, deadline)? {
                 ChunkStored(end_pos) => (end_pos, chk_ver, chk_at),
                 ChunkAdoptedPrefix(prefix_end, p_ver, p_at) => (prefix_end, p_ver, p_at),
                 ChunkDiverged(_) => return Error(Diverged(0)),
             }
+            archive_secure_direct(DirectoryPacks(d), mut sink, prev_head, seg_path, list.slice(chunk_raw, 0, new_sub - cur.sub), if cur.sub == 0 {
+                72u64
+            } else {
+                0u64
+            }, deadline)?
             let next_cur = format.ArchiveCursorRep(source_kind: format.ARCHIVE_SOURCE_LOG, ordinal: cur.ordinal, sub: new_sub, gen: cur.gen, digest: cur.digest, len: cur.len, main_version: fin_ver, main_at: fin_at)
             let next_ivs = extend_head_interval(prev_head.intervals, next_cur)?
-            let cand = format.ArchiveHeadRep(store, source_kind: format.ARCHIVE_SOURCE_LOG, binding_id, holder_epoch: 0, rev: prev_head.rev + 1, open_gap: false, through: Some(next_cur), floor_base: clone(prev_head.floor_base), index_tail: prev_head.index_tail, intervals: take next_ivs)
+            let cand = format.ArchiveHeadRep(store, source_kind: format.ARCHIVE_SOURCE_LOG, binding_id, holder_epoch: 0, rev: prev_head.rev + 1, open_gap: false, through: Some(next_cur), floor_base: clone(prev_head.floor_base), index_tail: prev_head.index_tail, intervals: take next_ivs, incarnation: prev_head.incarnation, holds: clone(prev_head.holds))
             return match archive_head_cas(mut sink, store, Match(tag), cand, deadline)? {
                 ArchiveCasApplied(_) => Ok(ArchiveStepResult(advanced: true, gap_committed: false, head: Some(take cand), acked_gen: cur.gen, acked_digest: cur.digest, acked_seg: if cur.ordinal > 0 {
                     cur.ordinal - 1
@@ -400,7 +464,7 @@ pub fn archive_step_directory(d: Dir, store: types.StoreKey, binding_id: u64, al
     // If sealed (successor segment exists), advance to the next cut base or next segment.
     if let Some(_) = sealed_bound {
         let next_seg = cur.ordinal + 1
-        archive_stage_successor(d, mut sink, store, next_seg, cur.sub, deadline)?
+        archive_stage_successor(d, mut sink, store, inc, next_seg, cur.sub, deadline)?
         if cur_manifest.generation > cur.gen {
             let want_gen = cur.gen + 1
             let next_base: Option[(Bytes, manifest.PageManifest, String)] = if want_gen == cur_manifest.generation {
@@ -415,12 +479,12 @@ pub fn archive_step_directory(d: Dir, store: types.StoreKey, binding_id: u64, al
             match take next_base {
                 Some((take nb_raw, take nb_rec, take nb_path)) => {
                     if nb_rec.first_live == next_seg {
-                        return archive_publish_dir_base(d, store, binding_id, mut sink, Some((take prev_head, tag)), take nb_raw, take nb_rec, take nb_path, true, deadline, take trace)
+                        return archive_publish_dir_base(d, store, binding_id, mut sink, (take prev_head, tag), take nb_raw, take nb_rec, take nb_path, true, deadline, take trace)
                     }
                 },
                 None => {
                     // Intermediate receipt `m-<cur.gen + 1>` was released past hold_bytes.
-                    dir_verify_sink_base_intact(mut sink, store, cur, deadline)?
+                    dir_verify_sink_base_intact(mut sink, store, inc, cur, deadline)?
                     return archive_commit_gap(mut sink, store, format.ARCHIVE_SOURCE_LOG, binding_id, 0, prev_head, tag, deadline, take trace)
                 },
             }
@@ -428,7 +492,7 @@ pub fn archive_step_directory(d: Dir, store: types.StoreKey, binding_id: u64, al
         // No cut at `next_seg`: reopened segment rotation under same base.
         let next_cur = format.ArchiveCursorRep(source_kind: format.ARCHIVE_SOURCE_LOG, ordinal: next_seg, sub: 0, gen: cur.gen, digest: cur.digest, len: cur.len, main_version: cur.main_version, main_at: cur.main_at)
         let next_ivs = extend_head_interval(prev_head.intervals, next_cur)?
-        let cand = format.ArchiveHeadRep(store, source_kind: format.ARCHIVE_SOURCE_LOG, binding_id, holder_epoch: 0, rev: prev_head.rev + 1, open_gap: false, through: Some(next_cur), floor_base: clone(prev_head.floor_base), index_tail: prev_head.index_tail, intervals: take next_ivs)
+        let cand = format.ArchiveHeadRep(store, source_kind: format.ARCHIVE_SOURCE_LOG, binding_id, holder_epoch: 0, rev: prev_head.rev + 1, open_gap: false, through: Some(next_cur), floor_base: clone(prev_head.floor_base), index_tail: prev_head.index_tail, intervals: take next_ivs, incarnation: prev_head.incarnation, holds: clone(prev_head.holds))
         return match archive_head_cas(mut sink, store, Match(tag), cand, deadline)? {
             ArchiveCasApplied(_) => Ok(ArchiveStepResult(advanced: true, gap_committed: false, head: Some(take cand), acked_gen: cur.gen, acked_digest: cur.digest, acked_seg: cur.ordinal, acked_entry: 0, trace: take trace)),
             ArchiveCasConflict(take other, _) => if other.binding_id != binding_id {
@@ -457,7 +521,7 @@ fn opener_fetch_object(source: Sender[ArchiveFetchReq], key: String, reference: 
     Ok(take raw)
 }
 
-fn opener_fetch_locator_deps(source: Sender[ArchiveFetchReq], mut sink: std.object.Client, store: types.StoreKey, mark_ref: pages.HistoryRef, file: String, depth: u8, raw: Bytes, mut packs_out: List[format.ArchivePackRefRep], deadline: u64) -> Result[(), types.Failure] waits {
+fn opener_fetch_locator_deps(source: Sender[ArchiveFetchReq], mut sink: std.object.Client, store: types.StoreKey, inc: Inline[u8, 16], mark_ref: pages.HistoryRef, file: String, depth: u8, raw: Bytes, mut packs_out: List[format.ArchivePackRefRep], deadline: u64) -> Result[(), types.Failure] waits {
     let row_count = list.len(raw) / 32
     for i in 0u64 .. row_count {
         let item = pages.HistoryRef(seq: format.read_le(raw, i * 32, 8), epoch: format.read_le(raw, i * 32 + 8, 8), len: format.read_le(raw, i * 32 + 16, 8), digest: format.read_le(raw, i * 32 + 24, 8))
@@ -465,7 +529,7 @@ fn opener_fetch_locator_deps(source: Sender[ArchiveFetchReq], mut sink: std.obje
             let rel = history_read_key("p-", item)?
             let p_raw = opener_fetch_object(source, rel, item, deadline)?
             let _ = history_object_context(rel, store, 3, item, p_raw)?
-            let dst = format.archive_key(store, rel)
+            let dst = format.archive_key(store, inc, rel)
             match archive_put_immutable(mut sink, dst, take p_raw, deadline)? {
                 UnitStored => (),
                 UnitDiverged(_) => return Error(Diverged(0)),
@@ -478,8 +542,8 @@ fn opener_fetch_locator_deps(source: Sender[ArchiveFetchReq], mut sink: std.obje
             let ctx = history_object_context(rel, store, 8, item, l_raw)?
             let field = manifest.history_frame(rel, ctx, l_raw, 72, 0x00C0)?
             let child_rows = types.copied(list.slice(l_raw, field.payload, field.end))?
-            opener_fetch_locator_deps(source, mut sink, store, mark_ref, rel, depth - 1, child_rows, mut packs_out, deadline)?
-            let dst = format.archive_key(store, rel)
+            opener_fetch_locator_deps(source, mut sink, store, inc, mark_ref, rel, depth - 1, child_rows, mut packs_out, deadline)?
+            let dst = format.archive_key(store, inc, rel)
             match archive_put_immutable(mut sink, dst, take l_raw, deadline)? {
                 UnitStored => (),
                 UnitDiverged(_) => return Error(Diverged(0)),
@@ -491,7 +555,7 @@ fn opener_fetch_locator_deps(source: Sender[ArchiveFetchReq], mut sink: std.obje
 
 // Uploads a MARK checkpoint entry `mark_ref` and all its transitive dependencies
 // (`m-`, `l-`, `p-`, retained MARKs and their closures, then `e-`).
-fn opener_ship_mark_closure(source: Sender[ArchiveFetchReq], mut sink: std.object.Client, store: types.StoreKey, mark_ref: pages.HistoryRef, deadline: u64) -> Result[(manifest.PageManifest, List[format.ArchivePackRefRep]), types.Failure] waits {
+fn opener_ship_mark_closure(source: Sender[ArchiveFetchReq], mut sink: std.object.Client, store: types.StoreKey, inc: Inline[u8, 16], mark_ref: pages.HistoryRef, deadline: u64) -> Result[(manifest.PageManifest, List[format.ArchivePackRefRep]), types.Failure] waits {
     let e_rel = history_read_key("e-", mark_ref)?
     let e_raw = opener_fetch_object(source, e_rel, mark_ref, deadline)?
     let mark = manifest.disk_allocation(scoped fn() -> Result[HistoryMark, types.Failure] {
@@ -509,12 +573,12 @@ fn opener_ship_mark_closure(source: Sender[ArchiveFetchReq], mut sink: std.objec
         let _ = history_decode_manifest(rm_rel, store, r_mark, ret_ref.seq, clone(rm_raw))?
         let mut ignored_packs: List[format.ArchivePackRefRep] = list.new()
         let r_loc = types.copied(list.slice(r_raw, r_mark.locate_at, r_mark.locate_end))?
-        opener_fetch_locator_deps(source, mut sink, store, ret_ref, r_rel, r_mark.depth, r_loc, mut ignored_packs, deadline)?
-        match archive_put_immutable(mut sink, format.archive_key(store, rm_rel), take rm_raw, deadline)? {
+        opener_fetch_locator_deps(source, mut sink, store, inc, ret_ref, r_rel, r_mark.depth, r_loc, mut ignored_packs, deadline)?
+        match archive_put_immutable(mut sink, format.archive_key(store, inc, rm_rel), take rm_raw, deadline)? {
             UnitStored => (),
             UnitDiverged(_) => return Error(Diverged(0)),
         }
-        match archive_put_immutable(mut sink, format.archive_key(store, r_rel), take r_raw, deadline)? {
+        match archive_put_immutable(mut sink, format.archive_key(store, inc, r_rel), take r_raw, deadline)? {
             UnitStored => (),
             UnitDiverged(_) => return Error(Diverged(0)),
         }
@@ -524,12 +588,12 @@ fn opener_ship_mark_closure(source: Sender[ArchiveFetchReq], mut sink: std.objec
     let page_record = history_decode_manifest(m_rel, store, mark, mark_ref.seq, clone(m_raw))?
     let mut packs: List[format.ArchivePackRefRep] = list.new()
     let e_loc = types.copied(list.slice(e_raw, mark.locate_at, mark.locate_end))?
-    opener_fetch_locator_deps(source, mut sink, store, mark_ref, e_rel, mark.depth, e_loc, mut packs, deadline)?
-    match archive_put_immutable(mut sink, format.archive_key(store, m_rel), take m_raw, deadline)? {
+    opener_fetch_locator_deps(source, mut sink, store, inc, mark_ref, e_rel, mark.depth, e_loc, mut packs, deadline)?
+    match archive_put_immutable(mut sink, format.archive_key(store, inc, m_rel), take m_raw, deadline)? {
         UnitStored => (),
         UnitDiverged(_) => return Error(Diverged(0)),
     }
-    match archive_put_immutable(mut sink, format.archive_key(store, e_rel), take e_raw, deadline)? {
+    match archive_put_immutable(mut sink, format.archive_key(store, inc, e_rel), take e_raw, deadline)? {
         UnitStored => (),
         UnitDiverged(_) => return Error(Diverged(0)),
     }
@@ -590,9 +654,9 @@ fn entry_main_version_and_at(file: String, store: types.StoreKey, reference: pag
     Ok((false, main_ver, main_at))
 }
 
-fn verify_sink_object_entry_intact(mut sink: std.object.Client, store: types.StoreKey, cur: format.ArchiveCursorRep, deadline: u64) -> Result[(), types.Failure] waits {
+fn verify_sink_object_entry_intact(mut sink: std.object.Client, store: types.StoreKey, inc: Inline[u8, 16], cur: format.ArchiveCursorRep, deadline: u64) -> Result[(), types.Failure] waits {
     let r = pages.HistoryRef(seq: cur.ordinal, epoch: cur.sub, len: cur.len, digest: cur.digest)
-    let e_key = format.archive_key(store, history_read_key("e-", r)?)
+    let e_key = format.archive_key(store, inc, history_read_key("e-", r)?)
     let mut raw = manifest.disk_read_buffer(cur.len)?
     match history_fetch(mut sink, e_key, mut raw, deadline) {
         Ok(_) => history_object_digest(e_key, r, raw),
@@ -611,9 +675,11 @@ fn objects_check_holder_still_valid(source: Sender[ArchiveFetchReq], store: type
     Ok(capture.head)
 }
 
-fn archive_publish_objects_base(source: Sender[ArchiveFetchReq], mut sink: std.object.Client, store: types.StoreKey, binding_id: u64, holder_epoch: u64, take existing: Option[(format.ArchiveHeadRep, std.object.ETag)], mark_ref: pages.HistoryRef, continuous: bool, deadline: u64, take trace_in: List[ArchiveTraceEvent]) -> Result[ArchiveStepResult, types.Failure] waits {
+fn archive_publish_objects_base(source: Sender[ArchiveFetchReq], mut sink: std.object.Client, store: types.StoreKey, binding_id: u64, holder_epoch: u64, take existing: (format.ArchiveHeadRep, std.object.ETag), mark_ref: pages.HistoryRef, continuous: bool, deadline: u64, take trace_in: List[ArchiveTraceEvent]) -> Result[ArchiveStepResult, types.Failure] waits {
     let trace = take trace_in
-    let (take m_rec, take pack_refs) = opener_ship_mark_closure(source, mut sink, store, mark_ref, deadline)?
+    let (take prev_head, tag) = take existing
+    let inc = prev_head.incarnation
+    let (take m_rec, take pack_refs) = opener_ship_mark_closure(source, mut sink, store, inc, mark_ref, deadline)?
     let mut max_pack = 0u64
     for p in pack_refs {
         if p.seq > max_pack {
@@ -625,30 +691,22 @@ fn archive_publish_objects_base(source: Sender[ArchiveFetchReq], mut sink: std.o
     let main_ver = m_rec.branches[0u64].version
     let main_at = m_rec.branches[0u64].at
     let mut base_row = format.ArchiveBaseRowRep(base_ordinal: mark_ref.seq, epoch: mark_ref.epoch, digest: mark_ref.digest, len: mark_ref.len, first_unit: mark_ref.seq, main_version: main_ver, main_at, frontier, pack_continuation: false, packs: take pack_refs)
-    if let Some((prev_head, _)) = view existing {
-        if let Some(prev_tail) = prev_head.index_tail {
-            let (take prev_base, take prev_packs) = archive_load_latest_base(mut sink, store, prev_tail, deadline)?
-            archive_check_no_relisting(prev_base, prev_packs, base_row)?
-        }
+    if let Some(prev_tail) = prev_head.index_tail {
+        let (take prev_base, take prev_packs) = archive_load_latest_base(mut sink, store, inc, prev_tail, deadline)?
+        archive_check_no_relisting(prev_base, prev_packs, base_row)?
     }
     let cursor = format.ArchiveCursorRep(source_kind: format.ARCHIVE_SOURCE_OBJECTS, ordinal: mark_ref.seq, sub: mark_ref.epoch, gen: mark_ref.seq, digest: mark_ref.digest, len: mark_ref.len, main_version: main_ver, main_at)
-    let (pre, prev_tail, rev, take floor_opt, take next_ivs, take spilled_ivs): (std.object.Precondition, Option[format.ArchiveIndexRefRep], u64, Option[format.ArchiveBaseRowRep], List[format.ArchiveIntervalRep], List[format.ArchiveIntervalRep]) = match take existing {
-        None => {
-            let mut ivs: List[format.ArchiveIntervalRep] = list.new()
-            types.capacity(list.try_reserve(mut ivs, 1))?
-            list.push(mut ivs, format.ArchiveIntervalRep(first_base: format.archive_base_summary(base_row), through: cursor, closed_by_gap: false))
-            (Absent, None, 1u64, None, take ivs, list.new())
-        },
-        Some((take prev_head, tag)) => {
-            let (take ivs, take spilled): (List[format.ArchiveIntervalRep], List[format.ArchiveIntervalRep]) = if continuous && list.len(prev_head.intervals) > 0 {
-                (extend_head_interval(prev_head.intervals, cursor)?, list.new())
-            } else {
-                append_head_interval(prev_head.intervals, format.ArchiveIntervalRep(first_base: format.archive_base_summary(base_row), through: cursor, closed_by_gap: false))?
-            }
-            (Match(tag), prev_head.index_tail, prev_head.rev + 1, clone(prev_head.floor_base), take ivs, take spilled)
-        },
+    let (take next_ivs, take spilled_ivs): (List[format.ArchiveIntervalRep], List[format.ArchiveIntervalRep]) = if continuous && list.len(prev_head.intervals) > 0 {
+        (extend_head_interval(prev_head.intervals, cursor)?, list.new())
+    } else {
+        append_head_interval(prev_head.intervals, format.ArchiveIntervalRep(first_base: format.archive_base_summary(base_row), through: cursor, closed_by_gap: false))?
     }
-    let (new_tail, first_ord) = archive_spill_base_index(mut sink, store, format.ARCHIVE_SOURCE_OBJECTS, prev_tail, base_row, spilled_ivs, deadline)?
+    let pre: std.object.Precondition = Match(tag)
+    let prev_tail = prev_head.index_tail
+    let rev = prev_head.rev + 1
+    let floor_opt: Option[format.ArchiveBaseRowRep] = clone(prev_head.floor_base)
+    let holds: List[format.PreviewHoldRep] = clone(prev_head.holds)
+    let (new_tail, first_ord) = archive_spill_base_index(mut sink, store, inc, format.ARCHIVE_SOURCE_OBJECTS, prev_tail, base_row, spilled_ivs, deadline)?
     base_row.frontier.first_index_ordinal = first_ord
     let floor_base = match take floor_opt {
         Some(take fb) => Some(take fb),
@@ -660,7 +718,7 @@ fn archive_publish_objects_base(source: Sender[ArchiveFetchReq], mut sink: std.o
     }
     // Re-verify holder epoch right before archive-head CAS (L-A6).
     let _ = objects_check_holder_still_valid(source, store, holder_epoch, deadline)?
-    let cand = format.ArchiveHeadRep(store, source_kind: format.ARCHIVE_SOURCE_OBJECTS, binding_id, holder_epoch, rev, open_gap: false, through: Some(cursor), floor_base: take floor_base, index_tail: Some(new_tail), intervals: take final_ivs)
+    let cand = format.ArchiveHeadRep(store, source_kind: format.ARCHIVE_SOURCE_OBJECTS, binding_id, holder_epoch, rev, open_gap: false, through: Some(cursor), floor_base: take floor_base, index_tail: Some(new_tail), intervals: take final_ivs, incarnation: inc, holds: take holds)
     match archive_head_cas(mut sink, store, pre, cand, deadline)? {
         ArchiveCasApplied(_) => Ok(ArchiveStepResult(advanced: true, gap_committed: false, head: Some(take cand), acked_gen: m_rec.generation, acked_digest: mark_ref.digest, acked_seg: 0, acked_entry: mark_ref.seq, trace: take trace)),
         ArchiveCasConflict(take other, _) => {
@@ -674,22 +732,26 @@ fn archive_publish_objects_base(source: Sender[ArchiveFetchReq], mut sink: std.o
 }
 
 // Performs one bounded archive step for an `objects@1` (Bucket) store.
-pub fn archive_step_objects(source: Sender[ArchiveFetchReq], store: types.StoreKey, binding_id: u64, holder_epoch: u64, allow_rebind: bool, mut sink: std.object.Client, deadline: u64) -> Result[ArchiveStepResult, types.Failure] waits {
+pub fn archive_step_objects(r: Random, source: Sender[ArchiveFetchReq], store: types.StoreKey, binding_id: u64, holder_epoch: u64, allow_rebind: bool, mut sink: std.object.Client, deadline: u64) -> Result[ArchiveStepResult, types.Failure] waits {
     let trace: List[ArchiveTraceEvent] = list.new()
     let src_head = objects_check_holder_still_valid(source, store, holder_epoch, deadline)?
-    let existing = archive_head_fetch(mut sink, store, deadline)?
-    let Some((take prev_head, tag)) = take existing else {
-        return archive_publish_objects_base(source, mut sink, store, binding_id, holder_epoch, None, src_head.checkpoint, false, deadline, take trace)
+    let (take prev_head, tag) = match archive_head_fetch(mut sink, store, deadline)? {
+        Some(take found) => take found,
+        None => archive_create_head(r, mut sink, store, format.ARCHIVE_SOURCE_OBJECTS, binding_id, holder_epoch, deadline)?,
     }
+    let inc = prev_head.incarnation
     if prev_head.source_kind != format.ARCHIVE_SOURCE_OBJECTS {
         return Error(format.disk_fault("archive-head", 72, Malformed))
     }
     let need_rebind_gap = check_archive_authority(prev_head, binding_id, holder_epoch, allow_rebind)?
+    if retire_preview_tick(mut sink, prev_head, tag, deadline)? {
+        return Ok(empty_step_result(None))
+    }
     if need_rebind_gap && !prev_head.open_gap && prev_head.through != None {
         return archive_commit_gap(mut sink, store, format.ARCHIVE_SOURCE_OBJECTS, binding_id, holder_epoch, prev_head, tag, deadline, take trace)
     }
     if prev_head.open_gap || prev_head.through == None {
-        return archive_publish_objects_base(source, mut sink, store, binding_id, holder_epoch, Some((take prev_head, tag)), src_head.checkpoint, false, deadline, take trace)
+        return archive_publish_objects_base(source, mut sink, store, binding_id, holder_epoch, (take prev_head, tag), src_head.checkpoint, false, deadline, take trace)
     }
     let cur = option.unwrap(prev_head.through)
     if src_head.entry.seq == cur.ordinal {
@@ -705,14 +767,14 @@ pub fn archive_step_objects(source: Sender[ArchiveFetchReq], store: types.StoreK
     if src_head.floor > next_seq {
         // Source reclaimed `next_seq` past budget. Verify committed sink unit
         // first so sink damage is never masked as a budget Gap (L-A3).
-        verify_sink_object_entry_intact(mut sink, store, cur, deadline)?
+        verify_sink_object_entry_intact(mut sink, store, inc, cur, deadline)?
         return archive_commit_gap(mut sink, store, format.ARCHIVE_SOURCE_OBJECTS, binding_id, holder_epoch, prev_head, tag, deadline, take trace)
     }
     let prev_ref = pages.HistoryRef(seq: cur.ordinal, epoch: cur.sub, len: cur.len, digest: cur.digest)
     let next_ref = match opener_find_next_entry(source, src_head, next_seq, Some(prev_ref), deadline) {
-        Ok(r) => r,
+        Ok(found_ref) => found_ref,
         Error(HistoryMissing(_, _)) => {
-            verify_sink_object_entry_intact(mut sink, store, cur, deadline)?
+            verify_sink_object_entry_intact(mut sink, store, inc, cur, deadline)?
             return archive_commit_gap(mut sink, store, format.ARCHIVE_SOURCE_OBJECTS, binding_id, holder_epoch, prev_head, tag, deadline, take trace)
         },
         Error(take problem) => return Error(take problem),
@@ -721,16 +783,17 @@ pub fn archive_step_objects(source: Sender[ArchiveFetchReq], store: types.StoreK
     let next_raw = opener_fetch_object(source, next_rel, next_ref, deadline)?
     let (is_mark, new_ver, new_at) = entry_main_version_and_at(next_rel, store, next_ref, next_raw, cur.main_version, cur.main_at)?
     if is_mark {
-        return archive_publish_objects_base(source, mut sink, store, binding_id, holder_epoch, Some((take prev_head, tag)), next_ref, true, deadline, take trace)
+        return archive_publish_objects_base(source, mut sink, store, binding_id, holder_epoch, (take prev_head, tag), next_ref, true, deadline, take trace)
     }
-    match archive_put_immutable(mut sink, format.archive_key(store, next_rel), take next_raw, deadline)? {
+    archive_secure_direct(ObjectPacks(channel.sender(source)), mut sink, prev_head, next_rel, next_raw, 112, deadline)?
+    match archive_put_immutable(mut sink, format.archive_key(store, inc, next_rel), take next_raw, deadline)? {
         UnitStored => (),
         UnitDiverged(_) => return Error(Diverged(0)),
     }
     let _ = objects_check_holder_still_valid(source, store, holder_epoch, deadline)?
     let next_cur = format.ArchiveCursorRep(source_kind: format.ARCHIVE_SOURCE_OBJECTS, ordinal: next_ref.seq, sub: next_ref.epoch, gen: cur.gen, digest: next_ref.digest, len: next_ref.len, main_version: new_ver, main_at: new_at)
     let next_ivs = extend_head_interval(prev_head.intervals, next_cur)?
-    let cand = format.ArchiveHeadRep(store, source_kind: format.ARCHIVE_SOURCE_OBJECTS, binding_id, holder_epoch, rev: prev_head.rev + 1, open_gap: false, through: Some(next_cur), floor_base: clone(prev_head.floor_base), index_tail: prev_head.index_tail, intervals: take next_ivs)
+    let cand = format.ArchiveHeadRep(store, source_kind: format.ARCHIVE_SOURCE_OBJECTS, binding_id, holder_epoch, rev: prev_head.rev + 1, open_gap: false, through: Some(next_cur), floor_base: clone(prev_head.floor_base), index_tail: prev_head.index_tail, intervals: take next_ivs, incarnation: prev_head.incarnation, holds: clone(prev_head.holds))
     match archive_head_cas(mut sink, store, Match(tag), cand, deadline)? {
         ArchiveCasApplied(_) => Ok(ArchiveStepResult(advanced: true, gap_committed: false, head: Some(take cand), acked_gen: 0, acked_digest: 0, acked_seg: 0, acked_entry: next_ref.seq, trace: take trace)),
         ArchiveCasConflict(take other, _) => if other.binding_id != binding_id || holder_epoch < other.holder_epoch {

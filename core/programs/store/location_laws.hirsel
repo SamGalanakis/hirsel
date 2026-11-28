@@ -41,7 +41,7 @@ fn law_scan_location_pack(mut graph: LawLocationGraph, seq: u64, class: u8, raw:
     } else {
         0x0021u16
     }
-    let mut pack = pages.PagePack(class: class, frames: 0, live: 0, payload_bytes: 0, index: 0)
+    let mut pack = pages.PagePack(foreign: None, class: class, frames: 0, live: 0, payload_bytes: 0, index: 0)
     let mut at = 72u64
     while at < list.len(raw) {
         let width: u32 = list.word_le(raw, at + 4)
@@ -98,10 +98,10 @@ fn law_read_location_list_row(mut graph: LawLocationGraph, tree: LawLocationTree
     }
     let width = format.read_le(page, cell + 1, 2)
     let value = cell + 3
-    if width != 29 || page[value] > 1 || map.contains(graph.listed, seq) {
+    if width != 30 || page[value + 29] != 0 || page[value] > 1 || map.contains(graph.listed, seq) {
         fail("location law: listed pack row")
     }
-    let pack = pages.PagePack(class: page[value], frames: list.word_le(page, value + 1), live: list.word_le(page, value + 5), payload_bytes: list.word_le(page, value + 13), index: list.word_le(page, value + 21))
+    let pack = pages.PagePack(foreign: None, class: page[value], frames: list.word_le(page, value + 1), live: list.word_le(page, value + 5), payload_bytes: list.word_le(page, value + 13), index: list.word_le(page, value + 21))
     map.insert(mut graph.listed, seq, pack)
 }
 

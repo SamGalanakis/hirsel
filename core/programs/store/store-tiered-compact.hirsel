@@ -53,7 +53,7 @@ pub fn lease_cut_inventories(installed: TieredCompaction, roots: List[pages.Root
         if let Some(inventory) = view participant.collections.paging {
             let mut known = false
             for leased in held {
-                if leased.generation == inventory.generation {
+                if leased.generation == inventory.generation && leased.next_stamp == inventory.next_stamp {
                     known = true
                 }
             }
@@ -431,6 +431,10 @@ pub fn cut_tiered_idle(roots: List[pages.Roots], installed_queue: Arc[std.page.P
 // starts), removes the cursor of every pack it retires, and never installs or
 // moves a cursor.
 pub fn compact_idle_probes(installed: manifest.PageLocations, running: Map[u64, TieredProbeCursor], budget: u64) -> Result[(Map[u64, TieredProbeCursor], List[u64]), types.Failure] {
+    compact_resident_probes(installed, running, map.new(), 0, budget)
+}
+
+pub fn compact_resident_probes(installed: manifest.PageLocations, running: Map[u64, TieredProbeCursor], reached: Map[u64, ()], permille: u64, budget: u64) -> Result[(Map[u64, TieredProbeCursor], List[u64]), types.Failure] {
     let mut probes: Map[u64, TieredProbeCursor] = clone(running)
     let mut retiring: List[u64] = list.new()
     let mut left = budget
@@ -440,6 +444,9 @@ pub fn compact_idle_probes(installed: manifest.PageLocations, running: Map[u64, 
             break
         }
         if pack.class != 3 && pack.class != 4 {
+            continue
+        }
+        if map.contains(reached, seq) && !map.contains(running, seq) && !pack_selected_for_compaction(pack, permille) {
             continue
         }
         let done = match map.get(running, seq) {

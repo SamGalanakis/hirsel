@@ -1,0 +1,303 @@
+// A witness is the touch closure of one recorded call: re-run with only the
+// witness in reach, the call gives its recorded verdict, and without any one
+// witnessed page it stops as Outside. A re-execution that asks for no witness
+// keeps no trace, and a Hot call carries no touch record at all.
+const WITNESS_LAW_STEPS: u64 = 100000000
+
+const WITNESS_LAW_ROWS: u64 = 6000
+
+fn witness_law_failed(_stop: Stop) -> Bytes {
+    b"failed"
+}
+
+fn witness_law_value(k: u64) -> Bytes {
+    let width = if k == 900 || k == 901 {
+        5000u64
+    } else {
+        200u64
+    }
+    let mut value: Bytes = list.with_capacity(width)
+    for _ in 0u64 .. width {
+        list.push(mut value, int.truncate(k % 251))
+    }
+    take value
+}
+
+fn witness_law_fill(mut db: Db, t: Table[u64, Bytes]) -> Result[(), Error] waits {
+    let mut from = 0u64
+    while from < WITNESS_LAW_ROWS {
+        let Committed(_) = run(mut db, Some(WITNESS_LAW_STEPS), (copy_env(t), from), fn(mut tx: Tx, env: (Table[u64, Bytes], u64)) -> Result[(), Error] {
+            for k in env.1 .. env.1 + 500 {
+                put(mut tx, env.0, k, witness_law_value(k))?
+            }
+            Ok(())
+        })? else {
+            return Error(Missing("witness law: fixture rows"))
+        }
+        from += 500
+    }
+    Ok(())
+}
+
+// Two point reads, one of a BLOB row, a four-row range and one put.
+fn witness_law_entry(mut tx: Tx, t: Table[u64, Bytes], extra: Option[u64]) -> Result[Bytes, Bytes] {
+    let mut reply: Bytes = list.new()
+    let Some(small) = result.unwrap(fetch(tx, t, 40u64)) else {
+        fail("witness law: row 40")
+    }
+    list.push(mut reply, small[0u64])
+    let Some(wide) = result.unwrap(fetch(tx, t, 900u64)) else {
+        fail("witness law: row 900")
+    }
+    list.push(mut reply, wide[4999u64])
+    let mut rows = result.unwrap(range(tx, t, Included(2000u64), Excluded(2004u64)))
+    while let Some((_, v)) = result.unwrap(next_in(tx, mut rows)) {
+        list.push(mut reply, v[0u64])
+    }
+    if let Some(k) = extra {
+        if let Some(other) = result.unwrap(fetch(tx, t, k)) {
+            list.push(mut reply, other[0u64])
+        }
+    }
+    result.unwrap(put(mut tx, t, 5000u64, take small))
+    Ok(take reply)
+}
+
+fn witness_law_serve(mut db: Db, t: Table[u64, Bytes]) -> Result[u64, Error] waits {
+    let key = claim_law_key(b"one")
+    let record = KeyedCallRecord(entry: b"charge", args: b"args", revision: None, code: b"0123456789abcdef")
+    let no_stream_record: Option[CallRecord] = None
+    let Accepted(claimed) = admit_claim(mut db, key, request_digest(b"charge", b"args"), b"args", Some(claim_law_policy()))? else {
+        return Error(Missing("witness law: admit"))
+    }
+    let first = serve(mut db, keyed_completion(take claimed, take record), witness_law_plan(), take no_stream_record, t, fn(mut tx: Tx, data: Table[u64, Bytes]) -> Result[Bytes, Bytes] {
+        witness_law_entry(mut tx, data, None)
+    })
+    // A Tiered miss parks the call until the pager delivers its frame.
+    let served = l63_settle(mut db, take first, t, fn(mut tx: Tx, data: Table[u64, Bytes]) -> Result[Bytes, Bytes] {
+        witness_law_entry(mut tx, data, None)
+    })
+    let Ok(Committed(done)) = served else {
+        return Error(Missing("witness law: the keyed call did not commit"))
+    }
+    let mark = version(snapshot(db))
+    durable(mut db, done.ticket)?
+    Ok(mark)
+}
+
+fn witness_law_plan() -> Plan {
+    Plan(n_e: 4194304, s_e: 1000000, reply_max: 64)
+}
+
+fn witness_law_without(w: Witness, stamp: u64) -> Witness {
+    let mut resident: Map[u64, ()] = map.new()
+    for (held, _) in w.touches.resident {
+        if held != stamp {
+            map.insert(mut resident, held, ())
+        }
+    }
+    let mut frames: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
+    for (key, frame) in w.touches.frames {
+        if frame.identity.stamp != stamp {
+            map.insert(mut frames, (key.0, key.1), arc.share(frame))
+        }
+    }
+    let mut thinner: Witness = clone(w)
+    thinner.touches.resident = take resident
+    thinner.touches.frames = take frames
+    thinner.source.base = result.unwrap(witness_roots(w.source.base, thinner.touches, w.start.ids + 1099511627776u64))
+    take thinner
+}
+
+// The collection map's pages and each Hot collection root: a slice keeps them.
+fn witness_law_kept(page: Arc[std.page.Page], mut kept: Map[u64, ()]) {
+    let image = std.page.image_of(page)
+    map.insert(mut kept, std.page.stamp(image), ())
+    for slot in 0u64 .. std.page.count(image) {
+        if let Some(HotPage(kid)) = std.page.child_slot(page, slot) {
+            if std.page.level(image) == 0 {
+                map.insert(mut kept, std.page.stamp(std.page.image_of(kid)), ())
+            } else {
+                witness_law_kept(kid, mut kept)
+            }
+        }
+    }
+}
+
+fn witness_law_pages(page: Arc[std.page.Page]) -> u64 {
+    let image = std.page.image_of(page)
+    let mut total = 1u64
+    if std.page.level(image) != 0 {
+        for slot in 0u64 .. std.page.count(image) {
+            if let Some(HotPage(kid)) = std.page.child_slot(page, slot) {
+                total += witness_law_pages(kid)
+            }
+        }
+    }
+    total
+}
+
+fn witness_law_replay(w: Witness, extra: Option[u64]) -> Result[SliceVerdict, Error] {
+    let mut schema = declare_witness(w)?
+    let declared = declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let t = finish(mut schema, take declared)?
+    replay_witness(w, take schema, witness_law_plan(), witness_law_failed, (copy_env(t), extra), fn(_call, mut tx, env) -> Result[Bytes, Bytes] {
+        witness_law_entry(mut tx, env.0, env.1)
+    })
+}
+
+fn witness_law_same(got: SliceVerdict) -> bool {
+    match got {
+        Within(Same) => true,
+        _ => false,
+    }
+}
+
+fn witness_law_outside(got: SliceVerdict) -> bool {
+    match got {
+        Outside => true,
+        Within(_) => false,
+    }
+}
+
+@test
+fn witness_replays_resident_call_from_its_pages(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let mut db = open(tasks, directory, c, r, result.unwrap(sized(Directory, 2147483648u64)))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    witness_law_fill(mut db, rows)?
+    let mark = witness_law_serve(mut db, rows)?
+    let Ok(source) = prepare_reexecute_claim(db, mark)? else {
+        return Error(Missing("witness law: replay source"))
+    }
+    // Off: the re-run keeps no trace, and a Hot call has no touch record.
+    let call = replay_record(source)
+    let ci = CallInfo(id: CallId(store: db.store, branch: call.branch.id, version: call.base + 1), at: call.at, seed: call.seed)
+    let attempt = pager.call_attempt(captured_tiered(source.base.collections, pages.holder_bases(db.holders), ci.id.branch), pager.pin_partition(db.pager), 0)
+    let mut off: Option[RerunTrace] = None
+    let no_pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]] = map.new()
+    let quiet = rerun_attempt(tx_start(db), pages.holder_bases(db.holders), db.accounting.tiered, indexes.index_registry(db.indexes), source.base, ci, witness_law_plan(), call, attempt, no_pins, mut off, scoped fn(_recorded: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+        witness_law_entry(mut tx, rows, None)
+    })
+    let RanTo(_, _) = quiet else {
+        return Error(Missing("witness law: the plain re-run"))
+    }
+    if let Some(_) = off {
+        return Error(Missing("witness law: a re-run that asked for no witness kept a trace"))
+    }
+    if let Some(_) = attempt {
+        return Error(Missing("witness law: a Hot call carries a touch record"))
+    }
+    let plain = reexecute_claim(db, mark, witness_law_plan(), witness_law_failed, rows, fn(_call, mut tx, data) -> Result[Bytes, Bytes] {
+        witness_law_entry(mut tx, data, None)
+    })?
+    if !verdict_is(plain, Same) {
+        return Error(Missing("witness law: the plain re-execution"))
+    }
+    // On: the closure is a strict part of the table, with one of its two bodies.
+    let Some(w) = capture_witness(db, source, witness_law_plan(), rows, fn(_call, mut tx, data) -> Result[Bytes, Bytes] {
+        witness_law_entry(mut tx, data, None)
+    })? else {
+        return Error(Missing("witness law: no witness"))
+    }
+    let stamps = witness_resident(w)
+    let mut kept: Map[u64, ()] = map.new()
+    witness_law_kept(source.base.collections.root, mut kept)
+    let Some((HotPage(root), _)) = std.page.collection_slot(source.base.collections.root, failure_result_from_rep(catalog.prefix(rows.id))?) else {
+        return Error(Missing("witness law: the table root"))
+    }
+    let total = witness_law_pages(root)
+    if std.page.level(std.page.image_of(root)) == 0 || list.len(stamps) >= total || list.len(witness_bodies(w)) != 1 || list.len(witness_frames(w)) != 0 {
+        return Error(Missing("witness law: the closure is not a strict part of the table"))
+    }
+    close(take db)?
+    if !witness_law_same(witness_law_replay(w, None)?) {
+        return Error(Missing("witness law: the slice did not replay the call"))
+    }
+    // The source has a second BLOB on the same leaf. Its page is present
+    // in the slice, but the recorded call never read that body.
+    if !witness_law_outside(witness_law_replay(w, Some(901u64))?) {
+        return Error(Missing("witness law: read an unwitnessed resident BLOB body"))
+    }
+    // Exact: each page below a root is needed, and nothing else is in reach.
+    let mut needed = 0u64
+    for stamp in stamps {
+        let thinner = witness_law_without(w, stamp)
+        let got = witness_law_replay(thinner, None)?
+        if map.contains(kept, stamp) {
+            if !witness_law_same(got) {
+                return Error(Missing("witness law: a kept page changed the replay"))
+            }
+        } else {
+            if !witness_law_outside(got) {
+                return Error(Missing("witness law: the replay ran without a witnessed page"))
+            }
+            needed += 1
+        }
+    }
+    if needed < 3 {
+        return Error(Missing("witness law: too few pages below the roots"))
+    }
+    if !witness_law_outside(witness_law_replay(w, Some(3000u64))?) {
+        return Error(Missing("witness law: a read outside the slice was served"))
+    }
+    let Within(Different(Reply)) = witness_law_replay(w, Some(2001u64))? else {
+        return Error(Missing("witness law: a changed reply inside the slice"))
+    }
+    Ok(())
+}
+
+// The same call over a Tiered table whose pages are Cold: the witness is the
+// frames the completing attempt touched, PAGE and BLOB, and the replay takes
+// no reader grant.
+@test
+fn witness_replays_tiered_call_from_its_frames(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let mut overrides = derived_sizes()
+    overrides.resident_limit = Some(182375272u64)
+    let options = sized_with(Directory, 2147483648u64, overrides) ?=> |_| Missing("witness law: tiered sizing")
+    let mut first = open(tasks, directory, c, r, options)?
+    let _ = law_table(mut first, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let filled = table(mut first, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    set_residency(mut first, filled.id, Tiered)?
+    witness_law_fill(mut first, filled)?
+    let cut = checkpoint(mut first)?
+    durable(mut first, cut)?
+    close(take first)?
+    let mut db = open(tasks, directory, c, r, options)?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let mark = witness_law_serve(mut db, rows)?
+    let Ok(source) = prepare_reexecute_claim(db, mark)? else {
+        return Error(Missing("witness law: replay source"))
+    }
+    let Some(w) = capture_witness(db, source, witness_law_plan(), rows, fn(_call, mut tx, data) -> Result[Bytes, Bytes] {
+        witness_law_entry(mut tx, data, None)
+    })? else {
+        return Error(Missing("witness law: no witness"))
+    }
+    let frames = witness_frames(w)
+    let mut bodies = 0u64
+    for frame in frames {
+        if frame.blob {
+            bodies += 1
+        }
+    }
+    if list.len(frames) < 4 || bodies != 1 || list.len(witness_packs(w)) == 0 {
+        return Error(Missing("witness law: the Tiered closure"))
+    }
+    close(take db)?
+    if !witness_law_same(witness_law_replay(w, None)?) {
+        return Error(Missing("witness law: the frames did not replay the call"))
+    }
+    for frame in frames {
+        let thinner = witness_law_without(w, frame.stamp)
+        if !witness_law_outside(witness_law_replay(thinner, None)?) {
+            return Error(Missing("witness law: the replay ran without a witnessed frame"))
+        }
+    }
+    if !witness_law_outside(witness_law_replay(w, Some(3000u64))?) {
+        return Error(Missing("witness law: a read outside the frames was served"))
+    }
+    Ok(())
+}

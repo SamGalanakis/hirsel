@@ -70,7 +70,7 @@ fn l62_deliver_branch(requests: Sender[pager.TieredPagerMessage], target: std.pa
     let mut ids = 0u64
     for ptr in[target, leaf] {
         let width: u64 = int.widen(ptr.len)
-        let inventory = pages.PagePack(class: 3, frames: 1, live: width, payload_bytes: 116 + width, index: 88 + width)
+        let inventory = pages.PagePack(foreign: None, class: 3, frames: 1, live: width, payload_bytes: 116 + width, index: 88 + width)
         let (take next_packs, _) = std.omap.insert(mut ids, packs, ptr.pack, pages.TieredPagerPack(inventory: inventory, object: None))
         packs = take next_packs
     }
@@ -294,7 +294,7 @@ fn l62_read_replayed_point(source: pager.TieredPageSource, base: std.page.PagePt
     let mut account = pager.ReplayTieredAccount(total: 258, exact: true)
     let mut ids = 101u64
     let before = pager.ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None)
-    let put_op = format.JournalOp(key: clone(key), value: Some(string.into_bytes(string.from("second"))), prior: 7, trim: None)
+    let put_op = format.JournalOp(key: clone(key), value: Some(string.into_bytes(string.from("second"))), direct: None, prior: 7, trim: None)
     replay_tiered_op("j-1", mut tree, mut ids, mut account, before, put_op)?
     root.root_stamp = pages.tree_stamp(tree)
     let overlay_only = pager.TieredPageSource(pager: channel.sender(source.pager), packs: std.omap.new(), next_stamp: source.next_stamp, deadline: source.deadline)
@@ -310,7 +310,7 @@ fn l62_read_replayed_point(source: pager.TieredPageSource, base: std.page.PagePt
     if list.compare_bytes(untouched, string.as_bytes("stored")) != Equal {
         fail("L62: reading past an overlay changed a base row")
     }
-    let deleted = format.JournalOp(key: clone(key), value: None, prior: 7, trim: None)
+    let deleted = format.JournalOp(key: clone(key), value: None, direct: None, prior: 7, trim: None)
     replay_tiered_op("j-1", mut tree, mut ids, mut account, before, deleted)?
     root.root_stamp = pages.tree_stamp(tree)
     if let Some(_) = l62_read_point_bytes(overlay_only, grant, root, tree, key)? {
@@ -325,7 +325,7 @@ fn test_l62_pager_reads_replayed_points(d: Dir, tasks: Tasks) -> Result[(), Erro
     let owner = StoreId(hi: 3, lo: 4)
     let base = l79_fold_base(fixtures, owner)?
     let width: u64 = int.widen(base.len)
-    let inventory = pages.PagePack(class: 3, frames: 1, live: width, payload_bytes: 116 + width, index: 88 + width)
+    let inventory = pages.PagePack(foreign: None, class: 3, frames: 1, live: width, payload_bytes: 116 + width, index: 88 + width)
     let mut ids = 0u64
     let empty: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
     let (take packs, _) = std.omap.insert(mut ids, empty, 8u64, pages.TieredPagerPack(inventory: inventory, object: None))
@@ -368,7 +368,7 @@ fn test_l62_batch_error_follows_touch(d: Dir, tasks: Tasks) -> Result[(), Error]
     list.push(mut branches, std.page.Entry(key: types.key_word(42), cell: Child(std.page.Branch(child: sibling, rows: 1, charge: 86))))
     let image = failure_result_from_rep(pages.page_result(std.page.encode(branches, 1, 50, Collection)))?
     let base = l68_write_page_pack(fixtures, owner, 9, 50, std.page.payload(image))?
-    let inventory = pages.PagePack(class: 3, frames: 1, live: 144, payload_bytes: 260, index: 232)
+    let inventory = pages.PagePack(foreign: None, class: 3, frames: 1, live: 144, payload_bytes: 260, index: 232)
     let mut ids = 0u64
     let empty: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
     let (take packs, _) = std.omap.insert(mut ids, empty, 9u64, pages.TieredPagerPack(inventory: inventory, object: None))
@@ -437,7 +437,7 @@ fn test_l63_plan_prior_uses_deciding_leaf() -> Result[(), Error] {
     let mut ids = 102u64
     let before_edit = pager.ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None)
     let new_bytes = string.into_bytes(string.from("second"))
-    let op = format.JournalOp(key: clone(key), value: Some(take new_bytes), prior: 7, trim: None)
+    let op = format.JournalOp(key: clone(key), value: Some(take new_bytes), direct: None, prior: 7, trim: None)
     replay_tiered_op("j-1", mut before, mut ids, mut account, before_edit, op)?
     let folded = pager.tiered_attempt(0, 0)
     let Error(Missed) = failure_result_from_rep(pager.tiered_plan_prior(folded, visible, before, key)) else {
@@ -625,7 +625,7 @@ fn test_l68_cut_keeps_cold_inventory_out_of_memory_graph() -> Result[(), Error] 
     let mut holders: List[manifest.HeldPage] = list.with_capacity(3)
     manifest.note_held_roots(mut holders, 0, 0, roots)
     let mut installed = manifest.new_page_locations()
-    let cold = pages.PagePack(class: 3, frames: 1, live: 0, payload_bytes: 220, index: 168)
+    let cold = pages.PagePack(foreign: None, class: 3, frames: 1, live: 0, payload_bytes: 220, index: 168)
     failure_result_from_rep(types.capacity(manifest.disk_index_put(mut installed.packs, 8, cold, manifest.pack_edge_charge)))?
     let base = failure_result_from_rep(manifest.page_retry_base(installed, map.new(), holders, held_roots))?
     if base.account != 126 || manifest.map_has_location(base.locations, 40) {
@@ -639,7 +639,7 @@ fn test_l68_cut_keeps_cold_inventory_out_of_memory_graph() -> Result[(), Error] 
     let Some(kept) = std.page.lookup(cut_plan.lists.roots.packs, types.key_word(8)) else {
         fail("L68: a Tiered pack retired without a probe")
     }
-    if list.len(kept) != 29 || kept[0u64] != 3 || format.read_le(kept, 5, 8) != 0 || format.read_le(kept, 13, 8) != 220 || format.read_le(kept, 21, 8) != 168 {
+    if list.len(kept) != 30 || kept[29u64] != 0 || kept[0u64] != 3 || format.read_le(kept, 5, 8) != 0 || format.read_le(kept, 13, 8) != 220 || format.read_le(kept, 21, 8) != 168 {
         fail("L68: cut changed the Tiered pack inventory")
     }
     let owner = StoreId(hi: 3, lo: 4)
@@ -749,7 +749,7 @@ fn test_l62_replayed_log_masks_cold_rows() -> Result[(), Error] waits {
     let mut account = pager.ReplayTieredAccount(total: 258, exact: true)
     let mut ids = 101u64
     let before = pager.ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: Some(pages.LogBoundsRep(first: 1, next: 4)))
-    let trim = format.JournalOp(key: take id, value: None, prior: 0, trim: Some(format.JournalTrim(floor: 2, dropped: 86)))
+    let trim = format.JournalOp(key: take id, value: None, direct: None, prior: 0, trim: Some(format.JournalTrim(floor: 2, dropped: 86)))
     replay_tiered_op("j-1", mut tree, mut ids, mut account, before, trim)?;
     // There is no pager to answer. The former first row is in the base but
     // the new descriptor masks it. A retained row still needs the pager.

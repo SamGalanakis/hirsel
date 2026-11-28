@@ -89,7 +89,7 @@ fn l79_cut_table(base: std.page.PagePtr, total_rows: u64, row_bytes: u64, mut ne
 fn l79_cut_candidate(source: pager.TieredPageSource, base: std.page.PagePtr, body: Bytes, mut next_stamp: u64) -> Result[pages.Roots, Error] waits {
     let mut roots = l79_cut_table(base, 3, 258, mut next_stamp)?
     let mut account = pager.ReplayTieredAccount(total: 258, exact: true)
-    let change = format.JournalOp(key: failure_result_from_rep(pager.log_key(9, 1))?, value: Some(clone(body)), prior: 7, trim: None)
+    let change = format.JournalOp(key: failure_result_from_rep(pager.log_key(9, 1))?, value: Some(clone(body)), direct: None, prior: 7, trim: None)
     replay_tiered_op("j-1", mut roots.collections, mut next_stamp, mut account, pager.ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None), change)?
     let _ = failure_result_from_rep(pager.fold_page_tree(source, mut roots.collections, mut next_stamp))?
     Ok(take roots)
@@ -190,7 +190,7 @@ fn test_l79_fold_checks_cold_evidence(d: Dir, tasks: Tasks) -> Result[(), Error]
     let mut packs: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
     for ptr in[base, right, parent] {
         let width: u64 = int.widen(ptr.len)
-        let inventory = pages.PagePack(class: 3, frames: 1, live: width, payload_bytes: 116 + width, index: 88 + width)
+        let inventory = pages.PagePack(foreign: None, class: 3, frames: 1, live: width, payload_bytes: 116 + width, index: 88 + width)
         let (take updated, _) = std.omap.insert(mut ids, packs, ptr.pack, pages.TieredPagerPack(inventory: inventory, object: None))
         packs = take updated
     }
@@ -315,7 +315,7 @@ fn l87_fold_fork_shape(source: pager.TieredPageSource, base: std.page.PagePtr) -
     page_record.account_tiered = 430
     let mut replay = failure_result_from_rep(pager.journal_replay_manifest(failure_result_from_rep(types.capacity(pages.main_state(take roots, 0, 0)))?, page_record))?
     let mut deleted: List[format.JournalOp] = list.with_capacity(1)
-    list.push(mut deleted, format.JournalOp(key: failure_result_from_rep(pager.log_key(9, 2))?, value: None, prior: 7, trim: None))
+    list.push(mut deleted, format.JournalOp(key: failure_result_from_rep(pager.log_key(9, 2))?, value: None, direct: None, prior: 7, trim: None))
     journal_apply("j-1", mut replay, Commit(format.JournalCommit(branch: 0, version: 1, at: 1, data: take deleted, streams: list.new(), keyed: list.new(), call: None, payload: 0)))?
     journal_apply("j-1", mut replay, Fork(format.JournalFork(id: 1, parent: 0, forked_at: 1, name: "beta", watermark: 60)))?
     journal_apply("j-1", mut replay, l68_replay_put(1, 2, 0, "stored")?)?

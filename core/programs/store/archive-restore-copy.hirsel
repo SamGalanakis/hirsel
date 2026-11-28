@@ -31,11 +31,11 @@ fn restore_stream_unit(mut src: std.object.Client, key: String, mut file: HostFi
     Ok(())
 }
 
-fn restore_copy_pack(mut src: std.object.Client, dir: Dir, parent: StoreId, ref: pages.HistoryRef, objects: bool, deadline: u64) -> Result[(), Error] waits {
+fn restore_copy_pack(mut src: std.object.Client, dir: Dir, parent: StoreId, inc: Inline[u8, 16], ref: pages.HistoryRef, objects: bool, deadline: u64) -> Result[(), Error] waits {
     let key = if objects {
-        restore_object_key(parent, "p-", ref)?
+        restore_object_key(parent, inc, "p-", ref)?
     } else {
-        format.archive_key(store_key_to_rep(parent), format.archive_log_pack_rel(ref.seq, ref.digest))
+        format.archive_key(store_key_to_rep(parent), inc, format.archive_log_pack_rel(ref.seq, ref.digest))
     }
     let path = failure_result_from_rep(manifest.paged_pack_path(ref.seq))?
     let mut output = failure_result_from_rep(manifest.disk_io(host.open(dir, path, Write)))?
@@ -44,13 +44,17 @@ fn restore_copy_pack(mut src: std.object.Client, dir: Dir, parent: StoreId, ref:
     failure_result_from_rep(manifest.disk_io(host.close(take output)))
 }
 
-fn restore_copy_log(mut src: std.object.Client, dir: Dir, parent: StoreId, row: format.ArchiveBaseRowRep, b: manifest.RestoreBoundary, deadline: u64) -> Result[(u64, u64), Error] waits {
+fn restore_copy_log(mut src: std.object.Client, dir: Dir, parent: StoreId, inc: Inline[u8, 16], row: format.ArchiveBaseRowRep, b: manifest.RestoreBoundary, deadline: u64) -> Result[(u64, u64), Error] waits {
+    restore_copy_log_read(std.object.opener(src), dir, parent, inc, row, b, deadline)
+}
+
+fn restore_copy_log_read(src: std.object.Opener, dir: Dir, parent: StoreId, inc: Inline[u8, 16], row: format.ArchiveBaseRowRep, b: manifest.RestoreBoundary, deadline: u64) -> Result[(u64, u64), Error] waits {
     let mut seq = row.first_unit
     loop {
         let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
         let mut output = failure_result_from_rep(manifest.disk_io(host.open(dir, path, Write)))?
         let limit = if seq < b.unit {
-            restore_sealed_end(mut src, parent, seq + 1, deadline)?
+            restore_sealed_end_read(src, parent, inc, seq + 1, deadline)?
         } else {
             b.frame_end
         }
@@ -60,13 +64,13 @@ fn restore_copy_log(mut src: std.object.Client, dir: Dir, parent: StoreId, row: 
         }
         let mut pos = 0u64
         while pos < limit {
-            let key = restore_segment_key(parent, seq, pos)
-            let (meta, _) = restore_range(mut src, key, 0, 1, deadline)?
+            let key = restore_segment_key(parent, inc, seq, pos)
+            let (meta, _) = restore_range_read(src, key, 0, 1, deadline)?
             let mut offset = 0u64
             let mut digest = std.check.start()
             while offset < meta.size {
                 let hi = offset + order.min(65536u64, meta.size - offset)
-                let (part, take raw) = restore_range(mut src, key, offset, hi, deadline)?
+                let (part, take raw) = restore_range_read(src, key, offset, hi, deadline)?
                 if part.etag != meta.etag {
                     return Error(Lost)
                 }
@@ -128,6 +132,7 @@ fn restore_copy_archive(mut src: std.object.Client, dir: Dir, point: RestorePoin
 }
 
 fn restore_copy_covered(mut src: std.object.Client, dir: Dir, point: RestorePoint, head: format.ArchiveHeadRep, due: u64) -> Result[ExportStamp, DeployError] waits {
+    let inc = head.incarnation
     let parent = point.token.parent
     let id = store_key_to_rep(parent)
     let b = point.token.boundary
@@ -135,7 +140,7 @@ fn restore_copy_covered(mut src: std.object.Client, dir: Dir, point: RestorePoin
     let mut found: Option[format.ArchiveBaseRowRep] = None
     let objects = b.source_kind == format.ARCHIVE_SOURCE_OBJECTS
     for page_ref in chain_index.pages {
-        let page = deploy_result(failure_result_from_rep(history.archive_index_page(mut src, id, head.source_kind, page_ref, due)))?
+        let page = deploy_result(failure_result_from_rep(history.archive_index_page(mut src, id, head.incarnation, head.source_kind, page_ref, due)))?
         for row in page.bases {
             if row.base_ordinal == b.base_ordinal && row.digest == b.base_digest {
                 if !row.pack_continuation {
@@ -143,7 +148,7 @@ fn restore_copy_covered(mut src: std.object.Client, dir: Dir, point: RestorePoin
                 }
                 for p in row.packs {
                     let ref = pages.HistoryRef(seq: p.seq, epoch: p.epoch, len: p.len, digest: p.digest)
-                    deploy_result(restore_copy_pack(mut src, dir, parent, ref, objects, due))?
+                    deploy_result(restore_copy_pack(mut src, dir, parent, inc, ref, objects, due))?
                 }
             }
         }
@@ -151,15 +156,19 @@ fn restore_copy_covered(mut src: std.object.Client, dir: Dir, point: RestorePoin
     let Some(take row) = take found else {
         return Error(Store(Lost))
     }
-    let (take m, evidence) = deploy_result(restore_archive_manifest(mut src, parent, head.source_kind, row, due))?
+    let (take m, evidence) = deploy_result(restore_archive_manifest(mut src, parent, inc, head.source_kind, row, due))?
     if evidence.number != point.activation || evidence.binding != point.binding {
         return Error(ExportMismatch)
     }
     let (terminal, end) = if objects {
-        deploy_result(restore_copy_entries(mut src, dir, parent, row, b, due))?
+        deploy_result(restore_copy_entries(mut src, dir, parent, inc, row, b, due))?
     } else {
-        deploy_result(restore_copy_log(mut src, dir, parent, row, b, due))?
+        deploy_result(restore_copy_log(mut src, dir, parent, inc, row, b, due))?
     }
+    deploy_result(restore_direct_prefix(dir, id, m.first_live, terminal, end, objects, scoped fn(place: format.DirectBlob) -> Result[Bytes, Error] waits {
+        let rel = failure_result_from_rep(history.archive_direct_rel(objects, place))?
+        restore_archive_bytes(mut src, format.archive_key(id, inc, rel), history.direct_history_ref(place), due)
+    }))?
     let mut nonce: Bytes = list.with_capacity(16)
     list.fill(mut nonce, 16, 0u8)
     let stamp = ExportStamp(attempt: take nonce, store_hi: id.hi, store_lo: id.lo, opened: terminal, branch: 0, head: point.main_version, next_table: m.next_table, activation: point.activation, binding: export_binding_bytes(point.binding), terminal, end)

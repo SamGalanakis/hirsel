@@ -1,0 +1,92 @@
+// Format 15 data op 4, §3.5. The immutable pack identity and the frame
+// coordinates survive until the last journal prefix naming them is retired.
+pub type DirectBlob: key + shareable + send {
+    stamp: u64,
+    len: u64,
+    checksum: u64,
+    pack: u64,
+    offset: u64,
+    epoch: u64,
+    pack_len: u64,
+    digest: u64
+}
+
+// The sealed bytes stay private to one staged COMMIT until its pack barrier.
+pub type DirectWrite: shareable + send {
+    place: DirectBlob,
+    stored: Arc[Bytes],
+    wire: Bytes
+}
+
+pub const DIRECT_BLOB_BYTES: u64 = 64
+
+pub fn direct_chunk_key(key: Bytes) -> bool {
+    list.len(key) == 21 && key[4] == 2 && word_be(key, 5) != 0
+}
+
+pub fn direct_ref(place: DirectBlob) -> std.page.BlobRef {
+    std.page.BlobRef(stamp: place.stamp, len: place.len, checksum: place.checksum, pack: place.pack, offset: place.offset, body: 0)
+}
+
+pub fn decode_direct_blob(path: String, raw: Bytes, mut at: u64, key: Bytes, value_limit: u64) -> Result[DirectBlob, types.Failure] {
+    if at > list.len(raw) || list.len(raw) - at < DIRECT_BLOB_BYTES {
+        return Error(disk_fault(path, at, Truncated))
+    }
+    let place = DirectBlob(stamp: list.word_le(raw, at), len: list.word_le(raw, at + 8), checksum: list.word_le(raw, at + 16), pack: list.word_le(raw, at + 24), offset: list.word_le(raw, at + 32), epoch: list.word_le(raw, at + 40), pack_len: list.word_le(raw, at + 48), digest: list.word_le(raw, at + 56))
+    // The stored bytes include the value schema and bytes-codec prefix.
+    // The BLOB frame has a 16-byte envelope and an 8-byte stamp, and the
+    // trailing PACK_INDEX must start before the end of the pack.
+    if !direct_chunk_key(key) || place.stamp == 0 || place.pack == 0 || place.len <= 6 || place.len > order.min(value_limit, types.FORMAT_VALUE_MAX) || place.offset < 72 || place.offset > place.pack_len || place.pack_len - place.offset <= 24 + place.len {
+        return Error(disk_fault(path, at, Malformed))
+    }
+    at += DIRECT_BLOB_BYTES
+    Ok(place)
+}
+
+pub fn encode_direct_op(mut payload: Bytes, key: Bytes, prior: u32, place: DirectBlob) -> Result[(), Capacity] {
+    list.push(mut payload, 4u8)
+    blob(mut payload, key)?
+    list.put_word_le(mut payload, prior)
+    list.put_word_le(mut payload, place.stamp)
+    list.put_word_le(mut payload, place.len)
+    list.put_word_le(mut payload, place.checksum)
+    list.put_word_le(mut payload, place.pack)
+    list.put_word_le(mut payload, place.offset)
+    list.put_word_le(mut payload, place.epoch)
+    list.put_word_le(mut payload, place.pack_len)
+    list.put_word_le(mut payload, place.digest)
+    Ok(())
+}
+
+// One COMMIT can introduce several frames in the same sealed pack. A stamp
+// or physical address cannot identify two rows in that COMMIT.
+pub type DirectIdentities {
+    packs: Map[u64, (u64, u64, u64)],
+    stamps: Map[u64, ()],
+    offsets: Map[(u64, u64), ()]
+}
+
+pub fn record_direct_identity(path: String, at: u64, mut recorded: Option[DirectIdentities], place: DirectBlob) -> Result[(), types.Failure] {
+    if let None = recorded {
+        recorded = Some(DirectIdentities(packs: map.new(), stamps: map.new(), offsets: map.new()))
+    }
+    if let Some(mut known) = recorded {
+        let identity = (place.epoch, place.pack_len, place.digest)
+        if map.get_or(known.packs, place.pack, identity) != identity {
+            return Error(disk_fault(path, at, Order))
+        }
+        if !map.contains(known.packs, place.pack) {
+            types.capacity(map.try_reserve(mut known.packs, 1))?
+            map.insert(mut known.packs, place.pack, identity)
+        }
+        let address = (place.pack, place.offset)
+        if map.contains(known.stamps, place.stamp) || map.contains(known.offsets, address) {
+            return Error(disk_fault(path, at, Order))
+        }
+        types.capacity(map.try_reserve(mut known.stamps, 1))?
+        types.capacity(map.try_reserve(mut known.offsets, 1))?
+        map.insert(mut known.stamps, place.stamp, ())
+        map.insert(mut known.offsets, address, ())
+    }
+    Ok(())
+}

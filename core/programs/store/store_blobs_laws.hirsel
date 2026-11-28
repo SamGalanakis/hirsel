@@ -1,0 +1,515 @@
+// §14.4b laws. The oracle for content is the generator `blob_law_chunk`, and
+// for the digest an independent fold over the generated chunks.
+const BLOB_LAW_CHUNK: u32 = 1024
+
+const BLOB_LAW_STEPS: u64 = 100000000
+
+fn blob_law_chunk(n: u64, width: u64) -> Bytes {
+    let mut raw: Bytes = list.with_capacity(width)
+    for i in 0u64 .. width {
+        let byte: u8 = int.truncate(n * 131 + i * 7 + 3)
+        list.push(mut raw, byte)
+    }
+    take raw
+}
+
+// `full` chunks of `width` bytes, then one of `short` bytes unless it is zero.
+fn blob_law_widths(full: u64, width: u64, short: u64) -> List[u64] {
+    let mut widths: List[u64] = list.with_capacity(full + 1)
+    list.fill(mut widths, full, width)
+    if short != 0 {
+        list.push(mut widths, short)
+    }
+    take widths
+}
+
+fn blob_law_require(condition: bool, message: String) -> Result[(), Error] {
+    if !condition {
+        return Error(Missing(string.from(message)))
+    }
+    Ok(())
+}
+
+fn blob_law_digest(widths: List[u64]) -> Bytes {
+    let mut chain: Bytes = list.with_capacity(64)
+    list.fill(mut chain, 32, 0u8)
+    let mut n = 0u64
+    for width in widths {
+        let chunk = blob_law_chunk(n, width)
+        list.append(mut chain, blob_chunk_digest(chunk))
+        let folded = blob_chunk_digest(chain)
+        chain = take folded
+        n += 1
+    }
+    take chain
+}
+
+fn blob_law_done[R](take outcome: Outcome[R, Error], what: String) -> Result[R, Error] {
+    match take outcome {
+        Committed(Done(value: take value, ..)) => Ok(take value),
+        Aborted(undone) => Error(clone(undone.value)),
+        _ => Error(Missing(string.from(what))),
+    }
+}
+
+fn blob_law_begin(mut db: Db, b: Blobs[u64]) -> Result[BlobUpload, Error] waits {
+    blob_law_done(run(mut db, Some(BLOB_LAW_STEPS), copy_env(b), fn(mut tx: Tx, target: Blobs[u64]) -> Result[BlobUpload, Error] {
+        blob_begin(mut tx, target)
+    })?, "begin")
+}
+
+// One transaction appends chunks [first, first + count) of `width` bytes.
+fn blob_law_append(mut db: Db, b: Blobs[u64], u: BlobUpload, first: u64, chunks: u64, width: u64) -> Result[BlobInfo, Error] waits {
+    blob_law_done(run(mut db, Some(BLOB_LAW_STEPS), (copy_env(b), u, first, chunks, width), fn(mut tx: Tx, env: (Blobs[u64], BlobUpload, u64, u64, u64)) -> Result[BlobInfo, Error] {
+        let mut latest: Option[BlobInfo] = None
+        for n in env.2 .. env.2 + env.3 {
+            latest = Some(blob_append(mut tx, env.0, env.1, blob_law_chunk(n, env.4))?)
+        }
+        match take latest {
+            Some(take value) => Ok(take value),
+            None => Error(Missing("no chunk")),
+        }
+    })?, "append")
+}
+
+fn blob_law_attach(mut db: Db, b: Blobs[u64], key: u64, u: BlobUpload) -> Result[BlobInfo, Error] waits {
+    blob_law_done(run(mut db, Some(BLOB_LAW_STEPS), (copy_env(b), key, u), fn(mut tx: Tx, env: (Blobs[u64], u64, BlobUpload)) -> Result[BlobInfo, Error] {
+        blob_attach(mut tx, env.0, env.1, env.2)
+    })?, "attach")
+}
+
+fn blob_law_erase(mut db: Db, b: Blobs[u64], key: u64) -> Result[bool, Error] waits {
+    blob_law_done(run(mut db, Some(BLOB_LAW_STEPS), (copy_env(b), key), fn(mut tx: Tx, env: (Blobs[u64], u64)) -> Result[bool, Error] {
+        blob_erase(mut tx, env.0, env.1)
+    })?, "erase")
+}
+
+fn blob_law_sweep(mut db: Db, b: Blobs[u64], stale_before: u64, limit: u64) -> Result[u64, Error] waits {
+    blob_law_done(run(mut db, Some(BLOB_LAW_STEPS), (copy_env(b), stale_before, limit), fn(mut tx: Tx, env: (Blobs[u64], u64, u64)) -> Result[u64, Error] {
+        blob_sweep(mut tx, env.0, env.1, env.2)
+    })?, "sweep")
+}
+
+// Every chunk of `value` at `s` is the generated chunk; one past the end is None.
+fn blob_law_reads(r: Reader, s: Snapshot, b: Blobs[u64], value: BlobInfo, widths: List[u64]) -> Result[(), Error] waits {
+    blob_law_require(value.chunks == list.len(widths), "chunk count")?
+    let mut n = 0u64
+    for width in widths {
+        blob_law_require(blob_read(r, s, b, value, n)? == Some(blob_law_chunk(n, width)), "chunk bytes")?
+        n += 1
+    }
+    blob_law_require(blob_read(r, s, b, value, n)? == None, "chunk past the end")
+}
+
+fn blob_law_rows(db: Db, b: Blobs[u64]) -> Result[u64, Error] {
+    let (_, id) = blobs_identity(b)
+    let key = failure_result_from_rep(catalog.prefix(id))?
+    let Some((_, raw)) = std.page.collection_slot(snapshot(db).roots.collections.root, key) else {
+        return Error(Missing("blobs descriptor"))
+    }
+    Ok(pages.collection_descriptor(raw).rows)
+}
+
+// A staged upload is invisible under every key until one commit attaches
+// it; a replacement and an erase detach in one commit; a Snapshot taken
+// before keeps reading the detached value; the sweep removes exactly the
+// detached rows.
+@test
+fn test_blobs_staged_attach_erase_and_sweep(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let mut schema = declare(db, Migrate)?
+    let b = declare_blobs(mut schema, "files", std.codec.key_u64(), BlobLimits(chunk: BLOB_LAW_CHUNK, max: 4096))?
+    let _ = seal(mut db, take schema)?
+    let read_handle = reader(db, 0)?
+    let widths = blob_law_widths(2, 1024, 100)
+    let u = blob_law_begin(mut db, b)?
+    let _ = blob_law_append(mut db, b, u, 0, 1, 1024)?
+    blob_law_require(blob_info(read_handle, snapshot(db), b, 7u64)? == None, "staged upload is invisible")?
+    let _ = blob_law_append(mut db, b, u, 1, 1, 1024)?
+    let staged = blob_law_append(mut db, b, u, 2, 1, 100)?
+    blob_law_require(staged.size == 2148 && staged.chunks == 3 && staged.digest == blob_law_digest(widths), "staged progress")?
+    // A short chunk ends the upload.
+    match blob_law_append(mut db, b, u, 3, 1, 10) {
+        Error(Limit(Value)) => (),
+        _ => return Error(Missing("append after the short chunk")),
+    }
+    let before = snapshot(db)
+    let value = blob_law_attach(mut db, b, 7u64, u)?
+    blob_law_require(value == staged, "attach reports the staged value")?
+    let held = snapshot(db)
+    blob_law_require(blob_info(read_handle, before, b, 7u64)? == None, "attach does not reach an older Snapshot")?
+    blob_law_require(blob_info(read_handle, held, b, 7u64)? == Some(clone(value)), "attached value")?
+    blob_law_reads(read_handle, held, b, value, widths)?
+    blob_law_require(blob_span(value, 1000, 100) == Some(BlobSpan(first: 0, last: 1, skip: 1000, len: 100)), "span across a chunk edge")?
+    blob_law_require(blob_span(value, 2048, 4096) == Some(BlobSpan(first: 2, last: 2, skip: 0, len: 100)), "span clipped to the end")?
+    blob_law_require(blob_span(value, 2148, 1) == None && blob_span(value, 0, 0) == None, "empty span")?
+    match blob_law_append(mut db, b, u, 3, 1, 10) {
+        Error(Missing(_)) => (),
+        _ => return Error(Missing("append to an attached upload")),
+    }
+    // The value limit: 4,096 B admits four full chunks and no fifth.
+    let big = blob_law_begin(mut db, b)?
+    let _ = blob_law_append(mut db, b, big, 0, 4, 1024)?
+    match blob_law_append(mut db, b, big, 4, 1, 1) {
+        Error(Limit(Value)) => (),
+        _ => return Error(Missing("append past the value limit")),
+    }
+    // A failed transaction attaches nothing.
+    let failed = run(mut db, Some(BLOB_LAW_STEPS), (copy_env(b), big), fn(mut tx: Tx, env: (Blobs[u64], BlobUpload)) -> Result[(), Error] {
+        let _ = blob_attach(mut tx, env.0, 7u64, env.1)?
+        Error(Missing("stop"))
+    })?
+    let Aborted(_) = failed else {
+        return Error(Missing("the failed attach must abort"))
+    }
+    blob_law_require(blob_info(read_handle, snapshot(db), b, 7u64)? == Some(clone(value)), "aborted attach changes nothing")?
+    // Replacement: one commit attaches `big` and detaches the old value.
+    let wide = blob_law_widths(4, 1024, 0)
+    let replaced = blob_law_attach(mut db, b, 7u64, big)?
+    blob_law_require(replaced.size == 4096 && replaced.digest == blob_law_digest(wide), "replacement value")?
+    blob_law_reads(read_handle, snapshot(db), b, replaced, wide)?
+    blob_law_reads(read_handle, held, b, value, widths)?
+    // lists + 2 upload rows + 7 chunk rows + 1 head.
+    blob_law_require(blob_law_rows(db, b)? == 11, "rows before the sweep")?
+    blob_law_require(blob_law_sweep(mut db, b, 0, 2)? == 2, "bounded sweep")?
+    blob_law_require(blob_law_sweep(mut db, b, 0, 100)? == 2, "sweep remainder")?
+    blob_law_require(blob_law_sweep(mut db, b, 0, 100)? == 0, "sweep is idle")?
+    blob_law_require(blob_law_rows(db, b)? == 7, "rows after the sweep")?
+    blob_law_reads(read_handle, held, b, value, widths)?
+    blob_law_reads(read_handle, snapshot(db), b, replaced, wide)?
+    // Erase detaches; an abandoned staged upload is reclaimed by age.
+    let stale = blob_law_begin(mut db, b)?
+    let _ = blob_law_append(mut db, b, stale, 0, 2, 1024)?
+    let tail = snapshot(db)
+    blob_law_require(blob_law_erase(mut db, b, 7u64)?, "erase")?
+    blob_law_require(!blob_law_erase(mut db, b, 7u64)?, "erase of an absent key")?
+    blob_law_require(blob_info(read_handle, snapshot(db), b, 7u64)? == None, "erased key")?
+    blob_law_reads(read_handle, tail, b, replaced, wide)?
+    // One abandon, then 2 + 1 and 4 + 1 rows.
+    blob_law_require(blob_law_sweep(mut db, b, 18446744073709551615, 100)? == 9, "sweep after erase")?
+    blob_law_require(blob_law_rows(db, b)? == 1, "only the lists row is left")?
+    blob_law_reads(read_handle, tail, b, replaced, wide)
+}
+
+// A crash between chunk commits leaves the key unattached and the staged
+// upload resumable. Tiered chunks seal into packs at the cut; a pinned
+// Snapshot reads them after the erase, the sweep and a later cut.
+@test
+fn test_blobs_tiered_resume_after_reopen_and_pinned_read(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let mut overrides = derived_sizes()
+    overrides.resident_limit = Some(182375272u64)
+    let options = sized_with(Directory, 2147483648u64, overrides) ?=> |_| Missing("tiered blobs sizing")
+    let mut db = open(tasks, dir, c, r, options)?
+    let mut schema = declare(db, Migrate)?
+    let b = declare_blobs(mut schema, "files", std.codec.key_u64(), BlobLimits(chunk: 65536, max: 1048576))?
+    let _ = seal(mut db, take schema)?
+    let (_, id) = blobs_identity(b)
+    set_residency(mut db, id, Tiered)?
+    let u = blob_law_begin(mut db, b)?
+    for n in 0u64 .. 5u64 {
+        let _ = blob_law_append(mut db, b, u, n, 1, 65536)?
+    }
+    let cut = checkpoint(mut db)?
+    durable(mut db, cut)?
+    let _ = blob_law_append(mut db, b, u, 5, 1, 65536)?
+    close(take db)?
+    let mut again = open(tasks, dir, c, r, options)?
+    let mut second_schema = declare(again, Open)?
+    let files = declare_blobs(mut second_schema, "files", std.codec.key_u64(), BlobLimits(chunk: 65536, max: 1048576))?
+    let _ = seal(mut again, take second_schema)?
+    let read_handle = reader(again, VALUE_LIMIT + 1048576)?
+    blob_law_require(blob_info(read_handle, snapshot(again), files, 1u64)? == None, "no value before attach")?
+    let resumed = blob_law_done(run(mut again, Some(BLOB_LAW_STEPS), (copy_env(files), u), fn(mut tx: Tx, env: (Blobs[u64], BlobUpload)) -> Result[Option[BlobInfo], Error] {
+        blob_staged(tx, env.0, env.1)
+    })?, "staged")?
+    let Some(progress) = resumed else {
+        return Error(Missing("the staged upload survives the reopen"))
+    }
+    blob_law_require(progress.chunks == 6 && progress.size == 6 * 65536, "resumed progress")?
+    let _ = blob_law_append(mut again, files, u, 6, 1, 65536)?
+    let _ = blob_law_append(mut again, files, u, 7, 1, 777)?
+    let value = blob_law_attach(mut again, files, 1u64, u)?
+    let widths = blob_law_widths(7, 65536, 777)
+    blob_law_require(value.size == 7 * 65536 + 777 && value.digest == blob_law_digest(widths), "attached value")?
+    let attach_cut = checkpoint(mut again)?
+    durable(mut again, attach_cut)?
+    let held = snapshot(again)
+    let _ = pin(mut again, "held", held)?
+    blob_law_reads(read_handle, held, files, value, widths)?
+    blob_law_require(blob_law_erase(mut again, files, 1u64)?, "erase")?
+    blob_law_require(blob_law_sweep(mut again, files, 0, 100)? == 9, "sweep")?
+    let sweep_cut = checkpoint(mut again)?
+    durable(mut again, sweep_cut)?
+    blob_law_require(blob_info(read_handle, snapshot(again), files, 1u64)? == None, "erased key")?
+    blob_law_reads(read_handle, held, files, value, widths)?
+    close(take again)?
+    let reopened = open(tasks, dir, c, r, options)?
+    let mut last_schema = declare(reopened, Open)?
+    let kept_files = declare_blobs(mut last_schema, "files", std.codec.key_u64(), BlobLimits(chunk: 65536, max: 1048576))?
+    drop(take last_schema)
+    let reopened_reader = reader(reopened, VALUE_LIMIT + 1048576)?
+    let Some(kept) = pinned(reopened, "held") else {
+        return Error(Missing("pin after reopen"))
+    }
+    blob_law_reads(reopened_reader, kept, kept_files, value, widths)?
+    blob_law_require(blob_info(reopened_reader, snapshot(reopened), kept_files, 1u64)? == None, "erased key after reopen")?
+    close(take reopened)
+}
+
+// A wire oracle for §3.5 op 4. Numbers with distinct bytes catch swapped
+// fields and host-order encoding. The leaf assigns physical body ordinals.
+@test
+fn direct_blob_wire_and_leaf_slots() -> Result[(), Error] {
+    let key = blob_chunk_key(3, 7, 11, false)?
+    let fixed = format.DirectBlob(stamp: 19, len: 1280, checksum: 0x0807060504030201, pack: 23, offset: 72, epoch: 31, pack_len: 2048, digest: 0x1817161514131211)
+    let mut encoded: Bytes = list.new()
+    format.encode_direct_op(mut encoded, key, 0, fixed) ?=> |_| Missing("direct encode")
+    let literal = option.unwrap(std.hex.decode(b"041500000000000003020000000000000007000000000000000b00000000130000000000000000050000000000000102030405060708170000000000000048000000000000001f0000000000000000080000000000001112131415161718"))
+    if encoded != literal {
+        return Error(Missing("direct blob wire fields"))
+    }
+    let mut at = 30u64
+    if failure_result_from_rep(format.decode_direct_blob("j", literal, mut at, key, 1280))? != fixed || at != list.len(literal) {
+        return Error(Missing("direct blob wire cursor"))
+    }
+    let mut page = std.page.empty(0, 0, Collection)
+    let mut ids = 100u64
+    let first = format.direct_ref(fixed)
+    let mut second = first
+    second.stamp += 1
+    second.offset += 256
+    let no_load = scoped fn(_p: std.page.PagePtr) -> Result[Arc[std.page.Page], std.page.Error] {
+        return Error(MalformedPage)
+    }
+    failure_result_from_rep(pages.page_result(std.page.insert_blob_ref(mut page, b"a", first, None, 100, mut ids, no_load)))?
+    let held = arc.share(page)
+    failure_result_from_rep(pages.page_result(std.page.insert_blob_ref(mut page, b"b", second, None, 100, mut ids, no_load)))?
+    second.body = 1
+    if std.page.count(std.page.image_of(held)) != 1 || std.page.count(std.page.image_of(page)) != 2 {
+        return Error(Missing("direct insertion mutated snapshot"))
+    }
+    let Some(ColdBlob(stored)) = std.page.blob_slot(page, 1) else {
+        return Error(Missing("direct body copied"))
+    }
+    let Some(BlobEdge(edge)) = std.page.owning_edge(std.page.image_of(page), 1) else {
+        return Error(Missing("direct edge missing"))
+    }
+    if stored != second || edge != second {
+        return Error(Missing("direct body ordinal or stamp"))
+    }
+    Ok(())
+}
+
+@test
+fn direct_chunk_pack_barrier(d: Dir) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let owner = types.StoreKey(hi: 11, lo: 13)
+    let key = blob_chunk_key(5, 7, 0, false)?
+    let expected = option.unwrap(std.hex.decode(b"010003000000616263"))
+    let stored: Arc[Bytes] = arc.new(clone(expected))
+    let (location, take packed) = failure_result_from_rep(pager.seal_direct_chunk(owner, 17, 19, 0, 0, key, stored))?
+    let path = failure_result_from_rep(manifest.paged_pack_path(17))?
+    failure_result_from_rep(manifest.install_direct_pack(dir, 17, packed.wire))?
+    if let Ok(_) = manifest.install_direct_pack(dir, 17, b"collision") {
+        return Error(Missing("overwrote a reserved direct pack"))
+    }
+    let raw = failure_result_from_rep(manifest.disk_read_file(dir, path, location.pack_len))?
+    let head = failure_result_from_rep(manifest.disk_read_header(path, raw, 3, Some(17), Some(owner)))?
+    let first = failure_result_from_rep(manifest.disk_read_frame(path, head.context, raw, 72))?
+    let ix = failure_result_from_rep(manifest.disk_read_frame(path, head.context, raw, first.end))?
+    if first.kind != 0x22 || list.word_le(raw, first.payload) != 19u64 || list.slice(raw, first.payload + 8, first.end) != expected || ix.kind != 0x23 || ix.end != list.len(raw) || packed.pack.index != first.end || location.digest != std.check.xxh3(raw, 0, list.len(raw)) {
+        return Error(Missing("sealed Directory pack"))
+    }
+    let (remote, take object) = failure_result_from_rep(pager.seal_direct_chunk(owner, 17, 19, 3, 1, key, stored))?
+    let reference = pages.HistoryRef(seq: remote.pack, epoch: remote.epoch, len: remote.pack_len, digest: remote.digest)
+    let ctx = failure_result_from_rep(history.history_object_context(path, owner, 3, reference, object.wire))?
+    failure_result_from_rep(history.history_object_digest(path, reference, object.wire))?
+    let blob = failure_result_from_rep(manifest.disk_read_frame(path, ctx, object.wire, remote.offset))?
+    if remote.digest == location.digest || list.slice(object.wire, blob.payload + 8, blob.end) != expected {
+        return Error(Missing("sealed Bucket pack"))
+    }
+    Ok(())
+}
+
+@test
+fn direct_blob_resident_and_cold_replay(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let mut schema = declare(db, Migrate)?
+    let blobs = declare_blobs(mut schema, "chunks", std.codec.key_u64(), BlobLimits(chunk: 128, max: 512))?
+    let _ = seal(mut db, take schema)?
+    let (_, collection) = blobs_identity(blobs)
+    let key = blob_chunk_key(collection, 1, 0, false)?
+    let stored = option.unwrap(std.hex.decode(b"010003000000616263"))
+    let (direct, _) = failure_result_from_rep(pager.seal_direct_chunk(store_key_to_rep(db.store), 7, 81, 0, 0, key, arc.new(clone(stored))))?
+    let roots = snapshot(db)
+    for hydrate in[false, true] {
+        let mut known = pages.share_page_tree(roots.roots.collections)
+        let mut ids = 81u64
+        let mut account = pager.ReplayTieredAccount(total: 0, exact: true)
+        let mut ops: List[format.JournalOp] = list.new()
+        let value: Option[Bytes] = if hydrate {
+            Some(clone(stored))
+        } else {
+            None
+        }
+        list.push(mut ops, format.JournalOp(key: clone(key), value: take value, direct: Some(arc.new(direct)), prior: 0, trim: None))
+        journal_apply_ops("j-1", mut ids, mut known, ops, mut account, false)?
+        {
+            let child = option.unwrap(std.page.collection_child(known.root, list.slice(key, 0, 4)))
+            let Some(BlobEdge(edge)) = std.page.owning_edge(std.page.image_of(child), 0) else {
+                return Error(Missing("direct edge"))
+            }
+            if edge != format.direct_ref(direct) || std.page.stamp(std.page.image_of(child)) <= direct.stamp {
+                return Error(Missing("fixed stamp or replay watermark"))
+            }
+            if hydrate {
+                if std.page.lookup(child, list.slice(key, 4, list.len(key))) != Some(view stored) {
+                    return Error(Missing("resident replay bytes"))
+                }
+            } else {
+                let Some(ColdBlob(_)) = std.page.blob_slot(child, edge.body) else {
+                    return Error(Missing("cold replay body"))
+                }
+            }
+        }
+        let prior: u32 = int.truncate(list.len(stored) + 1)
+        list.clear(mut ops)
+        list.push(mut ops, format.JournalOp(key: clone(key), value: None, direct: None, prior: prior, trim: None))
+        journal_apply_ops("j-1", mut ids, mut known, ops, mut account, false)?
+        if pages.blob_row_prior(known, key) != 0 {
+            return Error(Missing("delete of direct chunk"))
+        }
+    }
+    Ok(())
+}
+
+// The two chunks are introduced together and survive the covering cut at
+// their original coordinates. The held Snapshot leases the journal packs.
+fn blob_adoption_law(mut db: Db) -> Result[(Blobs[u64], BlobInfo), Error] waits {
+    let mut schema = declare(db, Migrate)?
+    let files = declare_blobs(mut schema, "direct", std.codec.key_u64(), BlobLimits(chunk: 4096, max: 8192))?
+    let _ = seal(mut db, take schema)?
+    let upload = blob_law_begin(mut db, files)?
+    let before = manifest.pack_next(disk_state(db).packs)
+    let start_bytes = queue_accounting(disk_state(db)).uncovered
+    let value = blob_law_append(mut db, files, upload, 0, 2, 4096)?
+    let held = snapshot(db)
+    let rd = reader(db, 0)?
+    blob_law_reads(rd, held, files, value, blob_law_widths(2, 4096, 0))?
+    let end_bytes = queue_accounting(disk_state(db)).uncovered
+    if end_bytes <= start_bytes || end_bytes - start_bytes >= 4096 {
+        return Error(Missing("chunk payload entered COMMIT"))
+    }
+    let Some(inventory) = view held.roots.collections.paging else {
+        return Error(Missing("snapshot direct pack lease"))
+    }
+    for seq in before .. before + 2 {
+        let Some(row) = std.omap.get(inventory.packs, seq) else {
+            return Error(Missing("snapshot journal pack"))
+        }
+        if row.inventory.class != 4 || row.inventory.live != 4110 || row.inventory.index != 4198 {
+            return Error(Missing("chunk pack extent"))
+        }
+    }
+    let named = blob_law_attach(mut db, files, 11, upload)?
+    let cut = checkpoint(mut db)?
+    durable(mut db, cut)?
+    for seq in before .. before + 2 {
+        let Some(row) = manifest.disk_index_get(manifest.pack_locations(disk_state(db).packs).packs, seq) else {
+            return Error(Missing("cut rewrote direct pack"))
+        }
+        if row.class != 4 || row.live != 4110 || row.frames != 1 || row.index != 4198 {
+            return Error(Missing("cut direct pack accounting"))
+        }
+    }
+    blob_law_reads(rd, held, files, value, blob_law_widths(2, 4096, 0))?
+    // The next checkpoint probes the installed inventory. Both resident
+    // chunks still own their original fully live class-4 packs.
+    let second_cut = checkpoint(mut db)?
+    durable(mut db, second_cut)?
+    for seq in before .. before + 2 {
+        if let None = manifest.disk_index_get(manifest.pack_locations(disk_state(db).packs).packs, seq) {
+            return Error(Missing("resident chunk lost at second cut"))
+        }
+    }
+    Ok((take files, take named))
+}
+
+@test
+fn direct_blob_directory_cut_adopts_resident_edges(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let opts = result.unwrap(sized(Directory, 2147483648u64))
+    let mut db = open(tasks, dir, c, r, opts)?
+    let (take files, take named) = blob_adoption_law(mut db)?
+    close(take db)?
+    let mut opened = open(tasks, dir, c, r, opts)?
+    blob_law_reads(reader(opened, 0)?, snapshot(opened), files, named, blob_law_widths(2, 4096, 0))?
+    close(take opened)
+}
+
+@test
+fn direct_blob_bucket_cut_adopts_resident_edges(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 12839, None, list.new())
+    let mut db = open_authority(tasks, bucket_law_authority(sim, tasks, "s3.test", 241)?, sim.time, r, bucket_law_options(true)) ?=> |denied| clone(denied.error)
+    let (take files, take named) = blob_adoption_law(mut db)?
+    close(take db)?
+    let mut reopened = open_authority(tasks, bucket_law_authority(sim, tasks, "s3.test", 242)?, sim.time, r, bucket_law_options(false)) ?=> |denied| clone(denied.error)
+    blob_law_reads(reader(reopened, 0)?, snapshot(reopened), files, named, blob_law_widths(2, 4096, 0))?
+    close(take reopened)?
+    let _ = bucket_law_report(take sim)
+    Ok(())
+}
+
+@test
+fn direct_blob_pin_after_delisted_suffix(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let opts = result.unwrap(sized(Directory, 2147483648u64))
+    let mut db = open(tasks, dir, c, r, opts)?
+    let mut schema = declare(db, Migrate)?
+    let files = declare_blobs(mut schema, "chunks", std.codec.key_u64(), BlobLimits(chunk: 4096, max: 8192))?
+    let _ = seal(mut db, take schema)?
+    let upload = blob_law_begin(mut db, files)?
+    let seq = manifest.pack_allocation_next(disk_state(db).packs)
+    let _ = blob_law_append(mut db, files, upload, 0, 2, 4096)?
+    let value = blob_law_attach(mut db, files, 7, upload)?
+    close(take db)?
+    let mut writing = open(tasks, dir, c, r, opts)?
+    let held = snapshot(writing)
+    if !blob_law_erase(mut writing, files, 7)? || blob_law_sweep(mut writing, files, 0, 100)? != 3 {
+        return Error(Missing("erase and sweep"))
+    }
+    let cut = checkpoint(mut writing)?
+    durable(mut writing, cut)?
+    for ordinal in seq .. seq + 2 {
+        if let Some(_) = manifest.disk_index_get(manifest.pack_locations(disk_state(writing).packs).packs, ordinal) {
+            return Error(Missing("direct row remained listed"))
+        }
+        let path = failure_result_from_rep(manifest.paged_pack_path(ordinal))?
+        if !archive_hold_exists(dir, path)? {
+            return Error(Missing("pre-cut Snapshot lost leased pack"))
+        }
+    }
+    let widths = blob_law_widths(2, 4096, 0)
+    blob_law_reads(reader(writing, 0)?, held, files, value, widths)?
+    let pinned_at = pin(mut writing, "historical", held)?
+    durable(mut writing, pinned_at)?
+    drop(take held)
+    close(take writing)?
+    let mut restored = open(tasks, dir, c, r, opts)?
+    let Some(historical) = pinned(restored, "historical") else {
+        return Error(Missing("historical direct pin"))
+    }
+    blob_law_reads(reader(restored, 0)?, historical, files, value, widths)?
+    drop(take historical)
+    let freed = unpin(mut restored, "historical")?
+    durable(mut restored, freed)?
+    let last_cut = checkpoint(mut restored)?
+    durable(mut restored, last_cut)?
+    for ordinal in seq .. seq + 2 {
+        if archive_hold_exists(dir, failure_result_from_rep(manifest.paged_pack_path(ordinal))?)? {
+            return Error(Missing("released original pack still on disk"))
+        }
+    }
+    close(take restored)
+}

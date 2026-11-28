@@ -85,7 +85,14 @@ fn log_follow_capture(d: Dir, c: Clock, deadline: u64, mut progress: object_writ
         }
         let initial = read_only_checkpoint(d, id, take page_record)?
         let torn_tail = walk.torn_tail
-        let replay = capture_scan(id, replay_deadline, take walk, take initial)?
+        let captured = capture_scan(d, id, replay_deadline, take walk, take initial)
+        if let Error(_) = view captured {
+            if failure_result_from_rep(manifest.read_page_manifest_bytes(d))? != raw {
+                restarted = false
+                continue
+            }
+        }
+        let replay = (take captured)?
         let resident = failure_result_from_rep(journal.journal_account(replay))?
         failure_result_from_rep(catalog.over_ceiling(int.saturating_add(old_charge, resident), ceiling))?
         failure_result_from_rep(object_writer.check_read_only_manifest(d, raw))?

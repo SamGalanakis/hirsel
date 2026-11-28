@@ -1,5 +1,16 @@
 // RUNNER-SPEC §7 (R5): a recorded call re-executed on its base, under its
 // recorded CallInfo, compared with what it committed.
+pub type Recorded {
+    record: CallRecord,
+    claim: Option[Bytes],
+    settle: u8,
+    branch: Branch,
+    base: u64,
+    at: u64,
+    seed: u64,
+    stop: Option[StopKind]
+}
+
 pub type Difference = Reply | Writes
 
 pub type UnknownReason = NoEntry | ArgsUnresolved | StateGone | RevisionUnknown | NotRecorded | Effects | AdmissionRefused | Residency
@@ -16,7 +27,7 @@ fn recorded_call(id: StoreId, b: Branch, commit: format.JournalCommit) -> Option
         Some(current) => current,
         None => format.Settlement(way: 0, base: commit.version - 1, at: commit.at, seed: call_info(id, b.id, commit.version, commit.at, commit.at).seed, stop: None)
     }
-    Some(Recorded(record: call_record_from_rep(clone(section.record)), settle: context.way, branch: b, base: context.base, at: context.at, seed: context.seed, stop: optional_stop_kind_from_rep(context.stop)))
+    Some(Recorded(record: call_record_from_rep(clone(section.record)), claim: None, settle: context.way, branch: b, base: context.base, at: context.at, seed: context.seed, stop: optional_stop_kind_from_rep(context.stop)))
 }
 
 // The committed frame of `wanted` on `b`, read from the live journal. A
@@ -96,9 +107,25 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[pages.Roots], Error
     let d = log_directory(db)?
     let (_, store, take page_record) = failure_result_from_rep(capture.read_only_manifest(d))?
     let id = store_key_from_rep(store)
-    let validated = validate_store_manifest(d, id, take page_record)?
+    let disk = disk_state(db)
+    let preview = match view disk.preview {
+        Some(grant) => Some(view grant),
+        None => None
+    }
+    let none = manifest.new_page_locations()
+    let validated = walk_directory_preview(d, id, take page_record, true, false, manifest.SettledPacks(below: 0, locations: view none), preview)?
     let (take selected, take state) = failure_result_from_rep(txn.replay_base_state(take validated))?
-    let replay = failure_result_from_rep(pager.journal_replay_manifest(take state, selected))?
+    let mut replay = failure_result_from_rep(pager.journal_replay_manifest(take state, selected))?
+    let direct = manifest.direct_packs(disk.packs)
+    if std.omap.len(direct.stamps.values) != 0 {
+        let mut stamps = std.omap.range(direct.stamps.values, Unbounded, Unbounded)
+        while let Some((stamp, _)) = std.omap.next(mut stamps) {
+            replay.next_node = order.max(replay.next_node, stamp)
+        }
+        let inventory = failure_result_from_rep(history.recovered_tiered_inventory(manifest.pack_locations(disk.packs), None, selected.generation, selected.next_stamp))?
+        let mut private = pager.disk_pager_state(None)
+        seed_direct_snapshots(disk.packs, Some(take inventory), selected.generation, replay.next_node, mut replay.state, mut private)?
+    }
     for tip in replay.state.tips {
         if tip.id == b.id && tip.head > base {
             return Ok(None)
@@ -122,7 +149,7 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[pages.Roots], Error
             Some(_) => false,
             None => true
         }
-        let scanned = journal_scan(mut source, path, id, seq, 72, boundary, final_item, mut held, scoped fn(mut at: txn.BaseReplay, take event: format.JournalEvent) -> Result[(), Error] {
+        let scanned = journal_scan(mut source, path, id, seq, 72, boundary, final_item, mut held, scoped fn(mut at: txn.BaseReplay, take event: format.JournalEvent) -> Result[(), Error] waits {
             if at.stopped {
                 return Ok(())
             }
@@ -132,7 +159,8 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[pages.Roots], Error
                         at.stopped = true
                         return Ok(())
                     }
-                    journal_apply_commit(path, mut at.replay, commit)
+                    let ready = directory_replay_event(d, id, at.replay, preview, Commit(take commit))?
+                    journal_apply(path, mut at.replay, take ready)
                 },
                 Fork(take encoded) => failure_result_from_rep(journal.journal_apply_fork(path, mut at.replay, take encoded)),
             }
@@ -164,17 +192,24 @@ fn stop_kind(stop: Stop) -> StopKind {
 
 type Rerun[R] = RanTo(R, pages.DataRows) | Halted(Stop) | RoomRefused
 
+// What a witness capture keeps of one attempt (store-witness.hirsel): the
+// logical reads, and whether the body stopped on a page outside the slice.
+type RerunTrace {
+    reads: List[Read],
+    outside: bool
+}
+
 // Section 7 step 3: the body on `base` under the recorded CallInfo, bounded as
 // `serve` bounds it. Nothing is committed; an application error keeps no
 // data writes (F2).
-fn rerun_attempt[R](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, ci: CallInfo, plan: Plan, call: Recorded, attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Rerun[R] {
+fn rerun_attempt[R](start: txn.TxStart, bases: pages.TailBases, tiered_bytes: u64, registry: indexes.IndexRegistry, base: pages.Roots, ci: CallInfo, plan: Plan, call: Recorded, attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], mut trace: Option[RerunTrace], body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Rerun[R] {
     let reads: core.Log[Read] = log.new()
     let issued: core.Cell[u64] = cell.new(0)
     let caught = isolate(fn() -> Result[Result[Finished[R, R], Capacity], OutOfTime] {
         bound steps plan.s_e {
             let drafted = bound bytes plan.n_e {
                 let keep: Option[fn(R) -> bool] = None
-                let staged = draft_body(db, registry, base, ci, keep, reads, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[R, R] {
+                let staged = draft_at(start, bases, tiered_bytes, registry, base, ci, keep, reads, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[R, R] {
                     body(call, mut tx)
                 })
                 match prepare_metered_pages(base, issued, attempt, pins, take staged) {
@@ -186,16 +221,24 @@ fn rerun_attempt[R](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, 
             take drafted
         }
     })
-    let _ = log.finish(take reads)
+    let logged = log.finish(take reads)
+    if let Some(mut kept) = trace {
+        kept.reads = take logged
+    }
     let _ = cell.into_inner(take issued)
     if pager.call_attempt_latched(attempt) {
         return RoomRefused
     }
     let finished = match take caught {
         Error(problem) => return Halted(OutOfBytes(problem)),
-        Ok(Error(take causes)) => return match manifest.raised_capacity(causes) {
-            Some(problem) => Halted(OutOfBytes(problem)),
-            None => Halted(Raised(txn.cause_number(causes))),
+        Ok(Error(take causes)) => {
+            if let Some(mut kept) = trace {
+                kept.outside = witness_outside(causes)
+            }
+            return match manifest.raised_capacity(causes) {
+                Some(problem) => Halted(OutOfBytes(problem)),
+                None => Halted(Raised(txn.cause_number(causes))),
+            }
         },
         Ok(Ok(Error(limit))) => return Halted(OutOfSteps(limit.steps)),
         Ok(Ok(Ok(Error(problem)))) => return Halted(OutOfBytes(problem)),
@@ -230,7 +273,8 @@ fn rerun[R](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, ci: Call
     let mut pending: Option[(format.TieredTarget, types.Failure)] = None
     loop {
         let attempt = pager.call_attempt(captured_tiered(base.collections, pages.holder_bases(db.holders), ci.id.branch), pager.pin_partition(db.pager), pager.tiered_window(pins))
-        let reran = rerun_attempt(db, registry, base, ci, plan, call, attempt, pins.frames, body)
+        let mut untraced: Option[RerunTrace] = None
+        let reran = rerun_attempt(tx_start(db), pages.holder_bases(db.holders), db.accounting.tiered, registry, base, ci, plan, call, attempt, pins.frames, mut untraced, body)
         let Some(state) = pager.call_attempt_finish(take attempt) else {
             return Ok(take reran)
         }
@@ -265,16 +309,7 @@ fn replay_source(db: Db, b: Branch, v: u64) -> Result[Result[ReplaySource, Unkno
         return Ok(Error(StateGone))
     }
     let Some(call) = recorded_call(db.store, b, commit) else {
-        for edit in commit.keyed {
-            if let Some(section) = edit.call {
-                if let Some(format.Settlement(way: 2u8, ..)) = section.settlement {
-                    return Ok(Error(AdmissionRefused))
-                }
-                // The stream replay adapter has no keyed claim source.
-                return Ok(Error(Effects))
-            }
-        }
-        return Ok(Error(NotRecorded))
+        return claim_source_from_commit(db, b, take commit)
     }
     if call.settle == 2 {
         return Ok(Error(AdmissionRefused))
@@ -288,12 +323,82 @@ fn replay_source(db: Db, b: Branch, v: u64) -> Result[Result[ReplaySource, Unkno
     Ok(Ok(ReplaySource(store: db.store, open: open_number(db), commit: take commit, call: take call, base: take base)))
 }
 
+// A claim key is `len8 ‖ op ‖ issuer ‖ len8 ‖ subject ‖ len8 ‖ key` (http.md K-4).
+pub fn claim_key_parts(claim: Bytes) -> Result[ClaimKey, Error] {
+    let op_end = failure_result_from_rep(txn.claim_op_end(claim))?
+    let principal_end = failure_result_from_rep(txn.claim_principal_end(claim, op_end))?
+    let op = failure_result_from_rep(types.copied(list.slice(claim, 1, op_end)))?
+    let subject = failure_result_from_rep(types.copied(list.slice(claim, op_end + 2, principal_end)))?
+    let key = failure_result_from_rep(types.copied(list.slice(claim, principal_end + 1, list.len(claim))))?
+    Ok(ClaimKey(op: take op, caller: Caller(issuer: claim[op_end], subject: take subject), key: take key))
+}
+
+// The keyed call that `v` on main recorded. Its claim key is the key of the
+// claims edit that carries the CALL fields, so it is never the entry key.
+// The record names the claim's Caller, which the re-run receives as recorded.
+fn claim_replay_source(db: Db, v: u64) -> Result[Result[ReplaySource, UnknownReason], Error] waits {
+    let b = main_branch(db)
+    let Some(take commit) = recorded_commit(db, b, v)? else {
+        return Ok(Error(StateGone))
+    }
+    claim_source_from_commit(db, b, take commit)
+}
+
+fn claim_source_from_commit(db: Db, b: Branch, take commit: format.JournalCommit) -> Result[Result[ReplaySource, UnknownReason], Error] waits {
+    let mut found: Option[Recorded] = None
+    for edit in commit.keyed {
+        if let Some(section) = edit.call {
+            let context = match section.settlement {
+                Some(current) => current,
+                None => format.Settlement(way: 0, base: commit.version - 1, at: commit.at, seed: call_info(db.store, b.id, commit.version, commit.at, commit.at).seed, stop: None),
+            }
+            let parts = claim_key_parts(edit.key)?
+            let keyed = keyed_call_record_from_rep(clone(section.record))
+            let KeyedCallRecord(entry: take entry_key, args: take args, revision: take revision, code: take code) = take keyed
+            let record = CallRecord(key: take entry_key, args: take args, stream: StreamKey(caller: clone(parts.caller), id: StreamId(t: 0, n: 0)), revision: take revision, code: take code)
+            found = Some(Recorded(record: take record, claim: Some(failure_result_from_rep(types.copied(edit.key))?), settle: context.way, branch: b, base: context.base, at: context.at, seed: context.seed, stop: optional_stop_kind_from_rep(context.stop)))
+            break
+        }
+    }
+    let Some(take call) = take found else {
+        return Ok(Error(NotRecorded))
+    }
+    if call.settle == 2 {
+        return Ok(Error(AdmissionRefused))
+    }
+    let Some(take base) = base_roots(db, b, call.base)? else {
+        return Ok(Error(StateGone))
+    }
+    Ok(Ok(ReplaySource(store: db.store, open: open_number(db), commit: take commit, call: take call, base: take base)))
+}
+
+// The reply the recorded run committed: a stream's Replied value, or the
+// claim's. Both start with a 41-byte header.
+fn replay_source_reply(source: ReplaySource) -> Option[View[Bytes]] in source {
+    if let Some(_) = source.call.claim {
+        for edit in source.commit.keyed {
+            if let Some(_) = edit.call {
+                if let Some(raw) = view edit.value {
+                    return Some(view raw)
+                }
+            }
+        }
+        return None
+    }
+    recorded_reply(source.commit, source.call.record.stream)
+}
+
 // RUNNER-SPEC §7: run on a private copy of the attempted base, under the
 // original CallInfo, and compare the committed reply and writes.
 fn replay_run(db: Db, registry: indexes.IndexRegistry, source: ReplaySource, plan: Plan, failed: scoped fn(Stop) -> Result[Bytes, Error], body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
     let call = view source.call
     let ci = CallInfo(id: CallId(store: db.store, branch: call.branch.id, version: call.base + 1), at: call.at, seed: call.seed)
     let reran = rerun(db, registry, source.base, ci, plan, call, body)?
+    replay_verdict(source, plan, take reran, failed)
+}
+
+fn replay_verdict(source: ReplaySource, plan: Plan, take reran: Rerun[Bytes], failed: scoped fn(Stop) -> Result[Bytes, Error]) -> Result[Verdict, Error] {
+    let call = view source.call
     let metered: Rerun[Bytes] = match take reran {
         RanTo(output, _) if list.len(output) > plan.reply_max => Halted(OutOfBytes(Capacity(requested: list.len(output), available: plan.reply_max))),
         take within => take within,
@@ -315,7 +420,7 @@ fn replay_run(db: Db, registry: indexes.IndexRegistry, source: ReplaySource, pla
         Halted(stop) => (failed(stop)?, pages.new_data_rows()),
         RoomRefused => return Ok(Unknown(StateGone)),
     }
-    let stored = option.unwrap(recorded_reply(source.commit, call.record.stream))
+    let stored = option.unwrap(replay_source_reply(source))
     if list.len(stored) != 41 + list.len(output) || !list.starts_with_at(stored, 41, output) {
         return Ok(Different(Reply))
     }
@@ -337,17 +442,48 @@ pub fn reexecute[E: inert](db: Db, b: Branch, v: u64, plan: Plan, failed: fn(Sto
     }
 }
 
+// As `reexecute`, for the keyed call main's `v` recorded.
+pub fn reexecute_claim[E: inert](db: Db, v: u64, plan: Plan, failed: fn(Stop) -> Bytes, env: E, body: fn(Recorded, mut Tx, E) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
+    let selected = claim_replay_source(db, v)?
+    match take selected {
+        Ok(take source) => replay_run(db, indexes.index_registry(db.indexes), source, plan, scoped fn(stop: Stop) -> Result[Bytes, Error] {
+            Ok(failed(stop))
+        }, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+            body(call, mut tx, env)
+        }),
+        Error(reason) => Ok(Unknown(reason)),
+    }
+}
+
 // Prepare handles on the same historical catalog the attempt will read.
 pub fn prepare_reexecute(db: Db, b: Branch, v: u64) -> Result[Result[ReplaySource, UnknownReason], Error] waits {
     replay_source(db, b, v)
 }
 
+// As `prepare_reexecute`, for the keyed call main's `v` recorded.
+// `reexecute_with` then runs it; `replay_claim` gives its claim key.
+pub fn prepare_reexecute_claim(db: Db, v: u64) -> Result[Result[ReplaySource, UnknownReason], Error] waits {
+    claim_replay_source(db, v)
+}
+
+pub fn replay_claim(source: ReplaySource) -> Option[Bytes] {
+    clone(source.call.claim)
+}
+
+fn replay_source_matches(db: Db, source: ReplaySource) -> bool {
+    source.store == db.store && source.open == open_number(db)
+}
+
 pub fn declare_replay(db: Db, source: ReplaySource) -> Result[Declare, Error] {
-    if !types.same(source.store.hi, source.store.lo, db.store.hi, db.store.lo) || source.open != open_number(db) {
+    if !replay_source_matches(db, source) {
         return Error(Foreign)
     }
-    let plan = SchemaPlan(schema: catalog.schema_plan(pages.share_roots(source.base), pages.holder_next_node(db.holders), catalog.next_table_id(db.schema), 0, db.accounting.ceiling, true, db.limits.value), store: db.store, bindings: indexes.empty_bindings(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None, staged_map: pages.share_page_tree(source.base.collections))
-    Ok(new_declaration(Open, replay_declaration_base(source), take plan, is_disk(db)))
+    replay_schema(source, pages.holder_next_node(db.holders), catalog.next_table_id(db.schema), db.accounting.ceiling, db.limits.value, is_disk(db))
+}
+
+fn replay_schema(source: ReplaySource, next_node: u64, next_table: u32, ceiling: u64, value: u64, disk: bool) -> Result[Declare, Error] {
+    let plan = SchemaPlan(schema: catalog.schema_plan(pages.share_roots(source.base), next_node, next_table, 0, ceiling, true, value), store: source.store, bindings: indexes.empty_bindings(), chunk_freed: None, step_rows: list.new(), step_drift: false, migrate_sources: list.new(), pending_migrates: list.new(), pending_indexes: list.new(), preview: None, staged_map: pages.share_page_tree(source.base.collections))
+    Ok(new_declaration(Open, replay_declaration_base(source), take plan, disk))
 }
 
 pub fn replay_record(source: ReplaySource) -> Recorded {
@@ -358,7 +494,7 @@ pub fn reexecute_with[Env: inert](db: Db, source: ReplaySource, take selected: D
     let Open = selected.mode else {
         return Error(Foreign)
     }
-    if !types.same(source.store.hi, source.store.lo, db.store.hi, db.store.lo) || source.open != open_number(db) || !catalog.same_declaration_base(selected.inner, replay_declaration_base(source)) {
+    if !replay_source_matches(db, source) || !catalog.same_declaration_base(selected.inner, replay_declaration_base(source)) {
         return Error(Foreign)
     }
     complete_declaration(selected)?
@@ -422,4 +558,11 @@ fn recorded_reply(commit: format.JournalCommit, stream: StreamKey) -> Option[Vie
 
 fn replay_declaration_base(source: ReplaySource) -> catalog.DeclarationBase {
     txn.replay_declaration_base(types.StoreKey(hi: source.store.hi, lo: source.store.lo), source.open, source.call.base, source.base.catalog)
+}
+
+pub fn recorded(db: Db, b: Branch, wanted: u64) -> Result[Option[Recorded], Error] waits {
+    match recorded_commit(db, b, wanted)? {
+        Some(commit) => Ok(recorded_call(db.store, b, commit)),
+        None => Ok(None),
+    }
 }

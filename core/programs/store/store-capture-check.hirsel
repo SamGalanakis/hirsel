@@ -16,7 +16,8 @@ fn check_blob(mut walk: capture.CheckWalk, reference: std.page.BlobRef, class: u
     }
     let ptr = std.page.PagePtr(pack: reference.pack, offset: reference.offset, len: int.truncate(8 + reference.len), checksum: reference.checksum, stamp: reference.stamp)
     let slot = failure_result_from_rep(capture.check_pack_slot(walk.packs, path, ptr, class, walk.next_stamp))?
-    if class == 4 {
+    let pack_class = walk.packs[slot].class
+    if pack_class == 4 {
         let pack = walk.packs[slot]
         let index_at = pack.payload_bytes
         let width: u64 = int.widen(ptr.len)
@@ -29,7 +30,7 @@ fn check_blob(mut walk: capture.CheckWalk, reference: std.page.BlobRef, class: u
     let opened = failure_result_from_rep(capture.check_open_pack(walk.dir, path))?
     let mut input = failure_result_from_rep(journal.journal_input(take opened, false))?
     failure_result_from_rep(capture.check_at_head(mut input, mut walk.packs[slot], path, ptr))?
-    let mut scanned = manifest.pack_scan_indexed(class, walk.next_stamp, walk.packs[slot].payload_bytes)
+    let mut scanned = manifest.pack_scan_indexed(pack_class, walk.next_stamp, walk.packs[slot].payload_bytes)
     let mut spent = 0u64
     let ctx = format.DiskContext(store: walk.id, role: 3, seq: ptr.pack)
     let frame = failure_result_from_rep(manifest.read_pack_frame(mut input, path, ctx, mut scanned, ptr.offset, true, mut spent))?
@@ -210,7 +211,7 @@ fn check_prepared(mut p: PreparedCapture, target: Option[Dir], fault: scoped[vie
     }
     let _ = take thorough
     let journal = bound bytes capture.capture_check_scratch(p.state) {
-        check_journal(mut p, mut summary.journal)
+        check_journal(mut p, target, mut summary.journal)
     } ?=> CheckBudget
     let head = match take journal {
         Ok(found) => found,

@@ -13,6 +13,7 @@ pub opaque type ObjectWriterState {
     levels: List[String],
     weak: Option[WeakWaiters],
     pair: history.HistoryPair,
+    authority_kind: u8,
     origin: Option[history.HistoryOrigin],
     recovered: pages.HistoryRef,
     entries: u64,
@@ -161,7 +162,7 @@ pub fn activate_worker(take opening: ObjectWorkerOpen, take requests: std.object
         let ObjectJournalStart(requests: take returned, ..) = take unsent
         return Error((take returned, take workers))
     }
-    let object = ObjectWriterState(workers: take workers, source_bucket: take src_bucket, health: take health_state, reclaims: take reclaims_state, archive_observed: take archive_observed_state, archive_timer: None, unhealthy: Some(take health_rx), export_lifetime: None, watch: None, terminal: take health_tx, locator: take locator, levels: take names_in_order, weak: take waiters, pair: head.pair, origin: head.origin, recovered: head.checkpoint, entries: head.entry.seq - head.checkpoint.seq, failed: None, stream: attached_sid, attached, has_sealed, drop_attach_on_cut: false, cache, head_entry_seq: head.entry.seq, draft_offset: 72, journal: take frames, acks: take journal_received, accounting: journal.queue_accounting(0), written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), writer: take work, timer: take timer)
+    let object = ObjectWriterState(workers: take workers, source_bucket: take src_bucket, health: take health_state, reclaims: take reclaims_state, archive_observed: take archive_observed_state, archive_timer: None, unhealthy: Some(take health_rx), export_lifetime: None, watch: None, terminal: take health_tx, locator: take locator, levels: take names_in_order, weak: take waiters, pair: head.pair, authority_kind: head.authority_kind, origin: head.origin, recovered: head.checkpoint, entries: head.entry.seq - head.checkpoint.seq, failed: None, stream: attached_sid, attached, has_sealed, drop_attach_on_cut: false, cache, head_entry_seq: head.entry.seq, draft_offset: 72, journal: take frames, acks: take journal_received, accounting: journal.queue_accounting(0), written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), writer: take work, timer: take timer)
     Ok((take object, force_open_cut))
 }
 
@@ -436,4 +437,8 @@ pub fn close_worker(take state: ObjectWriterState, take prior: Option[types.Fail
             None => Ok(()),
         },
     }
+}
+
+pub fn direct_seal_authority(writer: ObjectWriterState) -> (u64, u8) {
+    (writer.pair.epoch, writer.authority_kind)
 }

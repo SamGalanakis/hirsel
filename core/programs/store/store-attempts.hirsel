@@ -117,7 +117,7 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
                 let staged = draft_body(db, indexes.index_registry(db.indexes), pages.holder_heads(db.holders)[0].roots, ci, keep, reads, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
                     stage_reply(mut tx, complete, rec, plan.reply_max, keyed_completion_credit(db, complete), body)
                 })
-                let finished = match prepare_metered_pages(pages.holder_heads(db.holders)[0].roots, issued, attempt, pins, take staged) {
+                let finished = match prepare_writer_pages(db, pages.holder_heads(db.holders)[0].roots, issued, attempt, pins, take staged) {
                     Ok(take ready) => take ready,
                     Error(Full(problem)) => RolledBack(Refused(problem)),
                     Error(take problem) => DraftFault(take problem),
@@ -269,18 +269,25 @@ fn look_attempt[E: inert, R](s: Snapshot, steps: Option[u64], env: E, body: fn(T
     }
 }
 
-fn draft_body[R, A](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Cell[u64], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
-    let observed_info: core.Cell[bool] = cell.new(false)
-    let scope = txn.TxViews(base: view base, indexes: view registry, reads: view reads, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins)
-    let start = txn.TxStart(store: types.StoreKey(hi: db.store.hi, lo: db.store.lo), ids: pages.holder_next_node(db.holders), resident: db.accounting.resident, retain_old: retaining(db), journaled: if let Some(_) = db.disk {
+fn tx_start(db: Db) -> txn.TxStart {
+    txn.TxStart(store: types.StoreKey(hi: db.store.hi, lo: db.store.lo), ids: pages.holder_next_node(db.holders), resident: db.accounting.resident, retain_old: retaining(db), journaled: if let Some(_) = db.disk {
         true
     } else {
         false
     }, limits: types.LimitsRep(frame: db.limits.frame, value: db.limits.value, meta: db.limits.meta))
-    let mut tx = Tx(inner: txn.begin_tx(scope, pages.holder_bases(db.holders), start, true), info: ci)
+}
+
+fn draft_body[R, A](db: Db, registry: indexes.IndexRegistry, base: pages.Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Cell[u64], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
+    draft_at(tx_start(db), pages.holder_bases(db.holders), db.accounting.tiered, registry, base, ci, keep_reply, reads, issued, attempt, pins, body)
+}
+
+fn draft_at[R, A](start: txn.TxStart, bases: pages.TailBases, tiered_bytes: u64, registry: indexes.IndexRegistry, base: pages.Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Cell[u64], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
+    let observed_info: core.Cell[bool] = cell.new(false)
+    let scope = txn.TxViews(base: view base, indexes: view registry, reads: view reads, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins)
+    let mut tx = Tx(inner: txn.begin_tx(scope, bases, start, true), info: ci)
     let outcome = body(mut tx)
     let Tx(inner: take state, ..) = take tx
-    match txn.finish_body(take state, take outcome, keep_reply, base, db.accounting.resident, db.accounting.tiered, if let Some(_) = attempt {
+    match txn.finish_body(take state, take outcome, keep_reply, base, start.resident, tiered_bytes, if let Some(_) = attempt {
         true
     } else {
         false

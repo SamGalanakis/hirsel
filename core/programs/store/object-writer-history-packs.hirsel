@@ -63,6 +63,11 @@ pub fn history_validate_manifest(mut client: std.object.Client, locator: history
 }
 
 pub fn validate_bucket_graph(mut client: std.object.Client, locator: history.HistoryLocator, deadline: u64, id: types.StoreKey, file: String, take page_record: manifest.PageManifest, allow_tiered: bool, cache: Option[pager.ObjectsCache]) -> Result[manifest.ValidatedPageManifest, types.Failure] waits {
+    validate_bucket_preview(mut client, locator, deadline, id, file, take page_record, allow_tiered, cache, None)
+}
+
+pub fn validate_bucket_preview(mut client: std.object.Client, locator: history.HistoryLocator, deadline: u64, id: types.StoreKey, file: String, take page_record: manifest.PageManifest, allow_tiered: bool, cache: Option[pager.ObjectsCache], preview: Option[View[pager.PreviewRead]]) -> Result[manifest.ValidatedPageManifest, types.Failure] waits {
+    pager.require_preview(preview, id, page_record.origin)?
     let blank = manifest.PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new())
     let mut lists = manifest.empty_listed_pages(allow_tiered, take blank)
     let mut final_item: Option[u64] = None
@@ -83,20 +88,36 @@ pub fn validate_bucket_graph(mut client: std.object.Client, locator: history.His
             return Error(format.disk_fault(file, 72, Malformed))
         }
     }
-    if map.len(history.locator_rows(locator)) != map.len(lists.packs) + map.len(lists.class_two) {
-        return Error(format.disk_fault(file, 72, Malformed))
-    }
+    let mut local_count = map.len(lists.class_two)
     let mut seqs: List[u64] = list.new()
     types.capacity(list.try_reserve(mut seqs, map.len(lists.packs)))?
     for (seq, pack) in lists.packs {
+        if let Some(ref) = pack.foreign {
+            let Some(source) = preview else {
+                return Error(Missing("preview archive"))
+            }
+            pager.preview_check_pack(source, seq, pack)?
+            if map.contains(history.locator_rows(locator), seq) || (pack.class >= 3 && pack.payload_bytes != ref.len) {
+                return Error(format.disk_fault(file, 72, Malformed))
+            }
+            if pack.class < 2 || pack.class == 4 {
+                list.push(mut seqs, seq)
+            }
+            continue
+        }
+        local_count += 1
         let Some(located) = map.get(history.locator_rows(locator), seq) else {
             return Error(format.disk_fault(file, 72, Malformed))
         }
-        if pack.class < 3 {
+        if pack.class < 3 || pack.class == 4 {
             list.push(mut seqs, seq)
-        } else if located.len != pack.payload_bytes {
+        }
+        if pack.class >= 3 && located.len != pack.payload_bytes {
             return Error(format.disk_fault(file, 72, Malformed))
         }
+    }
+    if map.len(history.locator_rows(locator)) != local_count {
+        return Error(format.disk_fault(file, 72, Malformed))
     }
     for (seq, offsets) in lists.class_two {
         let pack = history_check_list_pack(mut client, locator, deadline, cache, id, seq, page_record.next_stamp, offsets)?
@@ -119,7 +140,17 @@ pub fn validate_bucket_graph(mut client: std.object.Client, locator: history.His
     })
     for seq in seqs {
         let pack = option.unwrap(map.get(lists.packs, seq))
-        let (take name, take loaded) = history_load_data_pack(mut client, locator, deadline, cache, id, seq, pack, page_record.next_stamp)?
+        if pack.class == 4 && !map.contains(pending, seq) {
+            continue
+        }
+        let (take name, take loaded) = if let Some(ref) = pack.foreign {
+            let Some(source) = preview else {
+                return Error(Missing("preview archive"))
+            }
+            (pager.preview_pack_key(source, seq, ref)?, pager.preview_memory_pack(source, seq, pack, page_record.next_stamp)?)
+        } else {
+            history_load_data_pack(mut client, locator, deadline, cache, id, seq, pack, page_record.next_stamp)?
+        }
         let inventory = manifest.RecoveryInventory(packs: view lists.packs, next_stamp: page_record.next_stamp, allow_tiered: allow_tiered)
         history.history_resolve_pack(name, loaded, inventory, seq, mut pending, mut lists.live_graph)?
     }
@@ -144,12 +175,30 @@ pub fn history_open_checkpoint(mut source: history.ObjectPackRead, head: history
     if let Some(local) = cache {
         pack_cache_trim(local)
     }
-    let validated = validate_bucket_graph(mut source.client, source.locator, source.deadline, head.store, name, take page_record, true, cache)?
+    if source.archiving {
+        manifest.independent_source(page_record.origin)?
+    }
+    let preview = match view source.preview {
+        Some(s) => Some(view s),
+        None => None,
+    }
+    let validated = validate_bucket_preview(mut source.client, source.locator, source.deadline, head.store, name, take page_record, true, cache, preview)?
     let loaded = history.rebuild_page_store(take validated, Some(view source.locator))?
     let initial = manifest.disk_allocation(scoped fn() -> Result[pages.State, types.Failure] {
         types.capacity(manifest.manifest_state(loaded.manifest, loaded.holders))
     })?
-    let replay = pager.journal_replay_manifest(take initial, loaded.manifest)?
+    let mut replay = pager.journal_replay_manifest(take initial, loaded.manifest)?
+    if source.writer_claim {
+        let mut inventory: Option[Arc[pages.TieredReadInventory]] = None
+        for held in loaded.holders {
+            if let Some(paging) = view held.collections.paging {
+                inventory = Some(arc.share(paging))
+                break
+            }
+        }
+        replay.claim_packs = Some(pager.ClaimPacks(disk: manifest.claim_pack_disk(loaded.manifest.next_pack), generation: loaded.manifest.generation, checkpoint: take inventory))
+    }
+    replay.next_node = order.max(replay.next_node, cell.get(source.direct_floor))
     catalog.over_ceiling(journal.journal_account(replay)?, ceiling)?
     Ok((take replay, take loaded))
 }

@@ -14,6 +14,11 @@ fn validate_export_manifest(d: Dir, id: StoreId, take page_record: manifest.Page
 }
 
 fn walk_directory_graph(d: Dir, id: StoreId, take page_record: manifest.PageManifest, allow_tiered: bool, walk_cold: bool, settled: manifest.SettledPacks) -> Result[manifest.ValidatedPageManifest, Error] waits {
+    walk_directory_preview(d, id, take page_record, allow_tiered, walk_cold, settled, None)
+}
+
+fn walk_directory_preview(d: Dir, id: StoreId, take page_record: manifest.PageManifest, allow_tiered: bool, walk_cold: bool, settled: manifest.SettledPacks, preview: Option[View[pager.PreviewRead]]) -> Result[manifest.ValidatedPageManifest, Error] waits {
+    failure_result_from_rep(pager.require_preview(preview, store_key_to_rep(id), page_record.origin))?
     let graph = manifest.PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new())
     let mut lists = manifest.empty_listed_pages(allow_tiered, take graph)
     let mut final_item: Option[u64] = None
@@ -36,7 +41,17 @@ fn walk_directory_graph(d: Dir, id: StoreId, take page_record: manifest.PageMani
         map.insert(mut lists.packs, seq, checked)
     }
     for (seq, pack) in lists.packs {
-        if pack.class != 2 && seq < settled.below {
+        if let Some(_) = pack.foreign {
+            let Some(source) = preview else {
+                return Error(Missing("preview archive"))
+            }
+            failure_result_from_rep(pager.preview_check_pack(source, seq, pack))?
+            if pack.class < 2 {
+                let loaded = failure_result_from_rep(pager.preview_memory_pack(source, seq, pack, page_record.next_stamp))?
+                failure_result_from_rep(types.capacity(map.try_reserve(mut data, 1)))?
+                map.insert(mut data, seq, take loaded)
+            }
+        } else if pack.class != 2 && seq < settled.below {
             let Some(record) = manifest.disk_index_get(settled.locations.packs, seq) else {
                 return Error(failure_from_rep(format.disk_fault("MANIFEST", 72, Malformed)))
             }
@@ -55,19 +70,35 @@ fn walk_directory_graph(d: Dir, id: StoreId, take page_record: manifest.PageMani
     for queued in lists.deferred {
         failure_result_from_rep(manifest.validate_deferred_target(manifest.RecoveryInventory(packs: view lists.packs, next_stamp: page_record.next_stamp, allow_tiered: allow_tiered), queued.target))?
     }
-    let (take resolved_graph, take cold_roots) = disk_allocation(scoped fn() -> Result[(manifest.PageGraph, List[std.page.PagePtr]), Error] {
+    let (take resolved_graph, take cold_roots, take pending) = disk_allocation(scoped fn() -> Result[(manifest.PageGraph, List[std.page.PagePtr], List[std.page.BlobRef]), Error] {
         let mut candidate: manifest.PageGraph = clone(lists.live_graph)
+        let mut needed: List[std.page.BlobRef] = list.new()
         let mut collected: List[std.page.PagePtr] = list.new()
         let inventory = manifest.RecoveryInventory(packs: view lists.packs, next_stamp: page_record.next_stamp, allow_tiered: allow_tiered)
         for item in page_record.branches {
-            failure_result_from_rep(manifest.resolve_data_roots(data, inventory, settled, item.roots, walk_cold, mut collected, mut candidate))?
+            failure_result_from_rep(manifest.resolve_data_roots(data, inventory, settled, item.roots, walk_cold, mut collected, mut needed, mut candidate))?
         }
         for held in page_record.pins {
-            failure_result_from_rep(manifest.resolve_data_roots(data, inventory, settled, held.roots, walk_cold, mut collected, mut candidate))?
+            failure_result_from_rep(manifest.resolve_data_roots(data, inventory, settled, held.roots, walk_cold, mut collected, mut needed, mut candidate))?
         }
-        Ok((take candidate, take collected))
+        Ok((take candidate, take collected, take needed))
     })?
     let mut resolved = take resolved_graph
+    for reference in pending {
+        let row = option.unwrap(map.get(lists.packs, reference.pack))
+        let loaded = if let Some(_) = row.foreign {
+            let Some(source) = preview else {
+                return Error(Missing("preview archive"))
+            }
+            failure_result_from_rep(pager.preview_memory_pack(source, reference.pack, row, page_record.next_stamp))?
+        } else {
+            failure_result_from_rep(manifest.disk_load_page_pack(d, store_key_to_rep(id), reference.pack, row, page_record.next_stamp))?
+        }
+        let path = failure_result_from_rep(manifest.paged_pack_path(reference.pack))?
+        let value = failure_result_from_rep(manifest.verified_blob_body(path, loaded, reference))?
+        failure_result_from_rep(types.capacity(map.try_reserve(mut resolved.frames, 1)))?
+        map.insert(mut resolved.frames, reference.stamp, ReadBlob(take value))
+    }
     if walk_cold {
         failure_result_from_rep(pager.walk_cold_reachable(d, store_key_to_rep(id), lists.packs, page_record.next_stamp, settled.below, cold_roots, lists.deferred, mut resolved.stamps))?
     }
@@ -82,19 +113,43 @@ fn validate_store_manifest(d: Dir, id: StoreId, take page_record: manifest.PageM
     validate_directory_graph(d, id, take page_record, true)
 }
 
-fn select_page_manifest_holds(d: Dir, id: StoreId, take page_record: manifest.PageManifest) -> Result[(manifest.ValidatedPageManifest, List[manifest.HeldReceipt]), Error] waits {
+fn select_page_manifest_holds(d: Dir, id: StoreId, take page_record: manifest.PageManifest, c: Clock, preview: Option[View[pager.PreviewRead]]) -> Result[(manifest.ValidatedPageManifest, DirectoryJournalPrefix, manifest.CollectedArchiveHolds), Error] waits {
     failure_result_from_rep(manifest.disk_io(host.sync_dir(d)))?
-    let validated = validate_store_manifest(d, id, take page_record)?
-    let kept = failure_result_from_rep(manifest.cleanup_page_manifest_with_holds(d, store_key_to_rep(id), validated))?
-    Ok((take validated, take kept))
+    let none = manifest.new_page_locations()
+    let validated = walk_directory_preview(d, id, take page_record, true, false, manifest.SettledPacks(below: 0, locations: view none), preview)?
+    let prefix = select_directory_prefix(d, id, validated.manifest.first_live, c)?
+    let _ = failure_result_from_rep(catalog.stamp_after(prefix.high_stamp))?
+    let holds = if let Some(source) = preview {
+        let mut local: List[Arc[format.DirectBlob]] = list.new()
+        for p in prefix.introduced {
+            if let Some(_) = failure_result_from_rep(pager.preview_introduction(source, p))? {
+                continue
+            }
+            failure_result_from_rep(types.capacity(list.try_reserve(mut local, 1)))?
+            list.push(mut local, arc.share(p))
+        }
+        failure_result_from_rep(manifest.directory_cleanup_plan(d, store_key_to_rep(id), validated, local))?
+    } else {
+        failure_result_from_rep(manifest.directory_cleanup_plan(d, store_key_to_rep(id), validated, prefix.introduced))?
+    }
+    Ok((take validated, take prefix, take holds))
 }
 
-fn select_page_manifest(d: Dir, id: StoreId, take page_record: manifest.PageManifest) -> Result[manifest.ValidatedPageManifest, Error] waits {
-    let (take validated, _) = select_page_manifest_holds(d, id, take page_record)?
-    Ok(take validated)
+fn clean_selected_directory(d: Dir, id: StoreId, validated: manifest.ValidatedPageManifest, prefix: DirectoryJournalPrefix, take holds: manifest.CollectedArchiveHolds) -> Result[(), Error] waits {
+    let mut reservations = manifest.genesis_pack_disk()
+    failure_result_from_rep(manifest.seed_direct_packs(mut reservations, prefix.introduced))?
+    for place in prefix.introduced {
+        let _ = failure_result_from_rep(manifest.read_directory_direct(d, store_key_to_rep(id), place, None, false, None))?
+    }
+    let _ = failure_result_from_rep(manifest.cleanup_page_manifest_with_holds(d, validated.manifest, take holds))?
+    Ok(())
 }
 
 fn validate_new_page_manifest(d: Dir, id: StoreId, raw: Bytes, target: manifest.TargetLimits, settled: manifest.SettledPacks) -> Result[(), Error] waits {
+    validate_new_preview_manifest(d, id, raw, target, settled, None)
+}
+
+fn validate_new_preview_manifest(d: Dir, id: StoreId, raw: Bytes, target: manifest.TargetLimits, settled: manifest.SettledPacks, preview: Option[View[pager.PreviewRead]]) -> Result[(), Error] waits {
     if let Some(problem) = types.journal_floor(target.checkpoint, target.journal, target.frame) {
         return Error(Full(Journal(problem)))
     }
@@ -105,7 +160,7 @@ fn validate_new_page_manifest(d: Dir, id: StoreId, raw: Bytes, target: manifest.
         return Error(failure_from_rep(format.disk_fault("MANIFEST.tmp", 0, Header)))
     }
     let requested = page_record.account_memory
-    let validated = walk_directory_graph(d, id, take page_record, true, true, settled)?
+    let validated = walk_directory_preview(d, id, take page_record, true, true, settled, preview)?
     let admitted = if validated.manifest.account_tiered != 0 || target.has_tiered {
         int.saturating_add(requested, target.tiered_reserve)
     } else {
@@ -128,10 +183,10 @@ fn validate_leased_cut(d: Dir, id: StoreId, raw: Bytes, settled: manifest.Settle
 // A cut's AP21 check: an install proves NEW against the installed generation,
 // any other cut under an export lease (import pin cuts among them) reads back
 // its own packs, and a cut with no lease is not walked.
-fn validate_cut_pages(d: Dir, id: StoreId, raw: Bytes, target: Option[manifest.TargetLimits], lease: Option[Arc[manifest.ExportLease]], published: manifest.PackDiskState) -> Result[(), Error] waits {
+fn validate_cut_pages(d: Dir, id: StoreId, raw: Bytes, target: Option[manifest.TargetLimits], lease: Option[Arc[manifest.ExportLease]], published: manifest.PackDiskState, preview: Option[View[pager.PreviewRead]]) -> Result[(), Error] waits {
     let settled = manifest.SettledPacks(below: manifest.pack_next(published), locations: manifest.pack_locations(published))
     if let Some(wanted) = target {
-        return validate_new_page_manifest(d, id, raw, wanted, settled)
+        return validate_new_preview_manifest(d, id, raw, wanted, settled, preview)
     }
     if let Some(_) = lease {
         return validate_leased_cut(d, id, raw, settled)

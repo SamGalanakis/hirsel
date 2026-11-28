@@ -1,0 +1,506 @@
+@test
+fn test_la14_foreign_pack_mount(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout) -> Result[(), DeployError] waits {
+    la14_observe(d, c, r, tasks, out, false)
+}
+
+@test
+fn test_la14_existing_upload_fold(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout) -> Result[(), DeployError] waits {
+    la14_observe(d, c, r, tasks, out, true)
+}
+
+fn la14_observe(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, existing: bool) -> Result[(), DeployError] waits {
+    let sim = df_complete_expired_sim(tasks, c, 346801)
+    let mut cold_keys: Map[String, u8] = map.new()
+    let checked = la14_directory(d, c, sim, r, tasks, out, mut cold_keys, existing)
+    let report = bucket_law_report(take sim)
+    checked?
+    let mut mounting = false
+    let mut reading = false
+    let mut ranged = 0u64
+    let mut reads: List[u64] = list.new()
+    let mut mounts = 0u64
+    let mut before_damage = true
+    let mut child_deletes = 0u64
+    for item in report.requests {
+        if item.key == "preview/mount-begin" {
+            mounting = true
+        }
+        if item.key == "preview/mount-end" {
+            mounts += 1
+            mounting = false
+        }
+        if item.key == "preview/read-begin" {
+            ranged = 0
+            reading = true
+        }
+        if item.key == "preview/read-end" {
+            list.push(mut reads, ranged)
+            reading = false
+        }
+        if item.key == "preview/damage-begin" {
+            before_damage = false
+        }
+        if before_damage && item.method == "DELETE" {
+            if string.starts_with(item.key, "preview/") {
+                fail("child reclaim erased an archive key")
+            }
+            if string.starts_with(item.key, "preview-child/") {
+                child_deletes += 1
+            }
+        }
+        if let Some(class) = map.get(cold_keys, item.key) {
+            if item.method != "GET" {
+                continue
+            }
+            if mounting && (!existing || class != 3) {
+                fail("mount or first open fetched a Cold pack")
+            }
+            if reading {
+                ranged += 1
+            }
+        }
+    }
+    if mounts != 2 || list.len(reads) != 2 || reads[0u64] == 0 || reads[1u64] == 0 || child_deletes == 0 || before_damage {
+        fail("missing on-demand range or child delete witness")
+    }
+    let mut msg = if existing {
+        string.from("Existing-upload BLOB mount GETs=0 directory_read_GETs=")
+    } else {
+        string.from("Cold mount GETs=0 bytes=0 directory_read_GETs=")
+    }
+    string.push_u64(mut msg, reads[0u64])
+    string.push(mut msg, " bucket_read_GETs=")
+    string.push_u64(mut msg, reads[1u64])
+    string.push(mut msg, " child_DELETEs=")
+    string.push_u64(mut msg, child_deletes)
+    string.push(mut msg, "\n")
+    let _ = stdout.write(out, msg)
+    Ok(())
+}
+
+fn la14_directory(d: Dir, c: Clock, sim: BucketSim, r: Random, tasks: Tasks, out: Stdout, mut cold_keys: Map[String, u8], existing: bool) -> Result[(), DeployError] waits {
+    let src = disk_test_directory(d)
+    let dst = disk_test_directory(d)
+    let opts = deploy_result(l96_tiered_options(182375272, 65536, 500))?
+    let mut db = deploy_result(open(tasks, src, sim.time, r, opts))?
+    let parent = db.store
+    let mut schema = deploy_result(declare(db, Migrate))?
+    let mut building = deploy_result(declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let rows = deploy_result(finish(mut schema, take building))?
+    let chunks = deploy_result(declare_blobs(mut schema, "chunks", std.codec.key_u64(), BlobLimits(chunk: 8192, max: 16384)))?
+    let _ = deploy_result(seal(mut db, take schema))?
+    let (_, collection) = blobs_identity(chunks)
+    deploy_result(set_residency(mut db, collection, Tiered))?
+    let before = if existing {
+        Some(deploy_result(blob_law_begin(mut db, chunks))?)
+    } else {
+        None
+    }
+    let payload = l96_blob_value(17, 32768)
+    for i in 0u64 .. 8 {
+        deploy_result(l96_put_bytes(mut db, rows, i, payload))?
+    }
+    deploy_result(set_residency(mut db, rows.id, Tiered))?
+    let bind_ticket = deploy_result(bind_archive_hold(mut db, 42u64, Some(8388608u64)))?
+    deploy_result(durable(mut db, bind_ticket))?
+    let cold = l96_listed_tiered_packs(db)
+    if list.len(cold) < 3 {
+        fail("archive fixture needs multiple Tiered packs")
+    }
+    let upload = match before {
+        Some(started) => started,
+        None => deploy_result(blob_law_begin(mut db, chunks))?
+    }
+    let suffix_seq = manifest.pack_allocation_next(disk_state(db).packs)
+    let _ = deploy_result(blob_law_append(mut db, chunks, upload, 0, 1, 8192))?
+    let _ = deploy_result(blob_law_attach(mut db, chunks, 21u64, upload))?
+    let expected_version = version(snapshot(db))
+    deploy_result(close(take db))?
+    let mut sink = deploy_result(arch_law_sink_client(sim, tasks, 3468, "preview/"))?
+    let due = std.object.deadline_after_ms(sink, DF_OP_MS)
+    deploy_result(la14_ship_suffix(r, src, parent, mut sink, due))?
+    let RestorePresent(point) = deploy_result(plan_archive_restore(mut sink, parent, Latest, DF_OP_MS))? else {
+        fail("missing archived cut")
+    }
+    if point.main_version != expected_version || point.token.boundary.frame_end == 0 {
+        fail("selected base without journal-only chunk")
+    }
+    let id = StoreId(hi: 3468, lo: 1)
+    let hold = result.unwrap(preview_admit(mut sink, id, point.token, 18446744073709551615u64, DF_OP_MS))
+    let opener = std.object.opener(sink)
+    let origin = deploy_result(preview_origin(hold, point,[1; 16]))?
+    let read_source = deploy_result(preview_source(opener, hold.record.child, origin, DF_OP_MS))?
+    let suffix_ref = deploy_result(failure_result_from_rep(pager.preview_pack_ref(read_source, suffix_seq)))?
+    let mut suffix_name = string.from("preview/")
+    string.push(mut suffix_name, deploy_result(failure_result_from_rep(pager.preview_pack_key(read_source, suffix_seq, suffix_ref)))?)
+    map.insert(mut cold_keys, take suffix_name, 4)
+    for (seq, class) in cold {
+        let ref = deploy_result(failure_result_from_rep(pager.preview_pack_ref(read_source, seq)))?
+        let path = deploy_result(failure_result_from_rep(pager.preview_pack_key(read_source, seq, ref)))?
+        let mut name = string.from("preview/")
+        string.push(mut name, path)
+        map.insert(mut cold_keys, take name, class)
+    }
+    let _ = std.object.stat(opener, "mount-begin", due)
+    let start = host.mono_ns(c)
+    let mounted = mount_preview_directory(tasks, opener, hold, point, dst,[1; 16], sim.time, r, opts, DF_OP_MS)?
+    if mounted.child != id {
+        fail("mount changed held child identity")
+    }
+    let mounted_ns = host.mono_ns(c)
+    let mut child = deploy_result(open_preview_directory(tasks, dst, sim.time, r, opts, opener, DF_OP_MS))?
+    let opened_ns = host.mono_ns(c)
+    let _ = std.object.stat(opener, "mount-end", due)
+    let directory_files = result.unwrap(std.dir.list(dst, None))
+    let mut dir_bytes = 0u64
+    for item in directory_files {
+        dir_bytes += deploy_result(archive_hold_file_size(dst, item.name))?
+    }
+    let mut receipt = string.from("L-A14 mount_ns=")
+    string.push_u64(mut receipt, mounted_ns - start)
+    string.push(mut receipt, " first_open_ns=")
+    string.push_u64(mut receipt, opened_ns - mounted_ns)
+    string.push(mut receipt, " installed_bytes=")
+    string.push_u64(mut receipt, dir_bytes)
+    string.push(mut receipt, " cold_packs=")
+    string.push_u64(mut receipt, list.len(cold))
+    string.push_char(mut receipt, '\n')
+    let _ = stdout.write(out, receipt)
+    for (seq, _) in cold {
+        let path = deploy_result(failure_result_from_rep(manifest.paged_pack_path(seq)))?
+        if deploy_result(archive_hold_exists(dst, path))? {
+            fail("child copied a Tiered pack")
+        }
+    }
+    let _ = std.object.stat(opener, "read-begin", due)
+    let t = deploy_result(table(mut child, "rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    if deploy_result(get(deploy_result(reader(child, READER_PIN_MIN))?, snapshot(child), t, 7u64))? != Some(clone(payload)) {
+        fail("foreign blob read changed the parent value")
+    }
+    deploy_result(la14_check_suffix(mut child))?
+    let _ = std.object.stat(opener, "read-end", due)
+    let forbidden = disk_test_directory(d)
+    match begin_backup(mut child, forbidden, exit_attempt(6)) {
+        Error(Store(PreviewSource)) => (),
+        _ => fail("Preview backup admitted"),
+    }
+    match begin_export_copy(mut child, forbidden, exit_attempt(6), 0) {
+        Error(Store(PreviewSource)) => (),
+        _ => fail("Preview export admitted"),
+    }
+    match bind_archive_hold(mut child, 17, None) {
+        Error(PreviewSource) => (),
+        _ => fail("Preview archive binding admitted"),
+    }
+    let child_client = deploy_result(arch_law_sink_client(sim, tasks, 3469, "preview-child/"))?
+    let second = StoreId(hi: 3468, lo: 2)
+    let other_hold = result.unwrap(preview_admit(mut sink, second, point.token, 18446744073709551615u64, DF_OP_MS))
+    let mut dest = take child_client
+    let names = RestoreNamespaces(source_place: None, host_stream: None)
+    let _ = std.object.stat(opener, "mount-begin", due)
+    let before_mount = host.mono_ns(c)
+    let installed = mount_preview_bucket(tasks, preview_archive(sink), other_hold, point, mut dest, "bucket", names, disk_test_directory(d),[2; 16], sim.time, r, opts, DF_OP_MS)?
+    if installed.child != second {
+        fail("Bucket mounted another child")
+    }
+    let after_mount = host.mono_ns(c)
+    let object_opts = exit_open_opts(false, 1)
+    let mut bucket_child = deploy_result(open_preview_bucket(tasks, take dest, "bucket", opener, sim.time, r, object_opts, DF_OP_MS))?
+    let after_open = host.mono_ns(c)
+    let _ = std.object.stat(opener, "mount-end", due)
+    let mut inspect = deploy_result(arch_law_sink_client(sim, tasks, 3482, "preview-child/"))?
+    let mut child_objects: List[std.object.Entry] = list.with_capacity(128)
+    let listing = std.object.list(mut inspect, "", "", mut child_objects, due) ?=> |e| Store(Remote(take e))
+    if listing.truncated || list.len(child_objects) == 0 {
+        fail("incomplete child Bucket inventory")
+    }
+    let mut bucket_bytes = 0u64
+    for entry in child_objects {
+        bucket_bytes += entry.size
+    }
+    let mut object_receipt = string.from("L-A14 bucket_mount_ns=")
+    string.push_u64(mut object_receipt, after_mount - before_mount)
+    string.push(mut object_receipt, " first_open_ns=")
+    string.push_u64(mut object_receipt, after_open - after_mount)
+    string.push(mut object_receipt, " installed_bytes=")
+    string.push_u64(mut object_receipt, bucket_bytes)
+    string.push(mut object_receipt, "\n")
+    let _ = stdout.write(out, object_receipt)
+    let bt = deploy_result(table(mut bucket_child, "rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let _ = std.object.stat(opener, "read-begin", due)
+    if deploy_result(get(deploy_result(reader(bucket_child, READER_PIN_MIN))?, snapshot(bucket_child), bt, 7u64))? != Some(clone(payload)) {
+        fail("Bucket foreign read changed the parent value")
+    }
+    deploy_result(la14_check_suffix(mut bucket_child))?
+    let _ = std.object.stat(opener, "read-end", due)
+    for i in 0u64 .. 2 {
+        let mut tour = if i == 0 {
+            deploy_result(begin_scrub(mut child))?
+        } else {
+            deploy_result(begin_scrub(mut bucket_child))?
+        }
+        let mut faults: List[Fault] = list.new()
+        let checked = deploy_result(scrub_to_end(mut tour, 4096, mut faults))?
+        if checked < 262144 || list.len(faults) != 0 {
+            fail("Preview scrub did not verify its local and parent frames")
+        }
+    }
+    for (seq, _) in cold {
+        if map.contains(history.locator_rows(object_writer.object_locator(object_state(bucket_child))), seq) {
+            fail("child locator copied a foreign pack")
+        }
+    }
+    {
+        let held = snapshot(bucket_child)
+        let changed = l96_blob_value(18, 8192)
+        deploy_result(l96_put_bytes(mut bucket_child, bt, 7u64, changed))?
+        for _ in 0u64 .. 3 {
+            let committed = deploy_result(checkpoint(mut bucket_child))?
+            deploy_result(durable(mut bucket_child, committed))?
+        }
+        if deploy_result(get(deploy_result(reader(bucket_child, READER_PIN_MIN))?, held, bt, 7u64))? != Some(clone(payload)) {
+            fail("child cut invalidated old Snapshot")
+        }
+        if deploy_result(get(deploy_result(reader(bucket_child, READER_PIN_MIN))?, snapshot(bucket_child), bt, 7u64))? != Some(changed) {
+            fail("child cut lost its local edit")
+        }
+        if deploy_result(get(deploy_result(reader(child, READER_PIN_MIN))?, snapshot(child), t, 7u64))? != Some(clone(payload)) {
+            fail("child edit modified the other Preview")
+        }
+    }
+    let plan = deploy_result(reclaim_preview(mut bucket_child, 256))?
+    let _ = result.unwrap(reclaim_purge(mut bucket_child, plan))
+    deploy_result(close(take bucket_child))?
+    let again = deploy_result(arch_law_sink_client(sim, tasks, 3480, "preview-child/"))?
+    let reopened = deploy_result(open_preview_bucket(tasks, take again, "bucket", opener, sim.time, r, object_opts, DF_OP_MS))?
+    if deploy_result(get(deploy_result(reader(reopened, READER_PIN_MIN))?, snapshot(reopened), bt, 7u64))? != Some(l96_blob_value(18, 8192)) {
+        fail("reopen lost child mutation")
+    }
+    deploy_result(close(take reopened))?
+    result.unwrap(preview_release(mut sink, other_hold, DF_OP_MS))
+    deploy_result(la14_crash_cut(d, dst, opener, sim.time, r, tasks, opts, payload))?
+    let successor_dir = disk_test_directory(d)
+    let grant = deploy_result(arch_law_sink_client(sim, tasks, 3481, "preview/"))?
+    let successor = restore_from_archive(tasks, take grant, parent, successor_dir, sim.time, r, opts, Boundary(point.token),[3; 16], DF_OP_MS)?
+    let _ = std.object.stat(opener, "damage-begin", due)
+    let mut seq = 0u64
+    for (ordinal, class) in cold {
+        if class == 4 {
+            seq = ordinal;
+            break
+        }
+    }
+    if seq == 0 {
+        fail("missing class-4 fixture pack")
+    }
+    let listed: pages.PagePack = clone(option.unwrap(manifest.disk_index_get(manifest.pack_locations(disk_state(child).packs).packs, seq)))
+    let ref = deploy_result(failure_result_from_rep(pager.preview_pack_ref(read_source, seq)))?
+    let path = deploy_result(failure_result_from_rep(pager.preview_pack_key(read_source, seq, ref)))?
+    let (_, take original) = deploy_result(restore_range_read(opener, path, 0, ref.len, due))?
+    let mut valid_alternative: Bytes = clone(original)
+    valid_alternative[96u64] ^= 1u8
+    let ctx = format.DiskContext(store: store_key_to_rep(parent), role: 3, seq)
+    let frame_len = format.read_le(valid_alternative, 76, 4)
+    let seal_bits = deploy_result(failure_result_from_rep(types.capacity(format.disk_check(ctx, 72, list.slice(valid_alternative, 72, 88), list.slice(valid_alternative, 88, 88 + frame_len)))))?
+    list.set_word_le(mut valid_alternative, 80, seal_bits)
+    let mut other = ref
+    other.digest = std.check.xxh3(valid_alternative, 0, list.len(valid_alternative))
+    let substitute_key = format.archive_key(store_key_to_rep(parent), hold.incarnation, format.archive_log_pack_rel(seq, other.digest))
+    let (take put_other, _) = std.object.store(mut sink, substitute_key, clone(valid_alternative), due)
+    let _ = (take put_other) ?=> |e| Store(Remote(take e))
+    let mut substituted: pages.PagePack = clone(listed)
+    substituted.foreign = Some(other)
+    let tampered = disk_test_directory(d)
+    deploy_result(archive_hold_copy_dir(dst, tampered))?
+    deploy_result(la14_substitute(tampered, id, listed, substituted))?
+    match open_preview_directory(tasks, tampered, sim.time, r, opts, opener, DF_OP_MS) {
+        Error(Corrupt(Fault(file: name, offset: at, why: Malformed))) if name == "pack list" && at == seq => (),
+        _ => fail("child admitted existing parent-sealed object outside the hold"),
+    }
+    // Put a correctly sealed HEADER for the child at the parent's exact key.
+    let mut misplaced = take original
+    let wrong_header = deploy_result(failure_result_from_rep(types.capacity(format.disk_header_bytes(format.DiskContext(store: store_key_to_rep(id), role: 3, seq), 0, 0))))?
+    for i in 0u64 .. 72 {
+        misplaced[i] = wrong_header[i]
+    }
+    let (take replaced, _) = std.object.store(mut sink, path, take misplaced, due)
+    let _ = (take replaced) ?=> |e| Store(Remote(take e))
+    match failure_result_from_rep(pager.preview_pack_range(read_source, seq, ref, 72, 88, 0)) {
+        Error(Corrupt(Fault(file: name, offset: 0, why: Header))) if name == path => (),
+        _ => fail("range read accepted another store's sealed HEADER"),
+    }
+    // All frame envelopes are valid here. Only the held whole-pack digest differs.
+    let (take stored, _) = std.object.store(mut sink, path, take valid_alternative, due)
+    let _ = (take stored) ?=> |e| Store(Remote(take e))
+    {
+        let mut tour = deploy_result(begin_scrub(mut child))?
+        let mut faults: List[Fault] = list.new()
+        let _ = deploy_result(scrub_to_end(mut tour, 4096, mut faults))?
+        if list.len(faults) != 1 {
+            fail("corrupt parent pack passed scrub")
+        }
+        let Checksum = faults[0u64].why else {
+            fail("wrong corruption verdict")
+        }
+    }
+    std.object.erase(mut sink, path, due) ?=> |e| Store(Remote(take e))
+    match pager.preview_pack_range(read_source, seq, ref, 0, 72, 0) {
+        Error(Lost) => (),
+        _ => fail("missing held parent pack must be Lost"),
+    }
+    deploy_result(close(take child))?
+    match prepare_backup(dst, forbidden, c) {
+        Error(Store(PreviewSource)) => (),
+        _ => fail("offline backup admitted Preview"),
+    }
+    let files = result.unwrap(std.dir.list(forbidden, None))
+    if list.len(files) != 0 {
+        fail("refused export modified its destination")
+    }
+    result.unwrap(preview_release(mut sink, hold, DF_OP_MS))
+    match pager.preview_pack_range(read_source, seq, ref, 0, 72, 0) {
+        Error(PreviewExpired) => (),
+        _ => fail("missing parent pack after release must be PreviewExpired"),
+    }
+    let mut objects: List[std.object.Entry] = list.with_capacity(128)
+    let page = std.object.list(mut sink, "", "", mut objects, due) ?=> |e| Store(Remote(take e))
+    if page.truncated || list.len(objects) == 0 {
+        fail("incomplete archive erase")
+    }
+    for item in objects {
+        std.object.erase(mut sink, std.object.key_text(item.key), due) ?=> |e| Store(Remote(take e))
+    }
+    deploy_result(la14_ship_suffix(r, src, parent, mut sink, due))?
+    let RestorePresent(again_point) = deploy_result(plan_archive_restore(mut sink, parent, Latest, DF_OP_MS))? else {
+        fail("missing recreated archive")
+    }
+    let new_hold = result.unwrap(preview_admit(mut sink, id, again_point.token, 18446744073709551615u64, DF_OP_MS))
+    if new_hold.incarnation == hold.incarnation || new_hold.record.stamp != hold.record.stamp || again_point.token != point.token {
+        fail("recreation must repeat the old boundary and stamp under a fresh incarnation")
+    }
+    let fresh_origin = deploy_result(preview_origin(new_hold, again_point,[1; 16]))?
+    let fresh_source = deploy_result(preview_source(opener, new_hold.record.child, fresh_origin, DF_OP_MS))?
+    let fresh_ref = deploy_result(failure_result_from_rep(pager.preview_pack_ref(fresh_source, seq)))?
+    let verified = deploy_result(failure_result_from_rep(pager.preview_pack_range(fresh_source, seq, fresh_ref, 0, fresh_ref.len, 0)))?
+    if fresh_ref.digest != ref.digest || list.len(verified) != ref.len {
+        fail("replacement archive lost the original pack")
+    }
+    match pager.preview_pack_range(read_source, seq, ref, 72, 88, 0) {
+        Error(PreviewExpired) => (),
+        _ => fail("old reader used the replacement pack ordinal"),
+    }
+    match open_preview_directory(tasks, dst, sim.time, r, opts, opener, DF_OP_MS) {
+        Error(PreviewExpired) => (),
+        _ => fail("expired child reopened"),
+    }
+    result.unwrap(preview_release(mut sink, new_hold, DF_OP_MS))
+    let mut independent = deploy_result(open(tasks, successor_dir, sim.time, r, opts))?
+    let successor_rows = deploy_result(table(mut independent, "rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    if independent.store != successor.child || successor.child == parent || deploy_result(get(deploy_result(reader(independent, READER_PIN_MIN))?, snapshot(independent), successor_rows, 7u64))? != Some(payload) {
+        fail("materialized Successor lost its identity or data after archive replacement")
+    }
+    let backup = disk_test_directory(d)
+    let nonce = exit_attempt(8)
+    let job = begin_backup(mut independent, backup, clone(nonce))?
+    let _ = export_copy(take job)?
+    release_export(mut independent, nonce)
+    let RestorePresent(backed_up) = plan_backup_restore(backup, Latest)? else {
+        fail("missing second backup")
+    }
+    if backed_up.token.parent != successor.child || backed_up.main_version != version(snapshot(independent)) {
+        fail("second backup did not capture the Successor")
+    }
+    deploy_result(close(take independent))
+}
+
+fn la14_ship_suffix(r: Random, src: Dir, parent: StoreId, mut sink: std.object.Client, due: u64) -> Result[(), Error] waits {
+    for _ in 0u64 .. 2 {
+        let shipped = failure_result_from_rep(history.archive_step_directory(r, src, store_key_to_rep(parent), 42, false, mut sink, due))?
+        if !shipped.advanced {
+            return Error(Missing("expected archive base and journal suffix"))
+        }
+    }
+    Ok(())
+}
+
+fn la14_check_suffix(mut db: Db) -> Result[(), Error] waits {
+    let mut schema = declare(db, Open)?
+    let mut building = declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let _ = finish(mut schema, take building)?
+    let files = declare_blobs(mut schema, "chunks", std.codec.key_u64(), BlobLimits(chunk: 8192, max: 16384))?
+    let _ = seal(mut db, take schema)?
+    let snap = snapshot(db)
+    let client = reader(db, VALUE_LIMIT + 1048576)?
+    let Some(value) = blob_info(client, snap, files, 21u64)? else {
+        return Error(Missing("journal-only value"))
+    }
+    blob_law_reads(client, snap, files, value, blob_law_widths(1, 8192, 0))
+}
+
+// Substitute a different, correctly parent-sealed immutable into a closed
+// child's pack list. Both the list page and the child MANIFEST are resealed.
+fn la14_substitute(dir: Dir, id: StoreId, before: pages.PagePack, after: pages.PagePack) -> Result[(), Error] waits {
+    let (_, take selected) = read_page_manifest_file(dir)?
+    let mut m = take selected
+    let ptr = m.pack_root
+    let path = failure_result_from_rep(manifest.paged_pack_path(ptr.pack))?
+    let mut raw = failure_result_from_rep(manifest.disk_read_file(dir, path, 1048576))?
+    let old = manifest.encode_pack_row(before)
+    let revised = manifest.encode_pack_row(after)
+    let lo = ptr.offset + 16
+    let width: u64 = int.widen(ptr.len)
+    let mut found = 0u64
+    for i in lo ..= lo + width - list.len(old) {
+        if list.slice(raw, i, i + list.len(old)) == old {
+            for j in 0u64 .. list.len(revised) {
+                raw[i + j] = revised[j]
+            }
+            found += 1
+        }
+    }
+    if found != 1 {
+        fail("substitution fixture needs one root-leaf row")
+    }
+    m.pack_root.checksum = std.check.xxh3(raw, lo, lo + width)
+    let ctx = format.DiskContext(store: store_key_to_rep(id), role: 3, seq: ptr.pack)
+    let digest = failure_result_from_rep(types.capacity(format.disk_check(ctx, ptr.offset, list.slice(raw, ptr.offset, lo), list.slice(raw, lo, lo + width))))?
+    list.set_word_le(mut raw, ptr.offset + 8, digest)
+    failure_result_from_rep(manifest.disk_write_synced(dir, path, raw))?
+    failure_result_from_rep(manifest.disk_publish_manifest(dir, store_key_to_rep(id), m))
+}
+
+// Reopen the same completed pack writes on either side of the child MANIFEST rename.
+fn la14_crash_cut(d: Dir, mounted: Dir, opener: std.object.Opener, c: Clock, r: Random, tasks: Tasks, opts: Options, original: Bytes) -> Result[(), Error] waits {
+    let before = disk_test_directory(d)
+    let after = disk_test_directory(d)
+    archive_hold_copy_dir(mounted, before)?
+    let mut writer = open_preview_directory(tasks, before, c, r, opts, opener, DF_OP_MS)?
+    let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let changed = l96_blob_value(19, 8192)
+    l96_put_bytes(mut writer, rows, 7u64, changed)?
+    let (_, take prior) = read_page_manifest_file(before)?
+    let sealed_cut = refused_cut_bytes(mut writer, NoHolderChange)?
+    close(take writer)?
+    archive_hold_copy_dir(before, after)?
+    failure_result_from_rep(manifest.disk_write_synced(before, "MANIFEST.tmp", sealed_cut))?
+    failure_result_from_rep(manifest.disk_write_synced(after, "MANIFEST", sealed_cut))?
+    for i in 0u64 .. 2 {
+        let directory = if i == 0 {
+            before
+        } else {
+            after
+        }
+        let db = open_preview_directory(tasks, directory, c, r, opts, opener, DF_OP_MS)?
+        let (_, take selected) = read_page_manifest_file(directory)?
+        if selected.generation != prior.generation + i || archive_hold_exists(directory, "MANIFEST.tmp")? {
+            fail("crash recovered the wrong child MANIFEST")
+        }
+        let read = reader(db, READER_PIN_MIN)?
+        let snap = snapshot(db)
+        if get(read, snap, rows, 7u64)? != Some(clone(changed)) || get(read, snap, rows, 6u64)? != Some(clone(original)) {
+            fail("child publication crash lost a local or foreign value")
+        }
+        close(take db)?
+    }
+    Ok(())
+}

@@ -51,7 +51,7 @@ fn expiry_law_run(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result[(),
     let mut order_index = list.len(idx.pages)
     while order_index > 0 {
         order_index -= 1
-        let page = failure_result_from_rep(history.archive_index_page(mut inspect, head2.store, head2.source_kind, idx.pages[order_index], due))?
+        let page = failure_result_from_rep(history.archive_index_page(mut inspect, head2.store, head2.incarnation, head2.source_kind, idx.pages[order_index], due))?
         for item in page.bases {
             for pack in item.packs {
                 if item.base_ordinal < wanted {
@@ -70,13 +70,13 @@ fn expiry_law_run(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result[(),
     let prior = expiry_candidate(head2, floor)?
     let held = expiry_verify_survivors(mut inspect, prior, id, work, due)?
     let future = format.archive_log_pack_rel(floor.frontier.next_pack, 0x1234)
-    let key = format.archive_key(store_key_to_rep(id), future)
+    let key = format.archive_key(store_key_to_rep(id), head2.incarnation, future)
     arch_law_put_garbage(mut inspect, key, 3, 16, DF_OP_MS)?
     let raised = archive_expire(mut inspect, id, KeepFromBase(wanted), None, Some(plan.plan), work, DF_OP_MS)?
     if raised.deleted == 0 || raised.plan.floor != plan.plan.floor {
         fail("expiry skipped old base")
     }
-    let shared_key = format.archive_key(store_key_to_rep(id), format.archive_log_pack_rel(shared_pack.seq, shared_pack.digest))
+    let shared_key = format.archive_key(store_key_to_rep(id), head2.incarnation, format.archive_log_pack_rel(shared_pack.seq, shared_pack.digest))
     let shared_ref = pages.HistoryRef(seq: shared_pack.seq, epoch: 0, len: shared_pack.len, digest: shared_pack.digest)
     let _ = restore_archive_bytes(mut inspect, shared_key, shared_ref, due)?
     let mut proof: Bytes = list.with_capacity(16)
@@ -95,18 +95,288 @@ fn expiry_law_run(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result[(),
     }
     let latest = archive_expire(mut inspect, id, KeepFromBase(18446744073709551615), None, None, work, DF_OP_MS)?
     let _ = archive_expire(mut inspect, id, KeepFromBase(18446744073709551615), None, Some(latest.plan), work, DF_OP_MS)?
-    let prefix = expiry_push_namespace(mut inspect, store_key_to_rep(id))
+    let prefix = expiry_push_namespace(mut inspect, store_key_to_rep(id), head2.incarnation)
     let _ = expiry_erase(mut inspect, head2.source_kind, floor, held, due)?
     let _ = std.object.set_prefix(mut inspect, take prefix)
     let RestorePresent(point) = plan_archive_restore(mut inspect, id, Latest, DF_OP_MS)? else {
         fail("late deleter damaged the latest interval")
     }
     let _ = archive_expire(mut inspect, id, KeepFromBase(point.token.boundary.base_ordinal), None, None, work, DF_OP_MS)?
-    let last_key = format.archive_key(store_key_to_rep(id), format.archive_log_manifest_rel(point.token.boundary.base_ordinal, point.token.boundary.base_digest))
+    let last_key = format.archive_key(store_key_to_rep(id), head2.incarnation, format.archive_log_manifest_rel(point.token.boundary.base_ordinal, point.token.boundary.base_digest))
     std.object.erase(mut inspect, last_key, due) ?=> Remote
     match plan_archive_restore(mut inspect, id, Latest, DF_OP_MS) {
         Error(Lost) => (),
         _ => fail("missing promised manifest was not Lost"),
     }
     close(take db)
+}
+
+@test
+fn test_la12_preview_floor_and_stamp(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = df_complete_expired_sim(tasks, c, 345012)
+    let answer = preview_floor_law(d, sim, r, tasks)
+    let _ = bucket_law_report(take sim)
+    answer
+}
+
+fn preview_floor_law(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let src = disk_test_directory(d)
+    let work = disk_test_directory(d)
+    let sink = arch_law_sink_client(sim, tasks, 907, "preview-holds/")?
+    let mut inspect = arch_law_sink_client(sim, tasks, 908, "preview-holds/")?
+    let mut a_opts = archive_options(1, DF_OP_MS)
+    a_opts.archive_ms = 60000
+    let auth = archived(log_authority(src), take sink, a_opts)?
+    let mut db = match open_authority(tasks, take auth, sim.time, r, archive_hold_options(true)) {
+        Ok(take result_db) => take result_db,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    let id = db.store
+    let rows = archive_hold_table(mut db)?
+    let _ = archive_hold_put(mut db, rows, 1, 0x11, 64)?
+    let snap = snapshot(db)
+    let pinned_at = pin(mut db, "shared", snap)?
+    durable(mut db, pinned_at)?
+    let base_cut = checkpoint(mut db)?
+    durable(mut db, base_cut)?
+    let _ = archive_drain(mut db, 16)?
+    let RestorePresent(initial) = plan_archive_restore(mut inspect, id, Latest, DF_OP_MS)? else {
+        fail("initial base")
+    }
+    let first = StoreId(hi: 41, lo: 1)
+    let second = StoreId(hi: 41, lo: 2)
+    let maximum = 18446744073709551615u64
+    let older = result.unwrap(preview_admit(mut inspect, first, initial.token, maximum - 10, DF_OP_MS))
+    let opener = std.object.opener(inspect)
+    let due = std.object.deadline_after_ms(inspect, DF_OP_MS)
+    let (take before_extend, tag_before_extend) = preview_head(mut inspect, id, due)?
+    let mut stale_retirement = take before_extend
+    stale_retirement.rev += 1
+    list.clear(mut stale_retirement.holds)
+    result.unwrap(preview_extend(mut inspect, older, maximum - 5, DF_OP_MS))
+    let ArchiveCasConflict(_, _) = failure_result_from_rep(history.archive_head_cas(mut inspect, store_key_to_rep(id), Match(tag_before_extend), stale_retirement, due))? else {
+        fail("a delayed retirement removed an extended hold")
+    }
+    result.unwrap(preview_check(opener, older, DF_OP_MS))
+    let _ = archive_hold_put(mut db, rows, 2, 0x22, 64)?
+    let next_cut = checkpoint(mut db)?
+    durable(mut db, next_cut)?
+    let _ = archive_drain(mut db, 16)?
+    let RestorePresent(later) = plan_archive_restore(mut inspect, id, Latest, DF_OP_MS)? else {
+        fail("Preview has no second boundary")
+    }
+    let newer = result.unwrap(preview_admit(mut inspect, second, later.token, maximum, DF_OP_MS))
+    result.unwrap(preview_extend(mut inspect, older, maximum, DF_OP_MS))
+    let cutoff = KeepFromBase(later.token.boundary.base_ordinal)
+    let plan = archive_expire(mut inspect, id, cutoff, None, None, work, DF_OP_MS)?
+    if plan.plan.floor.boundary.base_ordinal != initial.token.boundary.base_ordinal || list.len(plan.limiting_holds) != 1 || plan.limiting_holds[0].child != store_key_to_rep(first) || plan.limiting_holds[0].until_ms != maximum {
+        fail("expiry omitted the Preview that held its floor")
+    }
+    result.unwrap(preview_release(mut inspect, older, DF_OP_MS))
+    match preview_check(opener, older, DF_OP_MS) {
+        Error(PreviewExpired) => (),
+        _ => fail("released Preview remained readable"),
+    }
+    let renewed = result.unwrap(preview_admit(mut inspect, first, later.token, 0, DF_OP_MS))
+    if renewed.record.stamp == older.record.stamp {
+        fail("readmission reused the old Preview stamp")
+    }
+    match preview_extend(mut inspect, older, maximum, DF_OP_MS) {
+        Error(PreviewExpired) => (),
+        _ => fail("old Preview extended the new hold"),
+    }
+    match preview_check(opener, older, DF_OP_MS) {
+        Error(PreviewExpired) => (),
+        _ => fail("old Preview accepted the new hold"),
+    }
+    if std.object.client_wall_ms(inspect) < format.PREVIEW_GRACE_MS {
+        std.clock.sleep_ns(sim.time, format.PREVIEW_GRACE_MS * 1000000)
+    }
+    let expiry = archive_expire(mut inspect, id, cutoff, None, None, work, DF_OP_MS)?
+    let (take before_retire, stale_tag) = preview_head(mut inspect, id, due)?
+    let mut stale_extension = take before_retire
+    let slot = preview_position(stale_extension, store_key_to_rep(first))
+    stale_extension.holds[slot].until_ms = maximum
+    stale_extension.rev += 1
+    let _ = archive_expire(mut inspect, id, cutoff, None, Some(expiry.plan), work, DF_OP_MS)?
+    let ArchiveCasConflict(_, _) = failure_result_from_rep(history.archive_head_cas(mut inspect, store_key_to_rep(id), Match(stale_tag), stale_extension, due))? else {
+        fail("a delayed extension restored a retired hold")
+    }
+    match preview_check(opener, renewed, DF_OP_MS) {
+        Error(PreviewExpired) => (),
+        _ => fail("expiry kept the lapsed Preview beyond grace"),
+    }
+    result.unwrap(preview_check(opener, newer, DF_OP_MS))
+    close(take db)
+}
+
+@test
+fn test_la12_archive_recreation(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = df_complete_expired_sim(tasks, c, 345013)
+    let checked = preview_recreation_law(d, sim, r, tasks)
+    let _ = bucket_law_report(take sim)
+    checked
+}
+
+fn preview_recreation_law(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let src = disk_test_directory(d)
+    let mut db = open(tasks, src, sim.time, r, archive_hold_options(true))?
+    let rows = archive_hold_table(mut db)?
+    let _ = archive_hold_put(mut db, rows, 1, 0x11, 64)?
+    let _ = bind_archive_hold(mut db, 42u64, Some(1048576u64))?
+    let id = db.store
+    close(take db)?
+    let mut sink = arch_law_sink_client(sim, tasks, 909, "recreated/")?
+    let key = store_key_to_rep(id)
+    let due = std.object.deadline_after_ms(sink, DF_OP_MS)
+    let _ = failure_result_from_rep(history.archive_step_directory(r, src, key, 42, false, mut sink, due))?
+    let RestorePresent(at) = plan_archive_restore(mut sink, id, Latest, DF_OP_MS)? else {
+        fail("no initial base")
+    }
+    let child = StoreId(hi: 711, lo: 42)
+    let (take first_head, first_tag) = preview_head(mut sink, id, due)?
+    let old = result.unwrap(preview_admit(mut sink, child, at.token, 18446744073709551615u64, DF_OP_MS))
+    let archive_reader = std.object.opener(sink)
+    result.unwrap(preview_check(archive_reader, old, DF_OP_MS))
+    result.unwrap(preview_release(mut sink, old, DF_OP_MS))
+    match preview_check(archive_reader, old, DF_OP_MS) {
+        Error(PreviewExpired) => (),
+        _ => fail("release did not expire the old child"),
+    }
+    let (take quiescent, _) = preview_head(mut sink, id, due)?
+    if list.len(quiescent.holds) != 0 {
+        fail("recreation fixture still has a hold")
+    }
+    let mut files: List[std.object.Entry] = list.with_capacity(128)
+    let page = std.object.list(mut sink, "", "", mut files, due) ?=> Remote
+    if page.truncated || list.len(files) == 0 {
+        fail("archive deletion fixture is incomplete")
+    }
+    for item in files {
+        std.object.erase(mut sink, std.object.key_text(item.key), due) ?=> Remote
+    }
+    let _ = failure_result_from_rep(history.archive_step_directory(r, src, key, 42, false, mut sink, due))?
+    let RestorePresent(again) = plan_archive_restore(mut sink, id, Latest, DF_OP_MS)? else {
+        fail("no recreated base")
+    }
+    let mut delayed = take first_head
+    delayed.rev += 1
+    let ArchiveCasConflict(_, _) = failure_result_from_rep(history.archive_head_cas(mut sink, key, Match(first_tag), delayed, due))? else {
+        fail("write against the erased archive changed its replacement")
+    }
+    if again.token != at.token {
+        fail("archive recreation changed boundary identity")
+    }
+    let new_hold = result.unwrap(preview_admit(mut sink, child, again.token, 18446744073709551615u64, DF_OP_MS))
+    if old.record.stamp != new_hold.record.stamp || old.incarnation == new_hold.incarnation {
+        fail("recreation must repeat the revision under a fresh incarnation")
+    }
+    match preview_extend(mut sink, old, 1, DF_OP_MS) {
+        Error(PreviewExpired) => (),
+        _ => fail("old Preview extended its replacement"),
+    }
+    result.unwrap(preview_release(mut sink, old, DF_OP_MS))
+    result.unwrap(preview_check(archive_reader, new_hold, DF_OP_MS))
+    match preview_check(archive_reader, old, DF_OP_MS) {
+        Error(PreviewExpired) => Ok(()),
+        Ok(()) if new_hold.record.stamp == old.record.stamp => fail("archive recreation reused the stamp and served the expired child"),
+        _ => fail("old child lost its definitive expiry"),
+    }
+}
+
+@test
+fn test_la12_recreated_archive_survives_old_eraser(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = df_complete_expired_sim(tasks, c, 345014)
+    let checked = preview_eraser_law(d, sim, r, tasks)
+    let _ = bucket_law_report(take sim)
+    checked
+}
+
+fn preview_eraser_law(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let src = disk_test_directory(d)
+    let work = disk_test_directory(d)
+    let sink = arch_law_sink_client(sim, tasks, 907, "preview-holds/")?
+    let mut inspect = arch_law_sink_client(sim, tasks, 908, "preview-holds/")?
+    let mut a_opts = archive_options(1, DF_OP_MS)
+    a_opts.archive_ms = 60000
+    let auth = archived(log_authority(src), take sink, a_opts)?
+    let mut db = match open_authority(tasks, take auth, sim.time, r, archive_hold_options(true)) {
+        Ok(take result_db) => take result_db,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    let id = db.store
+    let rows = archive_hold_table(mut db)?
+    let _ = archive_hold_put(mut db, rows, 1, 0x11, 64)?
+    let snap = snapshot(db)
+    let pinned_at = pin(mut db, "shared", snap)?
+    durable(mut db, pinned_at)?
+    let base_cut = checkpoint(mut db)?
+    durable(mut db, base_cut)?
+    let _ = archive_drain(mut db, 16)?
+    let RestorePresent(initial) = plan_archive_restore(mut inspect, id, Latest, DF_OP_MS)? else {
+        fail("initial base")
+    }
+    let _ = archive_hold_put(mut db, rows, 2, 0x22, 64)?
+    let next_cut = checkpoint(mut db)?
+    durable(mut db, next_cut)?
+    let _ = archive_drain(mut db, 16)?
+    let RestorePresent(later) = plan_archive_restore(mut inspect, id, Latest, DF_OP_MS)? else {
+        fail("Preview has no second boundary")
+    }
+    let due = std.object.deadline_after_ms(inspect, DF_OP_MS)
+    let (take before, tag) = preview_head(mut inspect, id, due)?
+    let idx = failure_result_from_rep(history.archive_restore_index(mut inspect, before, due))?
+    let bases = restore_base_rows(mut inspect, before, idx, due)?
+    let floor = expiry_select(bases, KeepFromBase(later.token.boundary.base_ordinal), None)?
+    if floor.frontier.first_index_ordinal <= 1 || later.token == initial.token {
+        fail("old incarnation has no higher index frontier")
+    }
+    let candidate = expiry_candidate(before, floor)?
+    let held = expiry_verify_survivors(mut inspect, candidate, id, work, due)?
+    let ArchiveCasApplied(_) = failure_result_from_rep(history.archive_head_cas(mut inspect, before.store, Match(tag), candidate, due))? else {
+        fail("old floor CAS did not apply")
+    }
+    // The floor writer has applied its CAS and has not yet sent its first LIST.
+    close(take db)?
+    let mut files: List[std.object.Entry] = list.with_capacity(128)
+    let listing = std.object.list(mut inspect, "", "", mut files, due) ?=> Remote
+    if listing.truncated || list.len(files) == 0 {
+        fail("incomplete erase fixture")
+    }
+    for item in files {
+        std.object.erase(mut inspect, std.object.key_text(item.key), due) ?=> Remote
+    }
+    let _ = failure_result_from_rep(history.archive_step_directory(r, src, before.store, before.binding_id, false, mut inspect, due))?
+    let RestorePresent(recreated) = plan_archive_restore(mut inspect, id, Latest, DF_OP_MS)? else {
+        fail("no recreated base")
+    }
+    let hold = result.unwrap(preview_admit(mut inspect, StoreId(hi: 500, lo: 4), recreated.token, 18446744073709551615u64, DF_OP_MS))
+    let opener = std.object.opener(inspect)
+    result.unwrap(preview_check(opener, hold, DF_OP_MS))
+    let (take new_head, _) = preview_head(mut inspect, id, due)?
+    if new_head.incarnation == before.incarnation {
+        fail("archive did not change incarnation")
+    }
+    let tail = option.unwrap(new_head.index_tail)
+    let relative = format.archive_index_rel(tail.ordinal, tail.digest)
+    // Every key is formed from the recreated head: its index page and the base MANIFEST the hold lists.
+    let key = format.archive_key(before.store, new_head.incarnation, relative)
+    let base_key = format.archive_key(before.store, new_head.incarnation, format.archive_log_manifest_rel(recreated.token.boundary.base_ordinal, recreated.token.boundary.base_digest))
+    let _ = std.object.stat(opener, key, due) ?=> Remote
+    let _ = std.object.stat(opener, base_key, due) ?=> Remote
+    // The old eraser resumes in the directory of the head its floor write installed.
+    let prefix = expiry_push_namespace(mut inspect, before.store, candidate.incarnation)
+    let _ = expiry_erase(mut inspect, before.source_kind, floor, held, due)?
+    let _ = std.object.set_prefix(mut inspect, take prefix)
+    result.unwrap(preview_check(opener, hold, DF_OP_MS))
+    match std.object.stat(opener, base_key, due) {
+        Error(NotFound) => fail("an applied old floor erased the base the new Preview lists"),
+        Error(take problem) => return Error(Remote(take problem)),
+        Ok(_) => (),
+    }
+    match std.object.stat(opener, key, due) {
+        Error(NotFound) => fail("an applied old floor erased the listed new Preview's index"),
+        Error(take problem) => Error(Remote(take problem)),
+        Ok(_) => Ok(()),
+    }
 }

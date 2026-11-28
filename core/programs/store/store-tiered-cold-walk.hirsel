@@ -324,34 +324,34 @@ pub fn walk_cold_reachable(d: Dir, id: types.StoreKey, packs: Map[u64, pages.Pag
 // Offline walker helper: verifies that a single Cold frame edge is named by a
 // PACK_INDEX row in its pack, using one PACK_INDEX frame buffer at a time.
 pub fn check_cold_pack_index_row(d: Dir, id: types.StoreKey, path: String, seq: u64, class: u8, index_at: u64, size: u64, next_stamp: u64, expected: format.TieredFrameId) -> Result[(), types.Failure] waits {
-    let expected_row_kind = if class == 3 {
-        0x21u8
-    } else {
-        0x22u8
-    }
     let mut opened = match host.open(d, path, Read) {
         Ok(take fd) => take fd,
         Error(NotFound) => return Error(format.disk_fault(path, index_at, Absent)),
         Error(problem) => return Error(Io(problem)),
     }
+    let checked = check_index_membership(id, path, seq, class, index_at, size, next_stamp, expected, scoped fn(at: u64, width: u64) -> Result[Bytes, types.Failure] waits {
+        manifest.read_disk_bytes(mut opened, path, at, width)
+    })
+    manifest.disk_io(host.close(take opened))?
+    take checked
+}
+
+pub fn check_index_membership(id: types.StoreKey, path: String, seq: u64, class: u8, index_at: u64, size: u64, next_stamp: u64, expected: format.TieredFrameId, read: scoped fn(u64, u64) -> Result[Bytes, types.Failure] waits) -> Result[(), types.Failure] waits {
+    let expected_row_kind = if class == 3 {
+        0x21u8
+    } else {
+        0x22u8
+    }
     let mut at = index_at
     let mut prev_index = 0u64
     let mut next_data = 72u64
     let mut found = false
-    let mut problem: Option[types.Failure] = None
     while at < size {
         if size - at < 16 {
-            problem = Some(format.disk_fault(path, at, Malformed))
-            break
+            return Error(format.disk_fault(path, at, Malformed))
         }
         let width = order.min(format.PACK_INDEX_LIMIT + 16, size - at)
-        let wire = match manifest.read_disk_bytes(mut opened, path, at, width) {
-            Ok(take bytes_read) => take bytes_read,
-            Error(take err) => {
-                problem = Some(take err)
-                break
-            },
-        }
+        let wire = read(at, width)?
         let start_data = next_data
         let step = manifest.disk_allocation(scoped fn() -> Result[(u64, u64, bool), types.Failure] {
             let end = checked_tiered_index(path, id, seq, at, width, wire)?
@@ -383,25 +383,14 @@ pub fn check_cold_pack_index_row(d: Dir, id: types.StoreKey, path: String, seq: 
             }
             Ok((end, cur_data, hit))
         })
-        match take step {
-            Ok((end, cur_data, hit)) => {
-                prev_index = at
-                at += end
-                next_data = cur_data
-                if hit {
-                    found = true
-                    break
-                }
-            },
-            Error(take err) => {
-                problem = Some(take err)
-                break
-            },
+        let (end, cur_data, hit) = step?
+        prev_index = at
+        at += end
+        next_data = cur_data
+        if hit {
+            found = true;
+            break
         }
-    }
-    manifest.disk_io(host.close(take opened))?
-    if let Some(take err) = take problem {
-        return Error(take err)
     }
     if !found {
         return Error(format.disk_fault(path, expected.offset, Malformed))

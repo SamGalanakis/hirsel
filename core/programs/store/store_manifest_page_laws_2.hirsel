@@ -11,7 +11,7 @@ fn check_paged_inventory(d: Dir) -> Result[(), Error] waits {
         let Some(list_pack) = map.get(validated.inventory, 2u64) else {
             return Error(Foreign)
         }
-        if data_pack.class != 0 || data_pack.payload_bytes != 33 || list_pack.class != 2 || list_pack.live != 68 || list_pack.payload_bytes != 68 {
+        if data_pack.class != 0 || data_pack.payload_bytes != 33 || list_pack.class != 2 || list_pack.live != 69 || list_pack.payload_bytes != 69 {
             return Error(Foreign)
         }
     }
@@ -143,10 +143,8 @@ fn refuse_stream_format() -> Result[(), Error] {
 @test
 fn disk_test_format_cutover(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let id = StoreId(hi: 1, lo: 2)
-    // Format 9, the previous word 11 (a Format-11 store at this reader) and
-    // the next word 13 (as a Format-11 reader sees a Format-12 image: it
-    // accepts only its own word).
-    for word in[9u32, 11u32, 13u32] {
+    // Retired formats and the next format word all refuse before modifying files.
+    for word in[9u32, 11u32, 12u32, 13u32, 14u32, 16u32] {
         refuse_directory_format(d, c, r, tasks, id, word)?
     }
     refuse_frozen_bucket(id)?

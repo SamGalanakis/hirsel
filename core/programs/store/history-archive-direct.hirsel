@@ -1,0 +1,237 @@
+pub fn direct_history_ref(d: format.DirectBlob) -> pages.HistoryRef {
+    pages.HistoryRef(seq: d.pack, epoch: d.epoch, len: d.pack_len, digest: d.digest)
+}
+
+pub fn archive_direct_rel(objects: bool, d: format.DirectBlob) -> Result[String, types.Failure] {
+    if objects {
+        history_read_key("p-", direct_history_ref(d))
+    } else {
+        Ok(format.archive_log_pack_rel(d.pack, d.digest))
+    }
+}
+
+pub fn verify_direct_pack(objects: bool, path: String, id: types.StoreKey, d: format.DirectBlob, raw: Bytes) -> Result[format.DiskFrame, types.Failure] {
+    if !objects {
+        return manifest.directory_direct_frame(path, id, d, raw)
+    }
+    if d.epoch == 0 {
+        return Error(format.disk_fault(path, 0, Header))
+    }
+    let ctx = history_object_context(path, id, 3, direct_history_ref(d), raw)?
+    manifest.direct_pack_frame(path, ctx, d, raw)
+}
+
+pub fn verify_group_pack(path: String, id: types.StoreKey, place: format.DirectBlob, raw: Bytes, authority: u8, group_epoch: u64) -> Result[format.DiskFrame, types.Failure] {
+    let frame = verify_direct_pack(true, path, id, place, raw)?
+    if place.epoch > group_epoch || raw[29] != authority {
+        return Error(format.disk_fault(path, 0, Header))
+    }
+    Ok(frame)
+}
+
+fn verify_unit_pack(objects: bool, path: String, id: types.StoreKey, place: format.DirectBlob, packed: Bytes, unit: Bytes) -> Result[format.DiskFrame, types.Failure] {
+    if objects {
+        return verify_group_pack(path, id, place, packed, unit[29], format.read_le(unit, 48, 8))
+    }
+    manifest.directory_direct_frame(path, id, place, packed)
+}
+
+// The caller verified the frame boundaries and seals. 'start' skips the
+// Directory HEADER or the Bucket HEADER/PREV in the selected immutable unit.
+fn archive_unit_direct(path: String, raw: Bytes, start: u64) -> Result[List[Arc[format.DirectBlob]], types.Failure] {
+    let mut refs: List[Arc[format.DirectBlob]] = list.new()
+    let mut at = start
+    while at < list.len(raw) {
+        if list.len(raw) - at < 16 {
+            return Error(format.disk_fault(path, at, Truncated))
+        }
+        let hdr = manifest.disk_read_frame_head(path, list.slice(raw, at, at + 16), at)?
+        at += 16
+        if hdr.size > list.len(raw) - at {
+            return Error(format.disk_fault(path, at, Truncated))
+        }
+        if hdr.kind == 0x0011 {
+            manifest.commit_direct_blobs(path, list.slice(raw, at, at + hdr.size), mut refs)?
+        }
+        at += hdr.size
+    }
+    Ok(take refs)
+}
+
+type ArchivePackSource = DirectoryPacks(Dir) | ObjectPacks(Sender[ArchiveFetchReq])
+
+fn archive_secure_direct(source: ArchivePackSource, mut sink: std.object.Client, head: format.ArchiveHeadRep, path: String, raw: Bytes, start: u64, deadline: u64) -> Result[(), types.Failure] waits {
+    let refs = archive_unit_direct(path, raw, start)?
+    if list.len(refs) == 0 {
+        return Ok(())
+    }
+    let Some(index) = head.index_tail else {
+        return Error(format.disk_fault("archive-head", 0, Malformed))
+    }
+    let (take base, take listed) = archive_load_latest_base(mut sink, head.store, head.incarnation, index, deadline)?
+    let objects = head.source_kind == format.ARCHIVE_SOURCE_OBJECTS
+    for d in refs {
+        if d.pack < base.frontier.next_pack {
+            let Some(row) = map.get(listed, d.pack) else {
+                return Error(format.disk_fault(path, 0, Order))
+            }
+            if row.epoch != d.epoch || row.len != d.pack_len || row.digest != d.digest {
+                return Error(format.disk_fault(path, 0, Order))
+            }
+        }
+        let rel = archive_direct_rel(objects, d)?
+        let dst = format.archive_key(head.store, head.incarnation, rel)
+        let bytes_in = match source {
+            DirectoryPacks(dir) => {
+                let file = manifest.paged_pack_path(d.pack)?
+                match manifest.disk_read_file(dir, file, d.pack_len) {
+                    Ok(take found) => take found,
+                    Error(Io(NotFound)) => {
+                        let mut staged = manifest.disk_read_buffer(d.pack_len)?
+                        let _ = history_fetch(mut sink, dst, mut staged, deadline)?
+                        take staged
+                    },
+                    Error(take problem) => return Error(take problem),
+                }
+            },
+            ObjectPacks(opener) => opener_fetch_object(opener, rel, direct_history_ref(d), deadline)?,
+        }
+        let _ = verify_unit_pack(objects, rel, head.store, d, bytes_in, raw)?
+        match archive_put_immutable(mut sink, dst, take bytes_in, deadline)? {
+            UnitStored => (),
+            UnitDiverged(_) => return Error(Diverged(0)),
+        }
+    }
+    Ok(())
+}
+
+// Walk the predecessor bindings back to the selected MARK. Include GROUPs
+// overwritten later in the interval, and count shared names only once.
+pub fn retained_entry_names(mut client: std.object.Client, id: types.StoreKey, newest: pages.HistoryRef, mark: pages.HistoryRef, live: Map[String, ()], mut seen: Map[String, ()], deadline: u64) -> Result[u64, types.Failure] waits {
+    let mut entry = newest
+    let mut added = 0u64
+    while entry.seq > mark.seq {
+        let key = history_read_key("e-", entry)?
+        let raw = history_read_object(mut client, key, entry, deadline)?
+        history_object_digest(key, entry, raw)?
+        let (ctx, pred) = history_entry_context(key, id, entry, raw)?
+        let mut at = 112u64
+        while at < entry.len {
+            let frame = manifest.disk_frame_bytes(key, ctx, raw, at)?
+            if frame.kind == 0x0011 {
+                let mut refs: List[Arc[format.DirectBlob]] = list.new()
+                manifest.commit_direct_blobs(key, list.slice(raw, frame.payload, frame.end), mut refs)?
+                for place in refs {
+                    let name = history_read_key("p-", direct_history_ref(place))?
+                    let packed = history_read_object(mut client, name, direct_history_ref(place), deadline)?
+                    let _ = verify_group_pack(name, id, place, packed, raw[29], entry.epoch)?
+                    if !map.contains(live, name) && !map.contains(seen, name) {
+                        types.capacity(map.try_reserve(mut seen, 1))?
+                        map.insert(mut seen, take name, ())
+                        added = int.saturating_add(added, place.pack_len)
+                    }
+                }
+            }
+            at = frame.end
+        }
+        if !map.contains(live, key) && !map.contains(seen, key) {
+            types.capacity(map.try_reserve(mut seen, 1))?
+            map.insert(mut seen, take key, ())
+            added = int.saturating_add(added, entry.len)
+        }
+        entry = history_length(pred, entry.seq - 1)
+    }
+    if !history_ref_matches(entry, mark) {
+        return Error(format.disk_fault("head", 72, Order))
+    }
+    Ok(added)
+}
+
+fn archive_read_staged(mut sink: std.object.Client, path: String, limit: u64, deadline: u64) -> Result[Bytes, types.Failure] waits {
+    let (take found, _) = std.object.fetch_range(mut sink, path, 0, 1, manifest.disk_read_buffer(1)?, deadline)
+    let meta = (take found) ?=> Remote
+    if meta.size == 0 || meta.size > limit {
+        return Error(format.disk_fault(path, 0, Truncated))
+    }
+    let mut raw = manifest.disk_read_buffer(meta.size)?
+    let observed = history_fetch(mut sink, path, mut raw, deadline)?
+    if observed.etag != meta.etag {
+        return Error(Lost)
+    }
+    Ok(take raw)
+}
+
+fn archive_check_unit_packs(mut sink: std.object.Client, head: format.ArchiveHeadRep, key: String, raw: Bytes, start: u64, deadline: u64) -> Result[(), types.Failure] waits {
+    let objects = head.source_kind == format.ARCHIVE_SOURCE_OBJECTS
+    for place in archive_unit_direct(key, raw, start)? {
+        let pack_key = format.archive_key(head.store, head.incarnation, archive_direct_rel(objects, place)?)
+        let mut packed = manifest.disk_read_buffer(place.pack_len)?
+        let _ = history_fetch(mut sink, pack_key, mut packed, deadline)?
+        let _ = verify_unit_pack(objects, pack_key, head.store, place, packed, raw)?
+    }
+    Ok(())
+}
+
+fn archive_check_log_interval(mut sink: std.object.Client, head: format.ArchiveHeadRep, iv: format.ArchiveIntervalRep, deadline: u64) -> Result[(), types.Failure] waits {
+    let mut seq = iv.through.ordinal
+    let mut limit = iv.through.sub
+    loop {
+        if seq < iv.first_base.first_unit {
+            return Error(format.disk_fault("archive-head", 0, Order))
+        }
+        let mut from = 0u64
+        let mut previous = 0u64
+        while from < limit {
+            let path = format.archive_key(head.store, head.incarnation, format.archive_log_journal_rel(seq, from))
+            let raw = archive_read_staged(mut sink, path, limit - from, deadline)?
+            let _ = archive_verify_journal_chunk(path, head.store, seq, from, raw, 0, 0)?
+            if from == 0 {
+                previous = manifest.disk_read_header(path, raw, 2, Some(seq), Some(head.store))?.prev_end
+            }
+            archive_check_unit_packs(mut sink, head, path, raw, if from == 0 {
+                72u64
+            } else {
+                0u64
+            }, deadline)?
+            from += list.len(raw)
+        }
+        if seq == iv.first_base.first_unit {
+            return Ok(())
+        }
+        if limit == 0 {
+            let path = format.archive_key(head.store, head.incarnation, format.archive_log_journal_rel(seq, 0))
+            let (take found, take header) = std.object.fetch_range(mut sink, path, 0, 72, manifest.disk_read_buffer(72)?, deadline)
+            let _ = (take found) ?=> Remote
+            previous = manifest.disk_read_header(path, header, 2, Some(seq), Some(head.store))?.prev_end
+        }
+        if previous < 72 {
+            return Error(format.disk_fault("archive-head", 0, Order))
+        }
+        limit = previous
+        seq -= 1
+    }
+}
+
+fn archive_check_promised_direct(mut sink: std.object.Client, head: format.ArchiveHeadRep, deadline: u64) -> Result[(), types.Failure] waits {
+    let index = archive_restore_index(mut sink, head, deadline)?
+    for iv in index.intervals {
+        if head.source_kind == format.ARCHIVE_SOURCE_LOG {
+            archive_check_log_interval(mut sink, head, iv, deadline)?
+        } else {
+            let mut entry = pages.HistoryRef(seq: iv.through.ordinal, epoch: iv.through.sub, len: iv.through.len, digest: iv.through.digest)
+            while entry.seq > iv.first_base.base_ordinal {
+                let key = format.archive_key(head.store, head.incarnation, history_read_key("e-", entry)?)
+                let mut raw = manifest.disk_read_buffer(entry.len)?
+                let _ = history_fetch(mut sink, key, mut raw, deadline)?
+                history_object_digest(key, entry, raw)?
+                let (_, parent) = history_entry_context(key, head.store, entry, raw)?
+                archive_check_unit_packs(mut sink, head, key, raw, 112, deadline)?
+                entry = history_length(parent, entry.seq - 1)
+            }
+            if entry.seq != iv.first_base.base_ordinal || entry.digest != iv.first_base.digest || entry.epoch != iv.first_base.epoch || entry.len != iv.first_base.len {
+                return Error(format.disk_fault("archive-head", 0, Order))
+            }
+        }
+    }
+    Ok(())
+}

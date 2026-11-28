@@ -101,8 +101,9 @@ fn la1_run(d: Dir, sim: BucketSim, place_endpoint: std.sim.s3.Endpoint, tasks: T
     let t = archive_hold_table(mut db)?
     // Plant misleading garbage keys in the sink under the store's prefix (A1: LIST has zero authority).
     let mut probe_sink = arch_law_sink_client(sim, tasks, 103, string.from("arch-dir/"))?
-    arch_law_put_garbage(mut probe_sink, format.archive_key(store_key_to_rep(store_id), string.from("p-00000000000000000099-deadbeefdeadbeef")), 0xAA, 128, DF_OP_MS)?
-    arch_law_put_garbage(mut probe_sink, format.archive_key(store_key_to_rep(store_id), string.from("index-00000000000000000099-deadbeefdeadbeef")), 0xBB, 128, DF_OP_MS)?
+    // No head exists yet, so these sit in a directory no head will name.
+    arch_law_put_garbage(mut probe_sink, format.archive_key(store_key_to_rep(store_id),[0xEE; 16], string.from("p-00000000000000000099-deadbeefdeadbeef")), 0xAA, 128, DF_OP_MS)?
+    arch_law_put_garbage(mut probe_sink, format.archive_key(store_key_to_rep(store_id),[0xEE; 16], string.from("index-00000000000000000099-deadbeefdeadbeef")), 0xBB, 128, DF_OP_MS)?
     // A3: foreground commits do ZERO archive network I/O.
     let _ = archive_hold_put(mut db, t, 1, 0x11, 200)?
     let _ = archive_hold_put(mut db, t, 2, 0x22, 200)?
@@ -119,6 +120,9 @@ fn la1_run(d: Dir, sim: BucketSim, place_endpoint: std.sim.s3.Endpoint, tasks: T
     if h1.binding_id != 1 || h1.open_gap || list.len(h1.intervals) != 1 {
         fail("L-A1: initial log@1 archive-head invalid")
     }
+    // The same garbage in the head's own directory has no authority either.
+    arch_law_put_garbage(mut probe_sink, format.archive_key(store_key_to_rep(store_id), h1.incarnation, string.from("p-00000000000000000099-deadbeefdeadbeef")), 0xAA, 128, DF_OP_MS)?
+    arch_law_put_garbage(mut probe_sink, format.archive_key(store_key_to_rep(store_id), h1.incarnation, string.from("index-00000000000000000099-deadbeefdeadbeef")), 0xBB, 128, DF_OP_MS)?
     // Step 2: let durable END flush (`end_interval_ms = 10`), then ship journal chunk j-<seq>-0.
     std.clock.sleep_ns(sim.time, 25000000)
     let _ = archive_drain(mut db, 8)?
@@ -138,7 +142,7 @@ fn la1_run(d: Dir, sim: BucketSim, place_endpoint: std.sim.s3.Endpoint, tasks: T
     host.close(take seg_f) ?=> Io
     let due_j = std.object.deadline_after_ms(probe_sink, DF_OP_MS)
     // (a) Identical chunk re-PUT at existing key -> ChunkStored.
-    match failure_result_from_rep(history.archive_put_journal_chunk(mut probe_sink, store_key_to_rep(store_id), cur2.ordinal, 0, clone(seg_raw), 0, 0, due_j))? {
+    match failure_result_from_rep(history.archive_put_journal_chunk(mut probe_sink, store_key_to_rep(store_id), h2.incarnation, cur2.ordinal, 0, clone(seg_raw), 0, 0, due_j))? {
         ChunkStored(end_pos) if end_pos == cur2.sub => (),
         _ => fail("L-A1: identical j-<seq>-0 PUT was not accepted"),
     }
@@ -151,15 +155,15 @@ fn la1_run(d: Dir, sim: BucketSim, place_endpoint: std.sim.s3.Endpoint, tasks: T
     list.fill(mut commit_payload, 28, 0u8)
     let syn_frame = failure_result_from_rep(types.capacity(format.disk_seal(syn_ctx, 72, 0x0011, 1, commit_payload)))?
     list.append(mut syn_longer, syn_frame)
-    let _ = failure_result_from_rep(history.archive_put_journal_chunk(mut probe_sink, store_key_to_rep(store_id), synthetic_seq, 0, clone(syn_hdr), 0, 0, due_j))?
-    match failure_result_from_rep(history.archive_put_journal_chunk(mut probe_sink, store_key_to_rep(store_id), synthetic_seq, 0, clone(syn_longer), 0, 0, due_j))? {
+    let _ = failure_result_from_rep(history.archive_put_journal_chunk(mut probe_sink, store_key_to_rep(store_id), h2.incarnation, synthetic_seq, 0, clone(syn_hdr), 0, 0, due_j))?
+    match failure_result_from_rep(history.archive_put_journal_chunk(mut probe_sink, store_key_to_rep(store_id), h2.incarnation, synthetic_seq, 0, clone(syn_longer), 0, 0, due_j))? {
         ChunkAdoptedPrefix(prefix_end, _, _) if prefix_end == 72 => (),
         _ => fail("L-A1: shorter verified journal prefix was not adopted"),
     }
     // (c) Divergent bytes at same key -> ChunkDiverged (hard stop).
     let mut diverged_raw: Bytes = clone(syn_longer)
     diverged_raw[10] = diverged_raw[10] ^ 0xFF
-    match failure_result_from_rep(history.archive_put_journal_chunk(mut probe_sink, store_key_to_rep(store_id), synthetic_seq, 0, take diverged_raw, 0, 0, due_j))? {
+    match failure_result_from_rep(history.archive_put_journal_chunk(mut probe_sink, store_key_to_rep(store_id), h2.incarnation, synthetic_seq, 0, take diverged_raw, 0, 0, due_j))? {
         ChunkDiverged(_) => (),
         _ => fail("L-A1: divergent j-<seq>-0 bytes did not return ChunkDiverged"),
     }
@@ -177,7 +181,7 @@ fn la1_run(d: Dir, sim: BucketSim, place_endpoint: std.sim.s3.Endpoint, tasks: T
     let Some(tail3) = h3.index_tail else {
         fail("L-A1: missing index_tail for A2 check")
     }
-    let (take prev_base, take prev_packs) = failure_result_from_rep(history.archive_load_latest_base(mut probe_sink, store_key_to_rep(store_id), tail3, due_j))?
+    let (take prev_base, take prev_packs) = failure_result_from_rep(history.archive_load_latest_base(mut probe_sink, store_key_to_rep(store_id), h3.incarnation, tail3, due_j))?
     let mut bad_packs: List[format.ArchivePackRefRep] = list.new()
     // Find an ordinal < prev_base.frontier.next_pack not in prev_packs (or 0 if all present).
     let mut bad_ord = 1u64
@@ -329,7 +333,7 @@ fn la3_run(d: Dir, sim: BucketSim, tasks: Tasks, c: Clock, r: Random) -> Result[
     let Some(before_cur) = before_head.through else {
         fail("L-A3: archive-head missing through before reconnect")
     }
-    let committed_m_key = format.archive_key(store_key_to_rep(store_id), format.archive_log_manifest_rel(before_cur.gen, before_cur.digest))
+    let committed_m_key = format.archive_key(store_key_to_rep(store_id), before_head.incarnation, format.archive_log_manifest_rel(before_cur.gen, before_cur.digest))
     // Save committed manifest bytes, then corrupt it on sink.
     let due_p = std.object.deadline_after_ms(probe, DF_OP_MS)
     let mut saved_m: Bytes = list.with_capacity(before_cur.len)
@@ -488,7 +492,7 @@ fn la6_run(d: Dir, sim: BucketSim, tasks: Tasks, c: Clock, r: Random) -> Result[
     // Stale binding-1 archiver attempts a step against the same Directory + sink -> MUST fence!
     let mut stale_sink = arch_law_sink_client(sim, tasks, 604, string.from("la6-dir/"))?
     let due = std.object.deadline_after_ms(stale_sink, DF_OP_MS)
-    match failure_result_from_rep(history.archive_step_directory(dir1, store_key_to_rep(store_id), 1, false, mut stale_sink, due)) {
+    match failure_result_from_rep(history.archive_step_directory(r, dir1, store_key_to_rep(store_id), 1, false, mut stale_sink, due)) {
         Error(Fenced(_)) => (),
         _ => fail("L-A6: stale Directory archiver was not fenced"),
     }
@@ -540,7 +544,7 @@ fn la6_run(d: Dir, sim: BucketSim, tasks: Tasks, c: Clock, r: Random) -> Result[
     // Resume stale archiver pinned to holder epoch 1 -> MUST be fenced!
     let mut stale_obj_sink = arch_law_sink_client(sim, tasks, 610, string.from("la6-obj-sink/"))?
     let due2 = std.object.deadline_after_ms(stale_obj_sink, DF_OP_MS)
-    match failure_result_from_rep(history.archive_step_objects(take stale_src_tx, store_key_to_rep(obj_id), 1, obj_ep1, false, mut stale_obj_sink, due2)) {
+    match failure_result_from_rep(history.archive_step_objects(r, take stale_src_tx, store_key_to_rep(obj_id), 1, obj_ep1, false, mut stale_obj_sink, due2)) {
         Error(Fenced(ep)) if ep == obj_ep1 => (),
         _ => fail("L-A6: stale objects@1 archiver was not fenced"),
     }
@@ -635,7 +639,7 @@ fn archive_trace_run(d: Dir, sim: BucketSim, tasks: Tasks, c: Clock, r: Random, 
     }
     string.push(mut trace_out, "{\"kind\":\"expire\",\"op\":\"floor\",\"floor\":5}\n")
     let before = expiry.plan.previous.boundary
-    let key = format.archive_key(store_key_to_rep(db_rec.store), format.archive_log_manifest_rel(before.base_ordinal, before.base_digest))
+    let key = format.archive_key(store_key_to_rep(db_rec.store), survivor.incarnation, format.archive_log_manifest_rel(before.base_ordinal, before.base_digest))
     let mut raw: Bytes = list.with_capacity(1)
     let due = std.object.deadline_after_ms(expired, DF_OP_MS)
     match history.history_fetch(mut expired, key, mut raw, due) {

@@ -1,17 +1,27 @@
 pub fn checked_tiered_pager_target(input: pager.TieredPagerInput, demand: pager.TieredPagerTarget) -> Result[(String, format.TieredFrameId), types.Failure] {
     let expected = format.tiered_frame_id(demand.edge)
-    let path = match input {
-        PagerLocal(_) => manifest.paged_pack_path(expected.pack)?,
-        PagerObjects(..) => {
-            let file = manifest.paged_pack_path(expected.pack)?
-            let Some(item) = demand.object else {
-                return Error(format.disk_fault(file, expected.offset, Dangling(expected.stamp)))
-            }
-            if item.seq != expected.pack || item.len != demand.inventory.payload_bytes {
-                return Error(format.disk_fault(file, expected.offset, Malformed))
-            }
-            history_key("p-", item)
-        },
+    let path = if let Some(row) = demand.inventory.foreign {
+        let Some(source) = pager.pager_preview(input) else {
+            return Error(Missing("preview archive"))
+        }
+        if let Some(_) = demand.object {
+            return Error(format.disk_fault("locator", expected.pack, Malformed))
+        }
+        pager.preview_pack_key(source, expected.pack, row)?
+    } else {
+        match input {
+            PagerLocal(..) => manifest.paged_pack_path(expected.pack)?,
+            PagerObjects(..) => {
+                let file = manifest.paged_pack_path(expected.pack)?
+                let Some(item) = demand.object else {
+                    return Error(format.disk_fault(file, expected.offset, Dangling(expected.stamp)))
+                }
+                if item.seq != expected.pack || item.len != demand.inventory.payload_bytes {
+                    return Error(format.disk_fault(file, expected.offset, Malformed))
+                }
+                history_key("p-", item)
+            },
+        }
     }
     let expected_class = if expected.kind == 0x0021 {
         3u8

@@ -492,7 +492,7 @@ fn test_l88_refused_probe_publishes_mandatory_steps(d: Dir, c: Clock, r: Random,
             None => None,
         }
         let ran = bound bytes limit {
-            compact_cut(db, pager_link, mut roots, list.new(), mut stamp)
+            compact_cut(db, pager_link, mut roots, list.new(), map.new(), mut stamp)
         }
         let Ok(returned) = take ran else {
             fail("L88 (h): a refused probe returns its refusal rather than raising it")
@@ -561,10 +561,12 @@ fn refused_cut_bytes(mut db: Db, take delta: HolderDelta) -> Result[Bytes, Error
 
 // The last attempt's sealed bytes, and how many attempts sealed.
 fn refused_cut_seals(mut db: Db, take delta: HolderDelta) -> Result[(Bytes, u64), Error] waits {
+    let origin = manifest.pack_restore_origin(disk_state(db).packs)
     let sealed: core.Log[Bytes] = log.new()
     match disk_cut_state(mut db, take delta, scoped fn(mut raw: Bytes, context: format.DiskContext, fence: u32) -> Result[(), Error] {
         let mut whole: Bytes = clone(raw)
         seal_page_manifest_file(mut whole, context, fence)?
+        failure_result_from_rep(manifest.append_restore_origin(mut whole, context, origin))?
         log.append(sealed, take whole)
         failure_result_from_rep(types.capacity(bound bytes 0 {
             seal_page_manifest_file(mut raw, context, fence)

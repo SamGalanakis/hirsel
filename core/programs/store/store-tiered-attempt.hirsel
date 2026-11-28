@@ -429,7 +429,7 @@ fn tiered_touch_hot_blob(attempt: core.Cell[TieredTouchSet], reference: std.page
     Ok(())
 }
 
-fn tiered_pinned_blob(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], ptr: std.page.BlobRef) -> Result[View[Arc[Bytes]], types.Failure] in visible {
+pub fn tiered_pinned_blob(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], ptr: std.page.BlobRef) -> Result[View[Arc[Bytes]], types.Failure] in visible {
     let Some(frame) = tiered_resolve_cold(attempt, visible, TieredBlob(ptr))? else {
         return Error(Missed)
     }
@@ -560,6 +560,7 @@ pub fn stage_tiered_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredC
             tiered_edit_page(attempt, visible, ptr, mut failure)
         }
         match value {
+            ReplayDirect(place) => std.page.insert_blob_ref(mut working, key, format.direct_ref(place), None, private_from, mut following_stamp, load),
             ReplayPut(raw) => std.page.insert_shared_resolved(mut working, key, raw, inline, private_from, rightmost, mut following_stamp, load),
             ReplayAbsent => {
                 match std.page.remove_resolved(mut working, key, empty_root, private_from, mut following_stamp, load) {

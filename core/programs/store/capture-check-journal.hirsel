@@ -72,7 +72,7 @@ pub fn check_journal_fork(mut state: CheckJournal, path: String, at: u64, raw: B
 }
 
 pub fn check_journal_blob(path: String, raw: Bytes, mut at: u64, limit: u64) -> Result[(u64, u64), types.Failure] {
-    let size = capture_blob_width(path, raw, mut at, limit)?
+    let size = format.capture_blob_width(path, raw, mut at, limit)?
     let start = at
     at += size
     Ok((start, at))

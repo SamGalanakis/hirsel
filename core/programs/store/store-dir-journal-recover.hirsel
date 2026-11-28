@@ -14,7 +14,8 @@ pub type JournalRecovered {
     replay: pager.JournalReplay,
     seq: u64,
     end: u64,
-    uncovered: u64
+    uncovered: u64,
+    introduced: List[Arc[format.DirectBlob]]
 }
 
 // A live reader may stat before the writer extends the file and then read a

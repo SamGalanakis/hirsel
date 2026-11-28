@@ -28,7 +28,8 @@ pub type TieredCutStage: send {
     // The probes this cut leaves running and the inventories it leases.
     compaction: TieredCompaction,
     // Stamp -> PagePtr emitted by this cut's Tiered stage (for Pass-2 chunk cuts).
-    emitted: Map[u64, std.page.PagePtr]
+    emitted: Map[u64, std.page.PagePtr],
+    direct: Map[u64, ()]
 }
 
 pub fn tiered_cut_stage_empty(cut_stage: TieredCutStage) -> bool {
@@ -153,6 +154,17 @@ pub fn sealed_cut_holders(take holders: List[manifest.HeldPage], cut_stage: Tier
 
 // T4's pack rows: each Tiered pack enters the candidate inventory with
 // `live` = its laid-out payload, so AP16 item 7 lists it.
+pub fn emitted_blob_packs(cut_stage: TieredCutStage) -> Result[Map[u64, pages.PagePack], types.Failure] {
+    let mut blob_packs: Map[u64, pages.PagePack] = map.new()
+    for written in cut_stage.packs {
+        if written.pack.class == 4 {
+            types.capacity(map.try_reserve(mut blob_packs, 1))?
+            map.insert(mut blob_packs, written.seq, written.pack)
+        }
+    }
+    Ok(take blob_packs)
+}
+
 pub fn list_tiered_cut(mut known: manifest.PageLocations, cut_stage: TieredCutStage) -> Result[(), types.Failure] {
     for written in cut_stage.packs {
         types.capacity(manifest.disk_index_put(mut known.packs, written.seq, written.pack, manifest.pack_edge_charge))?
@@ -225,4 +237,32 @@ pub fn take_sealed(mut sealed: List[pages.Roots], mut at: u64) -> pages.PageTree
     let tree = pages.share_page_tree(sealed[at].collections)
     at += 1
     take tree
+}
+
+pub fn direct_cut_stamps(journal: manifest.DirectPacks, pending: TieredCutFrames, queue: manifest.CutQueue) -> Result[Map[u64, ()], types.Failure] {
+    let mut reached: Map[u64, ()] = map.new()
+    if std.omap.len(journal.stamps.values) == 0 {
+        return Ok(take reached)
+    }
+    for item in pending.pages {
+        let PageBody(page) = view item.frame.body else {
+            continue
+        }
+        let image = std.page.image_of(page)
+        for i in 0u64 .. std.page.count(image) {
+            if let Some(BlobEdge(reference)) = std.page.owning_edge(image, i) {
+                if reference.pack != 0 {
+                    types.capacity(map.try_reserve(mut reached, 1))?
+                    map.insert(mut reached, reference.stamp, ())
+                }
+            }
+        }
+    }
+    for row in queue.added {
+        if let TieredBlob(reference) = row.target {
+            types.capacity(map.try_reserve(mut reached, 1))?
+            map.insert(mut reached, reference.stamp, ())
+        }
+    }
+    Ok(take reached)
 }

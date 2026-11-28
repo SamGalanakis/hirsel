@@ -9,6 +9,6 @@ fn history_paged_load(mut source: history.ObjectPackRead, head: history.HistoryH
     let page_record = failure_result_from_rep(history.history_read_manifest(mut source.client, head.store, mark, head.checkpoint.seq, source.deadline))?
     let (take replay, take loaded) = failure_result_from_rep(object_writer.history_open_checkpoint(mut source, head, mark, checkpoint_data, take page_record, ceiling))?
     let mut recovered = take replay
-    history_apply_suffix(mut source.client, head, head.checkpoint.seq, chain, mut recovered, ceiling, source.deadline)?
+    history_apply_suffix(source.direct_floor, mut source.client, head, head.checkpoint.seq, chain, mut recovered, ceiling, source.deadline)?
     Ok((take recovered, take loaded))
 }

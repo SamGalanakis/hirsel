@@ -84,10 +84,14 @@ fn stage_tiered_cut(db: Db, delta: HolderDelta, take participants: List[pages.Ro
         Some(slot) => promote_cut_holder(db, pager_link, mut roots, slot, queued, mut next_stamp)?,
         None => (false, false),
     }
-    let compacted = compact_cut(db, pager_link, mut roots, queued, mut next_stamp)?
+    let resident = failure_result_from_rep(pager.resident_chunks(roots, disk_state(db).packs))?
+    let compacted = compact_cut(db, pager_link, mut roots, queued, resident.packs, mut next_stamp)?
+    let mut pack_start = first_pack
+    let mut packs = failure_result_from_rep(pager.relocate_resident_chunks(resident, disk_state(db).packs, compacted, store_key_to_rep(db.store), mut roots, mut next_stamp, mut pack_start))?
     let leases = failure_result_from_rep(pager.lease_cut_inventories(pager.disk_compaction(disk_state(db).tiered), roots))?
     let pager.TieredCompactStep(probes: take probes, retiring: take retiring, moved: take moved, queue: take moving) = take compacted
-    let folded = loaded || promoted || materialized || list.len(retiring) != 0 || tiered_without_paging(roots)
+    let journal = manifest.direct_packs(disk_state(db).packs)
+    let folded = list.len(packs) != 0 || std.omap.len(journal.stamps.values) != 0 || loaded || promoted || materialized || list.len(retiring) != 0 || tiered_without_paging(roots)
     let compaction = pager.TieredCompaction(probes: take probes, held: take leases)
     let mut queue = drain_cut(db, pager_link, take queued, take replaced, moving, next_stamp)?
     queue.moved = take moved
@@ -96,14 +100,14 @@ fn stage_tiered_cut(db: Db, delta: HolderDelta, take participants: List[pages.Ro
     // also moved keeps the one location the roots take.
     let mut pending = failure_result_from_rep(pager.tiered_cut_frames_restamped(roots, pager.restamp_collection(disk_state(db).tiered), mut next_stamp))?
     failure_result_from_rep(pager.tiered_emit_queue(mut pending, moving))?
+    let direct = failure_result_from_rep(pager.direct_cut_stamps(journal, pending, queue))?
     let pager.TieredCutFrames(pages: take staged_page_frames, blobs: take blobs, ..) = take pending
     if list.len(staged_page_frames) == 0 && list.len(blobs) == 0 && !folded {
-        return Ok(pager.TieredCutStage(packs: list.new(), roots: take roots, next_pack: first_pack, stamp_end: next_stamp, folded: false, materialized: materialized, queue: take queue, compaction: take compaction, emitted: map.new()))
+        return Ok(pager.TieredCutStage(packs: list.new(), roots: take roots, next_pack: first_pack, stamp_end: next_stamp, folded: false, materialized: materialized, queue: take queue, compaction: take compaction, emitted: map.new(), direct: take direct))
     }
-    let blob_run = failure_result_from_rep(pager.layout_tiered_packs(take blobs, 4, first_pack, cap))?
+    let blob_run = failure_result_from_rep(pager.layout_tiered_packs(take blobs, 4, pack_start, cap))?
     let page_run = failure_result_from_rep(pager.layout_tiered_packs(take staged_page_frames, 3, blob_run.next_pack, cap))?
     let mut emitted: Map[u64, std.page.PagePtr] = map.new()
-    let mut packs: List[pager.TieredCutPack] = list.new()
     failure_result_from_rep(pager.encode_tiered_run(store_key_to_rep(id), blob_run, mut emitted, mut packs))?
     failure_result_from_rep(pager.encode_tiered_run(store_key_to_rep(id), page_run, mut emitted, mut packs))?
     failure_result_from_rep(pager.settle_queue_moves(mut queue, moving, emitted, manifest.pack_lists(disk_state(db).packs).deferred_next))?
@@ -113,7 +117,7 @@ fn stage_tiered_cut(db: Db, delta: HolderDelta, take participants: List[pages.Ro
         let collections = failure_result_from_rep(pager.seal_holder_tiered(held.collections, emitted))?
         list.push(mut sealed, pages.PageRoots(collections: take collections, streams: pages.share_page_tree(held.streams), catalog: pages.share_page_tree(held.catalog), keyed: pages.share_keyed_pages(held.keyed)))
     }
-    Ok(pager.TieredCutStage(packs: take packs, roots: take sealed, next_pack: page_run.next_pack, stamp_end: next_stamp, folded: folded, materialized: materialized, queue: take queue, compaction: take compaction, emitted: take emitted))
+    Ok(pager.TieredCutStage(packs: take packs, roots: take sealed, next_pack: page_run.next_pack, stamp_end: next_stamp, folded: folded, materialized: materialized, queue: take queue, compaction: take compaction, emitted: take emitted, direct: take direct))
 }
 
 // T8 step 4 reads queued pages through the installed inventory. A cut with

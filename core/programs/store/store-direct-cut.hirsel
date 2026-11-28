@@ -1,0 +1,130 @@
+// The payload of a Memory Blobs row stays resident. Its owning leaf still
+// records a physical class-4 edge. A cut probes the same logical key in each
+// holder, including a historical holder being added by this cut.
+pub type ResidentChunk {
+    holder: u64,
+    key: Bytes,
+    reference: std.page.BlobRef,
+    body: Arc[Bytes]
+}
+
+pub type ResidentChunks {
+    rows: List[ResidentChunk],
+    packs: Map[u64, ()]
+}
+
+fn resident_chunk_page(mut found: ResidentChunks, holder: u64, id: u32, page: Arc[std.page.Page], inventory: Option[Arc[pages.TieredReadInventory]], installed: manifest.PackDiskState) -> Result[(), types.Failure] {
+    let image = std.page.image_of(page)
+    for slot in 0u64 .. std.page.count(image) {
+        if std.page.level(image) != 0 {
+            resident_chunk_page(mut found, holder, id, option.unwrap(std.page.child(page, slot)), inventory, installed)?
+            continue
+        }
+        let Some(BlobEdge(ref)) = std.page.owning_edge(image, slot) else {
+            continue
+        }
+        if ref.pack == 0 {
+            continue
+        }
+        let listed = manifest.disk_index_get(manifest.pack_locations(installed).packs, ref.pack)
+        if let Some(row) = listed {
+            if row.class != 4 {
+                continue
+            }
+        } else if let None = manifest.disk_index_get(manifest.direct_packs(installed).stamps, ref.stamp) {
+            let Some(captured) = view inventory else {
+                continue
+            }
+            let Some(prior) = std.omap.get(captured.packs, ref.pack) else {
+                continue
+            }
+            if prior.inventory.class != 4 {
+                continue
+            }
+        }
+        let suffix = option.unwrap(std.page.key_at(image, slot))
+        let key = catalog.logical_key(id, suffix)?
+        if !format.direct_chunk_key(key) {
+            return Error(format.disk_fault("Blobs", ref.offset, Malformed))
+        }
+        let body = option.unwrap(std.page.body(page, ref.body))
+        types.capacity(map.try_reserve(mut found.packs, 1))?
+        types.capacity(list.try_reserve(mut found.rows, 1))?
+        map.insert(mut found.packs, ref.pack, ())
+        list.push(mut found.rows, ResidentChunk(holder: holder, key: take key, reference: ref, body: take body))
+    }
+    Ok(())
+}
+
+fn resident_chunk_map(mut found: ResidentChunks, holder: u64, root: Arc[std.page.Page], inventory: Option[Arc[pages.TieredReadInventory]], installed: manifest.PackDiskState) -> Result[(), types.Failure] {
+    let image = std.page.image_of(root)
+    for slot in 0u64 .. std.page.count(image) {
+        if std.page.level(image) != 0 {
+            resident_chunk_map(mut found, holder, option.unwrap(std.page.child(root, slot)), inventory, installed)?
+        } else {
+            let desc = pages.unwrap_collection_descriptor(std.page.value_at(root, slot))
+            if desc.kind == BlobsCollection && desc.residency != ResidentTiered {
+                let key = option.unwrap(std.page.key_at(image, slot))
+                let collection: u32 = list.word_be(key, 0)
+                resident_chunk_page(mut found, holder, collection, option.unwrap(std.page.child(root, slot)), inventory, installed)?
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn resident_chunks(roots: List[pages.Roots], installed: manifest.PackDiskState) -> Result[ResidentChunks, types.Failure] {
+    let mut found = ResidentChunks(rows: list.new(), packs: map.new())
+    for slot in 0u64 .. list.len(roots) {
+        let tree = roots[slot].collections
+        resident_chunk_map(mut found, slot, tree.root, tree.paging, installed)?
+    }
+    Ok(take found)
+}
+
+// A selected PACK_INDEX prefix cannot acquire an edge behind its cursor.
+// Delisted historical bytes are copied from the Snapshot's immutable body.
+pub fn relocate_resident_chunks(found: ResidentChunks, installed: manifest.PackDiskState, compacted: TieredCompactStep, id: types.StoreKey, mut roots: List[pages.Roots], mut next_stamp: u64, mut next_pack: u64) -> Result[List[TieredCutPack], types.Failure] {
+    let mut written: List[TieredCutPack] = list.new()
+    let mut copies: Map[u64, format.DirectBlob] = map.new()
+    let mut retired: Map[u64, ()] = map.new()
+    for seq in compacted.retiring {
+        types.capacity(map.try_reserve(mut retired, 1))?
+        map.insert(mut retired, seq, ())
+    }
+    let first = next_stamp
+    for row in found.rows {
+        let ref = row.reference
+        if let Some(_) = manifest.disk_index_get(manifest.direct_packs(installed).stamps, ref.stamp) {
+            continue
+        }
+        if let Some(_) = manifest.disk_index_get(manifest.pack_locations(installed).packs, ref.pack) {
+            let scanned = match map.get(compacted.probes, ref.pack) {
+                Some(cursor) => cursor.next_data,
+                None => 0u64
+            }
+            if !map.contains(retired, ref.pack) && ref.offset >= scanned {
+                continue
+            }
+        }
+        let prior: Option[format.DirectBlob] = match map.get(copies, ref.stamp) {
+            Some(item) => Some(clone(item)),
+            None => None
+        }
+        let place = match prior {
+            Some(existing) => existing,
+            None => {
+                let (fixed, take pack) = seal_direct_chunk(id, next_pack, next_stamp, 0, 0, row.key, row.body)?
+                next_stamp = catalog.stamp_after(next_stamp)?
+                next_pack = catalog.stamp_after(next_pack)?
+                types.capacity(map.try_reserve(mut copies, 1))?
+                types.capacity(list.try_reserve(mut written, 1))?
+                map.insert(mut copies, ref.stamp, fixed)
+                list.push(mut written, take pack)
+                fixed
+            },
+        }
+        pages.put_direct_page_row(mut roots[row.holder].collections, row.key, place, Some(arc.share(row.body)), first, mut next_stamp)?
+    }
+    Ok(take written)
+}

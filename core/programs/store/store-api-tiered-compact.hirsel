@@ -3,7 +3,7 @@
 // progress: the installed cursors stand, nothing retires, and every root
 // is the one the cut staged before the probes ran, and no queue row is
 // rewritten.
-fn compact_cut(db: Db, pager_link: Option[View[Sender[pager.TieredPagerMessage]]], mut roots: List[pages.Roots], queued: List[manifest.DeferredFree], mut next_stamp: u64) -> Result[pager.TieredCompactStep, Error] waits {
+fn compact_cut(db: Db, pager_link: Option[View[Sender[pager.TieredPagerMessage]]], mut roots: List[pages.Roots], queued: List[manifest.DeferredFree], resident: Map[u64, ()], mut next_stamp: u64) -> Result[pager.TieredCompactStep, Error] waits {
     let installed = disk_state(db).packs
     let running: Map[u64, pager.TieredProbeCursor] = disk_allocation(scoped fn() -> Result[Map[u64, pager.TieredProbeCursor], Error] {
         Ok(clone(pager.disk_compaction(disk_state(db).tiered).probes))
@@ -18,7 +18,7 @@ fn compact_cut(db: Db, pager_link: Option[View[Sender[pager.TieredPagerMessage]]
     }
     if pager.cut_tiered_idle(roots, manifest.pack_lists(installed).deferred, queued) {
         let idle = disk_allocation(scoped fn() -> Result[(Map[u64, pager.TieredProbeCursor], List[u64]), Error] {
-            failure_result_from_rep(pager.compact_idle_probes(manifest.pack_locations(installed), running, budget))
+            failure_result_from_rep(pager.compact_resident_probes(manifest.pack_locations(installed), running, resident, disk_state(db).options.compact_permille, budget))
         })
         return match take idle {
             Ok((take probes, take retiring)) => Ok(pager.TieredCompactStep(probes: take probes, retiring: take retiring, moved: list.new(), queue: map.new())),

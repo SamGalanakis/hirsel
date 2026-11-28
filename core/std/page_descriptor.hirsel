@@ -1,4 +1,4 @@
-pub type CollectionKind: key = TableCollection | IndexCollection | CellCollection | LogCollection
+pub type CollectionKind: key = TableCollection | IndexCollection | CellCollection | LogCollection | BlobsCollection
 
 pub type Residency: key = ResidentMemory | ResidentTiered
 
@@ -19,6 +19,7 @@ pub fn fields(raw: Bytes, at: u64, width: u64) -> Result[CollectionDescriptor, p
         2 => IndexCollection,
         3 => CellCollection,
         4 => LogCollection,
+        5 => BlobsCollection,
         _ => return Error(MalformedPage),
     }
     let residency = match raw[at + 53] {
@@ -40,4 +41,52 @@ pub fn set_collection_residency(mut value: Bytes, residency: Residency) {
         ResidentMemory => 0,
         ResidentTiered => 1,
     }
+}
+
+/// Validate a complete collection-map descriptor, including its root and counts.
+pub fn validate(raw: Bytes, at: u64, width: u64) -> Result[(), page.Error] {
+    let CollectionDescriptor(kind, residency, rows, row_bytes: charge) = fields(raw, at, width)?
+    let ptr = page.decode_ptr(list.slice(raw, at, at + 36))?
+    if raw[at + 55] != 0 {
+        return Error(MalformedPage)
+    }
+    match kind {
+        CellCollection => {
+            if residency != ResidentMemory || width < 58 {
+                return Error(MalformedPage)
+            }
+            let inline_width: u16 = list.word_le(raw, at + 56)
+            let ilen: u64 = int.widen(inline_width)
+            if ilen > 256 || ilen == 1 || width != 58 + ilen {
+                return Error(MalformedPage)
+            }
+            if ilen != 0 {
+                if ptr.stamp != 0 || rows != 1 || charge != page.row_charge(4, ilen) {
+                    return Error(MalformedPage)
+                }
+            } else if (ptr.stamp == 0 && (rows != 0 || charge != 0)) || (ptr.stamp != 0 && rows != 1) {
+                return Error(MalformedPage)
+            }
+        },
+        LogCollection => {
+            if width != 72 {
+                return Error(MalformedPage)
+            }
+            let next: u64 = list.word_le(raw, at + 56)
+            let first: u64 = list.word_le(raw, at + 64)
+            if first > next || rows != next - first || (rows == 0 && ptr.stamp != 0) {
+                return Error(MalformedPage)
+            }
+        },
+        _ => if width != 56 {
+            return Error(MalformedPage)
+        },
+    }
+    if kind != CellCollection && ptr.stamp == 0 && (rows != 0 || charge != 0) {
+        return Error(MalformedPage)
+    }
+    if raw[at + 54] != 0 {
+        return Error(UnsupportedPage)
+    }
+    Ok(())
 }

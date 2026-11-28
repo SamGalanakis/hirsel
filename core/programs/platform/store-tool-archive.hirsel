@@ -39,12 +39,32 @@ fn archive_failure(err: Stderr, e: store.Error) -> Result[(), Exit] waits {
     }
 }
 
+fn archive_holds(obj: std.json.Writer, mut fields: std.json.Items, name: String, holds: List[store.PreviewHoldRow]) {
+    std.json.write_member(obj, mut fields, name)
+    std.json.array(obj, 1, scoped fn(a: std.json.Writer, mut items: std.json.Items) {
+        for hold in holds {
+            std.json.element(a, mut items)
+            std.json.object(a, 2, scoped fn(row: std.json.Writer, mut f: std.json.Items) {
+                text_field(row, mut f, "child", id_hex(hold.child.hi, hold.child.lo))
+                counter_field(row, mut f, "base", hold.boundary.base_ordinal)
+                counter_field(row, mut f, "until_ms", hold.until_ms)
+                counter_field(row, mut f, "stamp", hold.stamp)
+            })
+        }
+    })
+}
+
 fn review_text(v: store.ArchiveReview) -> String {
     let mut text = string.new()
     std.json.write(mut text, false, scoped fn(w: std.json.Writer) {
         std.json.object(w, 0, scoped fn(obj: std.json.Writer, mut fields: std.json.Items) {
             text_field(obj, mut fields, "parent", id_hex(v.head.store.hi, v.head.store.lo))
             text_field(obj, mut fields, "etag", std.hex.encode(std.object.tag_value(v.tag)))
+            let mut incarnation: Bytes = list.with_capacity(16)
+            for byte in v.head.incarnation {
+                list.push(mut incarnation, byte)
+            }
+            text_field(obj, mut fields, "incarnation", std.hex.encode(incarnation))
             counter_field(obj, mut fields, "revision", v.head.rev)
             counter_field(obj, mut fields, "binding_id", v.head.binding_id)
             counter_field(obj, mut fields, "holder_epoch", v.head.holder_epoch)
@@ -53,6 +73,7 @@ fn review_text(v: store.ArchiveReview) -> String {
             if let Some(floor) = view v.head.floor_base {
                 counter_field(obj, mut fields, "floor_base", floor.base_ordinal)
             }
+            archive_holds(obj, mut fields, "holds", v.head.holds)
             std.json.write_member(obj, mut fields, "intervals")
             std.json.array(obj, 1, scoped fn(a: std.json.Writer, mut items: std.json.Items) {
                 for iv in v.intervals {
@@ -181,6 +202,7 @@ fn expiry_command(mut src: std.object.Client, parent: store.StoreId, work: Dir, 
             text_field(obj, mut fields, "floor", floor)
             counter_field(obj, mut fields, "previous_base", answer.plan.previous.boundary.base_ordinal)
             counter_field(obj, mut fields, "proposed_base", answer.plan.floor.boundary.base_ordinal)
+            archive_holds(obj, mut fields, "limiting_holds", answer.limiting_holds)
             counter_field(obj, mut fields, "deleted", answer.deleted)
         })
     })

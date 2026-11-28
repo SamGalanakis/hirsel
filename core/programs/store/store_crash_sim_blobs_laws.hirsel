@@ -1,0 +1,166 @@
+// A definite failure at the second final pack name must retire only the
+// first prepared pack, even if the writer receives no subsequent request.
+@test
+fn test_direct_blob_idle_cancel_and_power_cut(tasks: Tasks) -> Result[(), Error] waits {
+    let (time, _) = provide.clock(0, 0)
+    csim_pack_barrier_refusal(tasks, time, 2, "sync")?
+    csim_pack_barrier_refusal(tasks, time, 7, "sync_dir")?
+    let rng = provide.random(731)
+    let opts = result.unwrap(sized(Directory, 2147483648u64))
+    let (root, worker) = sim_disk_mount(tasks, time, std.sim.fs.new(), std.sim.world.plan(731), 8388608)
+    host.mkdir(root, "store") ?=> Io
+    host.sync_dir(root) ?=> Io
+    let dir = host.open_dir(root, "store") ?=> Io
+    let mut db = open(tasks, dir, time, rng, opts)?
+    let mut schema = declare(db, Migrate)?
+    let chunks = declare_blobs(mut schema, "parts", std.codec.key_u64(), BlobLimits(chunk: 1024, max: 4096))?
+    let _ = seal(mut db, take schema)?
+    let upload = blob_law_begin(mut db, chunks)?
+    let attempt = run(mut db, Some(BLOB_LAW_STEPS), (copy_env(chunks), upload), fn(mut tx: Tx, env: (Blobs[u64], BlobUpload)) -> Result[BlobInfo, Error] {
+        blob_append(mut tx, env.0, env.1, csim_upload_chunk(0))
+    })?
+    let Committed(Done(ticket: ack, ..)) = attempt else {
+        return Error(Missing("initial chunk"))
+    }
+    durable(mut db, ack)?
+    let floor = version(snapshot(db))
+    let seq = manifest.pack_allocation_next(disk_state(db).packs)
+    let first = failure_result_from_rep(manifest.paged_pack_path(seq))?
+    let collision = failure_result_from_rep(manifest.paged_pack_path(seq + 1))?
+    let orphan = failure_result_from_rep(manifest.paged_pack_path(seq + 71))?
+    failure_result_from_rep(manifest.disk_write_synced(dir, collision, b"private name"))?
+    failure_result_from_rep(manifest.disk_write_synced(dir, orphan, b"unintroduced"))?
+    host.sync_dir(dir) ?=> Io
+    let refused = blob_law_append(mut db, chunks, upload, 1, 2, 1024)
+    if let Ok(_) = refused {
+        return Error(Missing("collision accepted"))
+    }
+    if version(snapshot(db)) != floor || archive_hold_exists(dir, first)? || failure_result_from_rep(manifest.disk_read_file(dir, collision, 64))? != b"private name" {
+        return Error(Missing("partial append changed ownership"))
+    }
+    drop(take db)
+    let mut image = sim_disk_unmount(take root, take worker)
+    let mut power_cut = std.sim.world.plan(732)
+    std.sim.fs.crash(mut image, mut power_cut)
+    let (after, restarted) = sim_disk_mount(tasks, time, take image, std.sim.world.plan(733), 8388608)
+    let recovered = host.open_dir(after, "store") ?=> Io
+    let mut reopened = open(tasks, recovered, time, rng, opts)?
+    if version(snapshot(reopened)) != floor || archive_hold_exists(recovered, collision)? || archive_hold_exists(recovered, orphan)? {
+        return Error(Missing("recovery did not select the acknowledged prefix"))
+    }
+    let accepted = blob_law_attach(mut reopened, chunks, 37u64, upload)?
+    let snap = snapshot(reopened)
+    let actual = blob_read(reader(reopened, READER_PIN_MIN)?, snap, chunks, accepted, 0)?
+    let Some(bytes_in) = actual else {
+        return Error(Missing("lost acknowledged pack"))
+    }
+    if accepted.chunks != 1 || list.len(bytes_in) != 1024 {
+        return Error(Missing("acknowledged extent"))
+    }
+    for i in 0u64 .. 1024 {
+        if bytes_in[i] != csim_upload_byte(0, i) {
+            return Error(Missing("wrong acknowledged bytes"))
+        }
+    }
+    close(take reopened)?
+    let _ = sim_disk_unmount(take after, take restarted)
+    Ok(())
+}
+
+// A direct pack uses two durability barriers before its introducing frame.
+// Exercise both uncertain outcomes at each site on the real pack installer.
+fn csim_pack_barrier_refusal(tasks: Tasks, c: Clock, site: u64, op: String) -> Result[(), Error] waits {
+    let mut saw_advanced = false
+    let mut saw_refused = false
+    for seed in 0u64 .. 8 {
+        let mut decisions = std.sim.world.plan(seed)
+        std.sim.world.script(mut decisions, site, SyncUnknown)
+        let (tx, rx): (Sender[std.sim.world.Receipt], Receiver[std.sim.world.Receipt]) = channel.new(4)
+        let (d, server) = sim_disk_mount_tapped(tasks, c, std.sim.fs.new(), take decisions, 1048576, Some(take tx))
+        if let Ok(()) = manifest.install_direct_pack(d, 17, b"prepared") {
+            return Error(Missing("installer accepted an uncertain pack barrier"))
+        }
+        let Ok(take receipt) = channel.try_receive(rx) else {
+            return Error(Missing("pack barrier injection did not reach the disk"))
+        }
+        let Barrier(advanced) = receipt.outcome else {
+            return Error(Missing("fault missed the pack barrier"))
+        }
+        if receipt.op != op || receipt.site != site || archive_hold_exists(d, "p-17")? || archive_hold_exists(d, "p-17.tmp")? {
+            return Error(Missing("failed pack remained eligible for introduction"))
+        }
+        saw_advanced = saw_advanced || advanced
+        saw_refused = saw_refused || !advanced
+        let _ = sim_disk_unmount(take d, take server)
+        if saw_advanced && saw_refused {
+            return Ok(())
+        }
+    }
+    Error(Missing("both uncertain pack barrier outcomes must execute"))
+}
+
+// Repeat the same writer history to obtain its exact immutable keys, then
+// collide on the second chunk and observe the idle worker through another client.
+@test
+fn test_direct_blob_bucket_idle_retirement(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let mut keys: List[String] = list.with_capacity(2)
+    for round in 0u64 .. 2 {
+        let sim = bucket_law_sim(tasks, c, 2357, None, list.new())
+        let r = provide.random(1339)
+        let mut db = open_authority(tasks, bucket_law_authority(sim, tasks, "s3.test", 241)?, sim.time, r, bucket_law_options(true)) ?=> |denied| clone(denied.error)
+        let mut schema = declare(db, Migrate)?
+        let parts = declare_blobs(mut schema, "parts", std.codec.key_u64(), BlobLimits(chunk: 1024, max: 4096))?
+        let _ = seal(mut db, take schema)?
+        let upload = blob_law_begin(mut db, parts)?
+        let floor = version(snapshot(db))
+        let first = manifest.pack_allocation_next(disk_state(db).packs)
+        let mut client = bucket_law_client(sim, tasks, "s3.test", 251)?
+        let due = std.object.deadline_after_ms(client, 60000)
+        if round == 1 {
+            let _ = witness_create(mut client, keys[1], b"collision", due)?
+        }
+        let appended = blob_law_append(mut db, parts, upload, 0, 2, 1024)
+        if round == 0 {
+            let _ = appended?
+            for n in first .. first + 2 {
+                let Some(row) = manifest.disk_index_get(manifest.direct_packs(disk_state(db).packs).rows, n) else {
+                    return Error(Missing("successful append did not introduce its pack"))
+                }
+                list.push(mut keys, history.history_key("p-", option.unwrap(row.pack.object)))
+            }
+        } else {
+            if let Ok(_) = appended {
+                return Error(Missing("second immutable pack collision accepted"))
+            }
+            if version(snapshot(db)) != floor {
+                return Error(Missing("refused append advanced the head"))
+            }
+            let observer = std.object.opener(client)
+            loop {
+                match std.object.stat(observer, keys[0], due) {
+                    Error(NotFound) => break,
+                    Ok(_) => (),
+                    Error(take problem) => return Error(Remote(take problem)),
+                }
+                if std.object.deadline_after_ms(client, 0) >= due {
+                    return Error(Missing("idle writer kept a staged pack"))
+                }
+            }
+        }
+        close(take db)?
+        drop(take client)
+        let report = bucket_law_report(take sim)
+        if round == 1 {
+            let mut removed = false
+            for request in report.requests {
+                if request.key == keys[0] && request.method == "DELETE" && request.applied {
+                    removed = true
+                }
+            }
+            if !removed || map.contains(report.objects, keys[0]) || list.len(report.pending) != 0 {
+                return Error(Missing("idle cancellation left an object or multipart upload"))
+            }
+        }
+    }
+    Ok(())
+}

@@ -177,7 +177,7 @@ pub fn seal_page_manifest_file(mut raw: Bytes, context: format.DiskContext, leve
 }
 
 pub fn pack_record(path: String, at: u64, raw: Bytes) -> Result[pages.PagePack, types.Failure] {
-    if list.len(raw) != 29 {
+    if list.len(raw) < 30 {
         return Error(format.disk_fault(path, at, Malformed))
     }
     let frames: u32 = list.word_le(raw, 1)
@@ -188,7 +188,24 @@ pub fn pack_record(path: String, at: u64, raw: Bytes) -> Result[pages.PagePack, 
     if live_bytes > payload_bytes || class == 2 || class > 4 || (class < 3 && index_offset != 0) || (class >= 3 && (index_offset < 72 || index_offset >= payload_bytes || payload_bytes - index_offset < 28)) {
         return Error(format.disk_fault(path, at, Malformed))
     }
-    Ok(pages.PagePack(class: class, frames: frames, live: live_bytes, payload_bytes: payload_bytes, index: index_offset))
+    let foreign: Option[pages.ForeignPack] = match raw[29u64] {
+        0 if list.len(raw) == 30 => None,
+        1 if list.len(raw) == 86 => {
+            let parent = types.StoreKey(hi: list.word_le(raw, 30), lo: list.word_le(raw, 38))
+            let mut incarnation: Inline[u8, 16] =[0; 16]
+            for i in 0u64 .. 16 {
+                incarnation[i] = raw[46 + i]
+            }
+            let len: u64 = list.word_le(raw, 70)
+            let minimum = pages.sealed_pack_bytes(class, int.widen(frames), payload_bytes)
+            if incarnation ==[0u8; 16] || len < minimum || (class >= 3 && len != minimum) {
+                return Error(format.disk_fault(path, at, Malformed))
+            }
+            Some(pages.ForeignPack(parent, incarnation, epoch: list.word_le(raw, 62), len, digest: list.word_le(raw, 78)))
+        },
+        _ => return Error(format.disk_fault(path, at, Malformed)),
+    }
+    Ok(pages.PagePack(foreign: foreign, class: class, frames: frames, live: live_bytes, payload_bytes: payload_bytes, index: index_offset))
 }
 
 pub type LoadedPack {
@@ -392,7 +409,10 @@ fn index_page_pack(path: String, id: types.StoreKey, seq: u64, pack: pages.PageP
 pub fn index_pack_frames(path: String, ctx: format.DiskContext, pack: pages.PagePack, next_stamp: u64, raw: Bytes) -> Result[Map[u64, format.DiskFrame], types.Failure] {
     let expected_frames: u64 = int.widen(pack.frames)
     let mut frames: Map[u64, format.DiskFrame] = map.new()
-    let mut checked_pack = pack_scan(pack.class, next_stamp)
+    let mut checked_pack = pack_scan_indexed(pack.class, next_stamp, pack.index)
+    let mut prior_index = 0u64
+    let mut prior_row = 0u64
+    let mut indexed = 0u64
     let mut at = 72u64
     while at < list.len(raw) {
         let frame = disk_frame_bytes(path, ctx, raw, at)?
@@ -402,10 +422,31 @@ pub fn index_pack_frames(path: String, ctx: format.DiskContext, pack: pages.Page
         if checked_pack.frames > expected_frames {
             return Error(format.disk_fault(path, at, Malformed))
         }
-        map.insert(mut frames, at, frame)
+        if pack.class >= 3 && at >= pack.index {
+            let index = decode_pack_index(path, at, list.slice(raw, frame.payload, frame.end), mut prior_row)?
+            if index.prev != prior_index {
+                return Error(format.disk_fault(path, at, Order))
+            }
+            prior_index = at
+            for row in index.rows {
+                let Some(data) = map.get(frames, row.offset) else {
+                    return Error(format.disk_fault(path, row.offset, Malformed))
+                }
+                if data.kind != int.widen(row.kind) || data.end - data.payload != int.widen(row.len) || list.word_le(raw, data.payload + checked_pack.stamp_at) != row.stamp {
+                    return Error(format.disk_fault(path, row.offset, Checksum))
+                }
+                indexed += 1
+            }
+        } else {
+            map.insert(mut frames, at, frame)
+        }
         at = frame.end
     }
-    if checked_pack.payload_bytes != pack.payload_bytes || checked_pack.frames != expected_frames {
+    if pack.class >= 3 {
+        if indexed != expected_frames || !pack_scan_finished(checked_pack, expected_frames, pack.payload_bytes, at) {
+            return Error(format.disk_fault(path, at, Malformed))
+        }
+    } else if checked_pack.payload_bytes != pack.payload_bytes || checked_pack.frames != expected_frames {
         return Error(format.disk_fault(path, at, Malformed))
     }
     Ok(take frames)
@@ -429,18 +470,40 @@ pub fn graph_add(mut graph: PageGraph, stamp: u64, take frame: ReadFrame) -> Res
     Ok(())
 }
 
-fn resolve_blob(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, settled: SettledPacks, reference: std.page.BlobRef, mut graph: PageGraph) -> Result[(), types.Failure] {
+fn resolve_blob(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, settled: SettledPacks, reference: std.page.BlobRef, mut pending: List[std.page.BlobRef], mut graph: PageGraph) -> Result[(), types.Failure] {
     let path = types.capacity(disk_path("p-", reference.pack, ""))?
     let Some(pack) = map.get(packs, reference.pack) else {
         let width = 8 + reference.len
         let loc = std.page.PagePtr(pack: reference.pack, offset: reference.offset, len: int.truncate(width), checksum: reference.checksum, stamp: reference.stamp)
-        return settled_frame(inventory, settled, path, loc, 1, mut graph)
+        let class = match map.get(inventory.packs, reference.pack) {
+            Some(row) if row.class == 4 => 4u8,
+            _ => 1u8,
+        }
+        if class == 4 && loc.pack >= settled.below {
+            if mark_reached(mut graph.stamps, path, loc)? {
+                types.capacity(list.try_reserve(mut pending, 1))?
+                types.capacity(list.try_reserve(mut graph.postorder, 1))?
+                list.push(mut graph.postorder, loc.stamp)
+                list.push(mut pending, reference)
+            }
+            return Ok(())
+        }
+        return settled_frame(inventory, settled, path, loc, class, mut graph)
     }
     resolve_blob_frame(path, pack, reference, mut graph)
 }
 
 pub fn resolve_blob_frame(path: String, pack: LoadedPack, reference: std.page.BlobRef, mut graph: PageGraph) -> Result[(), types.Failure] {
-    if pack.class != 1 {
+    let value = verified_blob_body(path, pack, reference)?
+    let loc = std.page.PagePtr(pack: reference.pack, offset: reference.offset, len: int.truncate(8 + reference.len), checksum: reference.checksum, stamp: reference.stamp)
+    if !mark_reached(mut graph.stamps, path, loc)? {
+        return Ok(())
+    }
+    graph_add(mut graph, loc.stamp, ReadBlob(take value))
+}
+
+pub fn verified_blob_body(path: String, pack: LoadedPack, reference: std.page.BlobRef) -> Result[Bytes, types.Failure] {
+    if pack.class != 1 && pack.class != 4 {
         return Error(format.disk_fault(path, reference.offset, Malformed))
     }
     let Some(frame) = map.get(pack.payloads, reference.offset) else {
@@ -455,12 +518,7 @@ pub fn resolve_blob_frame(path: String, pack: LoadedPack, reference: std.page.Bl
     if stamp != reference.stamp || std.check.xxh3(pack.raw, start, frame.end) != reference.checksum {
         return Error(format.disk_fault(path, reference.offset, Checksum))
     }
-    let loc = std.page.PagePtr(pack: reference.pack, offset: reference.offset, len: int.truncate(width), checksum: reference.checksum, stamp: reference.stamp)
-    if !mark_reached(mut graph.stamps, path, loc)? {
-        return Ok(())
-    }
-    let value = types.copied(list.slice(pack.raw, start, frame.end))?
-    graph_add(mut graph, loc.stamp, ReadBlob(take value))
+    types.copied(list.slice(pack.raw, start, frame.end))
 }
 
 // The packs the published generation lists below the cut's first new pack
@@ -517,7 +575,7 @@ pub fn validate_cold_root(inventory: RecoveryInventory, ptr: std.page.PagePtr) -
     Ok(())
 }
 
-fn resolve_data_page(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, settled: SettledPacks, ptr: std.page.PagePtr, domain: std.page.Domain, expected_level: Option[u8], collect_cold: bool, mut cold_roots: List[std.page.PagePtr], mut graph: PageGraph) -> Result[(), types.Failure] {
+fn resolve_data_page(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, settled: SettledPacks, ptr: std.page.PagePtr, domain: std.page.Domain, expected_level: Option[u8], collect_cold: bool, mut cold_roots: List[std.page.PagePtr], mut pending: List[std.page.BlobRef], mut graph: PageGraph) -> Result[(), types.Failure] {
     if ptr.stamp == 0 {
         return Ok(())
     }
@@ -575,15 +633,15 @@ fn resolve_data_page(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, 
                     list.push(mut kids, 0u64)
                 } else {
                     if height == 0 {
-                        resolve_data_page(packs, inventory, settled, child, Collection, None, collect_cold, mut cold_roots, mut graph)?
+                        resolve_data_page(packs, inventory, settled, child, Collection, None, collect_cold, mut cold_roots, mut pending, mut graph)?
                     } else {
-                        resolve_data_page(packs, inventory, settled, child, domain, Some(height - 1), collect_cold, mut cold_roots, mut graph)?
+                        resolve_data_page(packs, inventory, settled, child, domain, Some(height - 1), collect_cold, mut cold_roots, mut pending, mut graph)?
                     }
                     list.push(mut kids, child.stamp)
                 }
             },
             Some(BlobEdge(reference)) => {
-                resolve_blob(packs, inventory, settled, reference, mut graph)?
+                resolve_blob(packs, inventory, settled, reference, mut pending, mut graph)?
                 list.push(mut blobs, reference.stamp)
             },
             None => (),
@@ -592,12 +650,12 @@ fn resolve_data_page(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, 
     graph_add(mut graph, ptr.stamp, ReadPage(take image, take kids, take blobs))
 }
 
-pub fn resolve_data_roots(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, settled: SettledPacks, roots: pages.LocatedRoots, collect_cold: bool, mut cold_roots: List[std.page.PagePtr], mut graph: PageGraph) -> Result[(), types.Failure] {
-    resolve_data_page(packs, inventory, settled, roots.collections, CollectionMap, None, collect_cold, mut cold_roots, mut graph)?
-    resolve_data_page(packs, inventory, settled, roots.streams, Unprefixed, None, false, mut cold_roots, mut graph)?
-    resolve_data_page(packs, inventory, settled, roots.catalog, Unprefixed, None, false, mut cold_roots, mut graph)?
+pub fn resolve_data_roots(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, settled: SettledPacks, roots: pages.LocatedRoots, collect_cold: bool, mut cold_roots: List[std.page.PagePtr], mut pending: List[std.page.BlobRef], mut graph: PageGraph) -> Result[(), types.Failure] {
+    resolve_data_page(packs, inventory, settled, roots.collections, CollectionMap, None, collect_cold, mut cold_roots, mut pending, mut graph)?
+    resolve_data_page(packs, inventory, settled, roots.streams, Unprefixed, None, false, mut cold_roots, mut pending, mut graph)?
+    resolve_data_page(packs, inventory, settled, roots.catalog, Unprefixed, None, false, mut cold_roots, mut pending, mut graph)?
     for ptr in roots.keyed {
-        resolve_data_page(packs, inventory, settled, ptr, Unprefixed, None, false, mut cold_roots, mut graph)?
+        resolve_data_page(packs, inventory, settled, ptr, Unprefixed, None, false, mut cold_roots, mut pending, mut graph)?
     }
     Ok(())
 }

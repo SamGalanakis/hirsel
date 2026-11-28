@@ -62,6 +62,15 @@ fn tx_page_row[Event: inert + shareable + send](tx: TxState[Event], key: Bytes) 
     }
     if let Some(row) = pager.tiered_replayed_row(tree, key) {
         return Ok(match row.now {
+            ReplayDirect(place) => {
+                let Some(attempt) = tx.attempt else {
+                    return Error(Missed)
+                }
+                pager.tiered_seek(attempt, SeekKey(types.copied(list.slice(key, 4, list.len(key)))?))
+                let resident = pager.tiered_pinned_blob(attempt, tx.pins, format.direct_ref(place))?
+                pager.tiered_seek(attempt, SeekOperation)
+                Some(view resident)
+            },
             ReplayPut(value) => Some(view value),
             ReplayAbsent => None,
         })

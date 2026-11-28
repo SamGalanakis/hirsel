@@ -100,6 +100,7 @@ pub fn recovered_pack_inventory(locations: PageLocations, locator: Option[View[M
             continue
         }
         let object: Option[PackObjectRef] = match locator {
+            Some(_) if inventory.foreign != None => None,
             Some(remote) => {
                 let Some(item) = map.get(remote, seq) else {
                     fail("store: validated Bucket locator lost a Tiered pack")

@@ -11,9 +11,9 @@ pub fn journal_law_apply() -> bool {
         } else {
             9
         }
-        list.push(mut data, format.JournalOp(key: result.unwrap(failure_result_from_rep(types.copied(key))), value: Some(types.key_word(head * 10)), prior: prior, trim: None))
+        list.push(mut data, format.JournalOp(key: result.unwrap(failure_result_from_rep(types.copied(key))), value: Some(types.key_word(head * 10)), direct: None, prior: prior, trim: None))
         let mut streams: List[format.JournalOp] = list.new()
-        list.push(mut streams, format.JournalOp(key: result.unwrap(failure_result_from_rep(types.copied(string.as_bytes("stream")))), value: Some(types.key_word(head)), prior: 0, trim: None))
+        list.push(mut streams, format.JournalOp(key: result.unwrap(failure_result_from_rep(types.copied(string.as_bytes("stream")))), value: Some(types.key_word(head)), direct: None, prior: 0, trim: None))
         let commit = format.JournalCommit(branch: 0, version: head, at: 100 + head, data: take data, streams: take streams, keyed: list.new(), call: None, payload: 0)
         result.unwrap(journal_apply("j-7", mut replay, Commit(take commit)))
         if replay.state.tips[0].head != head || replay.state.tips[0].at != 100 + head {
@@ -51,7 +51,7 @@ pub fn journal_law_apply() -> bool {
     }
     let key = result.unwrap(failure_result_from_rep(catalog.logical_key(1, types.key_word(7))))
     let mut deletes: List[format.JournalOp] = list.new()
-    list.push(mut deletes, format.JournalOp(key: result.unwrap(failure_result_from_rep(types.copied(key))), value: None, prior: 9, trim: None))
+    list.push(mut deletes, format.JournalOp(key: result.unwrap(failure_result_from_rep(types.copied(key))), value: None, direct: None, prior: 9, trim: None))
     let removed = format.JournalCommit(branch: 0, version: 4, at: 104, data: take deletes, streams: list.new(), keyed: list.new(), call: None, payload: 0)
     result.unwrap(journal_apply("j-7", mut replay, Commit(take removed)))
     if page_row_count(replay.state.tips[0].roots.collections) != 0 || page_row_count(saved) != 1 || replay.state.tips[0].head != 4 || replay.state.tips[0].at != 104 {

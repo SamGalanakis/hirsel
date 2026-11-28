@@ -10,7 +10,7 @@ pub fn serve_tiered_miss_with(backend: pager.TieredPageBackend, packs: std.omap.
     let delivered = match backend {
         PagerTask(requests) => pager.tiered_point_delivery(requests, take demand)?,
         PagerDirect(d, owner) => {
-            let mut input: pager.TieredPagerInput = PagerLocal(d)
+            let mut input: pager.TieredPagerInput = PagerLocal(d, None)
             let mut local_cache = pager.new_tiered_cache(0)
             tiered_pager_point(mut input, mut local_cache, owner, demand)?
         },

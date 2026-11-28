@@ -80,6 +80,29 @@ pub fn finish_tiered_pack(take draft: TieredPackDraft) -> Result[(Bytes, pages.P
     }
     let mut raw = take bytes_out
     let index_offset = manifest.append_pack_index(mut raw, context, rows)?
-    let pack = pages.PagePack(class: class, frames: int.truncate(list.len(rows)), live: live_bytes, payload_bytes: list.len(raw), index: index_offset)
+    let pack = pages.PagePack(foreign: None, class: class, frames: int.truncate(list.len(rows)), live: live_bytes, payload_bytes: list.len(raw), index: index_offset)
     Ok((take raw, pack))
+}
+
+// Each op-4 introduction owns a whole immutable. Its index stores the
+// collection-prefixed chunk key used in the COMMIT.
+pub fn seal_direct_chunk(id: types.StoreKey, seq: u64, stamp: u64, epoch: u64, authority: u8, key: Bytes, body: Arc[Bytes]) -> Result[(format.DirectBlob, TieredCutPack), types.Failure] {
+    if seq == 0 || stamp == 0 || !format.direct_chunk_key(key) || list.len(body) <= 6 || list.len(body) > types.FORMAT_VALUE_MAX {
+        return Error(format.disk_fault("direct BLOB", 0, Malformed))
+    }
+    let mut draft = begin_tiered_pack(id, seq, 4, 0)?
+    if epoch != 0 {
+        list.clear(mut draft.raw)
+        types.capacity(format.history_append_header(mut draft.raw, draft.context, epoch, authority))?
+    }
+    let frame = manifest.PackFrame(stamp: stamp, size: 8 + list.len(body), body: BlobBody(arc.share(body)))
+    let collection: u32 = list.word_be(key, 0)
+    let Some(ptr) = add_tiered_pack_frame(mut draft, frame, collection, key, fn(_stamp: u64) -> std.page.PagePtr {
+        fail("store: a BLOB has no child locations")
+    })? else {
+        fail("store: a fresh pack accepts its first frame")
+    }
+    let (take wire, pack) = finish_tiered_pack(take draft)?
+    let place = format.DirectBlob(stamp: stamp, len: list.len(body), checksum: ptr.checksum, pack: seq, offset: ptr.offset, epoch: epoch, pack_len: list.len(wire), digest: std.check.xxh3(wire, 0, list.len(wire)))
+    Ok((place, TieredCutPack(seq: seq, wire: take wire, pack: pack)))
 }

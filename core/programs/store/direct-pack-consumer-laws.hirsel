@@ -1,0 +1,600 @@
+// These bytes form a journal-only chunk. The checked-in writer on the
+// integration parent writes inline puts, so construct the Format 15 wire.
+fn direct_law_pack(id: types.StoreKey, key: Bytes, pack: u64, stamp: u64, epoch: u64, stored: Bytes) -> Result[(format.DirectBlob, Bytes), Error] {
+    let ctx = format.DiskContext(store: id, role: 3, seq: pack)
+    let mut raw = failure_result_from_rep(types.capacity(format.disk_header_bytes(ctx, 0, 0)))?
+    if epoch != 0 {
+        list.clear(mut raw)
+        failure_result_from_rep(types.capacity(format.history_append_header(mut raw, ctx, epoch, 2)))?
+    }
+    let payload = failure_result_from_rep(pages.page_result(std.page.encode_blob(stamp, stored)))?
+    list.append(mut raw, failure_result_from_rep(types.capacity(format.disk_seal(ctx, 72, 0x0022, 1, payload)))?)
+    let ptr = std.page.BlobRef(stamp, len: list.len(stored), checksum: std.check.xxh3(stored, 0, list.len(stored)), pack, offset: 72, body: 0)
+    let mut rows: List[manifest.PackIndexRow] = list.with_capacity(1)
+    list.push(mut rows, manifest.blob_index_row(ptr, list.word_be(key, 0), clone(key)))
+    let _ = failure_result_from_rep(manifest.append_pack_index(mut raw, ctx, rows))?
+    let place = format.DirectBlob(stamp, len: ptr.len, checksum: ptr.checksum, pack, offset: 72, epoch, pack_len: list.len(raw), digest: std.check.xxh3(raw, 0, list.len(raw)))
+    Ok((place, take raw))
+}
+
+fn direct_law_commit(key: Bytes, place: format.DirectBlob, ver: u64, wall: u64, overwrite: bool) -> Result[Bytes, Error] {
+    let mut body: Bytes = list.with_capacity(256)
+    list.put_word_le(mut body, 0u32)
+    list.put_word_le(mut body, ver)
+    list.put_word_le(mut body, wall)
+    list.push(mut body, 1u8)
+    list.push(mut body, 0u8)
+    list.put_word_le(mut body, 1u32)
+    if overwrite {
+        list.push(mut body, 2u8)
+        failure_result_from_rep(types.capacity(format.blob(mut body, key)))?
+        let before: u32 = int.truncate(place.len + 1)
+        list.put_word_le(mut body, before)
+    } else {
+        failure_result_from_rep(types.capacity(format.encode_direct_op(mut body, key, 0, place)))?
+    }
+    Ok(take body)
+}
+
+@test
+fn test_la13_direct_journal_consumers(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = df_complete_expired_sim(tasks, c, 3469)
+    let checked = direct_directory_law(d, c, r, tasks, sim)
+    let _ = bucket_law_report(take sim)
+    checked
+}
+
+fn direct_directory_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let src = disk_test_directory(d)
+    let opts = archive_hold_options(true)
+    let mut db = open(tasks, src, c, r, opts)?
+    let mut schema = declare(db, Migrate)?
+    let blobs = declare_blobs(mut schema, "chunks", std.codec.key_u64(), BlobLimits(chunk: 1024, max: 4096))?
+    let _ = seal(mut db, take schema)?
+    let (id, collection) = blobs_identity(blobs)
+    let _ = bind_archive_hold(mut db, 42u64, Some(1048576u64))?
+    close(take db)?
+    let owner = store_key_to_rep(id)
+    let (_, _, take m) = failure_result_from_rep(capture.read_only_manifest(src))?
+    let seq = m.first_live
+    let v = m.branches[0].version
+    let wall = m.branches[0].at
+    let key = blob_chunk_key(collection, 1, 0, false)?
+    let bytes_in = blob_law_chunk(5, 1024)
+    let mut stored: Bytes = list.with_capacity(1030)
+    list.put_word_le(mut stored, 1u16)
+    list.put_word_le(mut stored, 1024u32)
+    list.append(mut stored, bytes_in)
+    let (place, take wire) = direct_law_pack(owner, key, m.next_pack, m.next_stamp, 0, stored)?
+    let pack = failure_result_from_rep(manifest.paged_pack_path(place.pack))?
+    let mut sink = arch_law_sink_client(sim, tasks, 701, "direct/")?
+    let due = std.object.deadline_after_ms(sink, DF_OP_MS)
+    let _ = failure_result_from_rep(history.archive_step_directory(r, src, owner, 42, false, mut sink, due))?
+    let (take base, base_etag) = preview_head(mut sink, id, due)?
+    let idx = failure_result_from_rep(history.archive_restore_index(mut sink, base, due))?
+    let floor = expiry_select(restore_base_rows(mut sink, base, idx, due)?, KeepFromBase(m.generation), None)?
+    let floor_head = expiry_candidate(base, floor)?
+    let prior_packs = expiry_verify_survivors(mut sink, floor_head, id, disk_test_directory(d), due)?
+    let ArchiveCasApplied(_) = failure_result_from_rep(history.archive_head_cas(mut sink, owner, Match(base_etag), floor_head, due))? else {
+        fail("expiry floor CAS failed before journal upload")
+    }
+    let plan = follower_law_plan(Directory, opts)
+    let service = follower_law_service(tasks, plan, 1)?
+    let mut ids = followers()
+    let mut f = follower(mut ids, follower_slot(follower_owner(service)?, plan)?, log_authority(src), c, Some(id))?
+    let branch_id = follower_main(f)
+    let old = snapshot_follower(f, branch_id)?
+    let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
+    let end_path = failure_result_from_rep(manifest.journal_path(seq, ".end"))?
+    let mut file = host.open(src, path, Read) ?=> Io
+    let mut log = failure_result_from_rep(manifest.read_disk_bytes(mut file, path, 0, 72))?
+    host.close(take file) ?=> Io
+    let _ = failure_result_from_rep(history.archive_put_journal_chunk(mut sink, owner, base.incarnation, seq, 0, clone(log), v, wall, due))?
+    let ctx = format.DiskContext(store: owner, role: 2, seq)
+    let intro = direct_law_commit(key, place, v + 1, wall, false)?
+    let intro_frame = failure_result_from_rep(types.capacity(format.disk_seal(ctx, list.len(log), 0x0011, 1, intro)))?
+    list.append(mut log, intro_frame)
+    failure_result_from_rep(manifest.disk_write_synced(src, path, log))?
+    failure_result_from_rep(manifest.disk_write_synced(src, end_path, journal_end_bytes(id, seq, list.len(log))))?
+    let forever = 18446744073709551615u64
+    if let Ok(_) = catch_up(mut f, forever) {
+        fail("follower accepted a withheld pack")
+    }
+    if applied(f, branch_id)?.version != v {
+        fail("a failed pack fetch moved the follower position")
+    }
+    let absent_target = disk_test_directory(d)
+    if let Ok(_) = offline_law_copy(src, absent_target, c) {
+        fail("stamped a backup without its pack")
+    }
+    if archive_hold_exists(absent_target, "EXPORT")? {
+        fail("failed backup published its stamp")
+    }
+    let _ = failure_result_from_rep(history.archive_step_directory(r, src, owner, 42, false, mut sink, due))?
+    let (take accepted, base_tag) = preview_head(mut sink, id, due)?
+    if option.unwrap(accepted.through).sub != 72 || option.unwrap(accepted.through).main_version != v {
+        fail("archive did not stop at the accepted shorter prefix")
+    }
+    failure_result_from_rep(manifest.disk_write_synced(src, pack, wire))?
+    let rel = format.archive_log_pack_rel(place.pack, place.digest)
+    let dst = format.archive_key(owner, base.incarnation, rel)
+    arch_law_put_garbage(mut sink, dst, 77, place.pack_len, DF_OP_MS)?
+    if let Ok(_) = history.archive_step_directory(r, src, owner, 42, false, mut sink, due) {
+        fail("archive advanced over divergent pack PUT")
+    }
+    let (_, still) = preview_head(mut sink, id, due)?
+    if still != base_tag {
+        fail("failed pack PUT changed archive-head")
+    }
+    std.object.erase(mut sink, dst, due) ?=> Remote
+    if catch_up(mut f, forever)?.version != v + 1 {
+        fail("verified pack did not advance follower")
+    }
+    let visible = snapshot_follower(f, branch_id)?
+    let handle = follower_reader(f, 0)?
+    let chunk_info = BlobInfo(upload: 1, size: 1024, chunk: 1024, chunks: 1, digest: list.new())
+    if blob_read(handle, old, blobs, chunk_info, 0)? != None || blob_read(handle, visible, blobs, chunk_info, 0)? != Some(clone(bytes_in)) {
+        fail("verified payload or previous follower snapshot changed")
+    }
+    let _ = failure_result_from_rep(history.archive_step_directory(r, src, owner, 42, false, mut sink, due))?
+    // Resume the eraser which observed this floor before the pack arrived.
+    if map.contains(prior_packs, rel) || place.pack != floor.frontier.next_pack {
+        fail("late eraser fixture did not introduce a pack at its old frontier")
+    }
+    let prefix_before_erase = expiry_push_namespace(mut sink, owner, base.incarnation)
+    let _ = expiry_erase(mut sink, base.source_kind, floor, prior_packs, due)?
+    let _ = std.object.set_prefix(mut sink, take prefix_before_erase)
+    if restore_archive_bytes(mut sink, dst, history.direct_history_ref(place), due)? != wire {
+        fail("delayed eraser damaged the newly archived journal pack")
+    }
+    let target = disk_test_directory(d)
+    let Ok(Some((stamp, _))) = offline_law_copy(src, target, c) else {
+        fail("complete journal-only backup refused")
+    }
+    if stamp.head != v + 1 || failure_result_from_rep(manifest.disk_read_file(target, pack, place.pack_len))? != wire {
+        fail("backup omitted the journal-only pack")
+    }
+    let deletion = direct_law_commit(key, place, v + 2, wall, true)?
+    let deletion_frame = failure_result_from_rep(types.capacity(format.disk_seal(ctx, list.len(log), 0x0011, 1, deletion)))?
+    list.append(mut log, deletion_frame)
+    failure_result_from_rep(manifest.disk_write_synced(src, path, log))?
+    failure_result_from_rep(manifest.disk_write_synced(src, end_path, journal_end_bytes(id, seq, list.len(log))))?
+    let _ = failure_result_from_rep(history.archive_step_directory(r, src, owner, 42, false, mut sink, due))?
+    let (take head, _) = preview_head(mut sink, id, due)?
+    let RestorePresent(interior) = plan_archive_restore(mut sink, id, Version(0, v + 1), DF_OP_MS)? else {
+        fail("missing interior version")
+    }
+    let private_dir = disk_test_directory(d)
+    let copied = match restore_copy_covered(mut sink, private_dir, interior, head, due) {
+        Ok(take exact) => take exact,
+        Error(Store(take e)) => return Error(take e),
+        Error(_) => fail("restore copy refused the interior version"),
+    }
+    let loaded = match open_copied(private_dir, c, copied.attempt, archive_hold_options(false), false) {
+        Ok(take img) => take img,
+        Error(Store(take e)) => return Error(take e),
+        Error(_) => fail("interior image could not reopen"),
+    }
+    if copied.head != v + 1 || blob_read(reader(loaded.db, 0)?, snapshot(loaded.db), blobs, chunk_info, 0)? != Some(clone(bytes_in)) {
+        fail("interior image contains the wrong version or chunk")
+    }
+    let scratch = disk_test_directory(d)
+    let held = expiry_verify_survivors(mut sink, head, id, scratch, due)?
+    if !map.contains(held, rel) {
+        fail("expiry forgot an overwritten journal-only reference")
+    }
+    std.object.erase(mut sink, dst, due) ?=> Remote
+    if let Ok(_) = archive_expire(mut sink, id, KeepFromBase(m.generation), None, None, scratch, DF_OP_MS) {
+        fail("expiry accepted damage to a promised pack")
+    }
+    let next_path = failure_result_from_rep(manifest.journal_path(seq + 1, ""))?
+    let successor = failure_result_from_rep(types.capacity(format.disk_header_bytes(format.DiskContext(store: owner, role: 2, seq: seq + 1), list.len(log), 0)))?
+    failure_result_from_rep(manifest.disk_write_synced(src, next_path, successor))?
+    let current = failure_result_from_rep(manifest.read_page_manifest_bytes(src))?
+    let budget = list.len(current) + list.len(log) + list.len(journal_end_bytes(id, seq, list.len(log))) + place.pack_len
+    for slack in[0u64, 1u64] {
+        let hold = manifest.recovered_archive_hold(42, Some(budget - slack), seq, list.new())
+        let cut_plan = failure_result_from_rep(manifest.plan_directory_archive_cut(src, owner, hold, None, m.generation, seq, seq + 1, seq + 1, None, list.new(), map.new(), list.len(current)))?
+        if map.contains(cut_plan.protected_packs, place.pack) != (slack == 0) || cut_plan.released_unarchived != (slack != 0) {
+            fail("wrong direct pack receipt budget")
+        }
+    }
+    let _ = failure_result_from_rep(manifest.disk_remove_optional(src, pack))?
+    match manifest.retained_segment_packs(src, owner, seq, seq + 1) {
+        Error(Corrupt(fault)) if fault.file == pack => {
+            if let Absent = fault.why {} else {
+                fail("wrong retained pack fault")
+            }
+        },
+        _ => fail("missing retained pack lost its corruption witness"),
+    }
+    let _ = failure_result_from_rep(manifest.disk_remove_optional(src, path))?
+    let (_, before_gap) = preview_head(mut sink, id, due)?
+    match history.archive_step_directory(r, src, owner, 42, false, mut sink, due) {
+        Error(Lost) => (),
+        _ => fail("budget gap masked a promised missing pack"),
+    }
+    let (_, after_gap) = preview_head(mut sink, id, due)?
+    if before_gap != after_gap {
+        fail("damaged promise changed the head")
+    }
+    let ro = match open_copied(target, c, stamp.attempt, archive_hold_options(false), false) {
+        Ok(take restored) => take restored,
+        Error(Store(take e)) => return Error(take e),
+        Error(_) => fail("could not reopen stamped backup"),
+    }
+    if blob_read(reader(ro.db, 0)?, snapshot(ro.db), blobs, chunk_info, 0)? != Some(clone(bytes_in)) {
+        fail("backup depended on source pack")
+    }
+    close_follower_service(take service)
+}
+
+@test
+fn test_la13_bucket_stamp_rebase(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(1)), bucket_law_options(false))
+    bucket_law_admitted(bound bytes bucket_law_fixture_bytes(plan, 1) {
+        let sim = df_complete_expired_sim(tasks, c, 3471)
+        let checked = direct_bucket_law(d, sim, r, tasks)
+        let _ = bucket_law_report(take sim)
+        checked
+    }, "direct pack fixture")
+}
+
+fn direct_bucket_law(d: Dir, sim: BucketSim, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let client = bucket_law_client_lanes(sim, tasks, "spare.test", 402, true, 1)?
+    let auth = object_authority(take client, "bucket", BUCKET_LAW_OP_MS)
+    let mut db = match open_authority(tasks, take auth, sim.time, r, bucket_law_options(true)) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take problem, ..)) => return Error(take problem),
+    }
+    let mut schema = declare(db, Migrate)?
+    let blobs = declare_blobs(mut schema, "chunks", std.codec.key_u64(), BlobLimits(chunk: 128, max: 4096))?
+    let _ = seal(mut db, take schema)?
+    let _ = checkpoint(mut db)?
+    let (id, collection) = blobs_identity(blobs)
+    close(take db)?
+    let mut writer = replication_writer(tasks, r, sim, 403, Some(id))?
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(1)), bucket_law_options(false))
+    let service = bucket_law_start_followers(tasks, plan, 1, "direct pack follower")
+    let mut ids = followers()
+    let mut f = replication_open_follower(mut ids, tasks, follower_owner(service)?, plan, sim, "spare.test", 404, id, BUCKET_LAW_OP_MS)?
+    let branch_id = follower_main(f)
+    let v = applied(f, branch_id)?.version
+    let at = f.capture.state.tips[0].at
+    let h = history.register_head(writer.register)
+    let mut ordinary: Bytes = list.with_capacity(64)
+    list.put_word_le(mut ordinary, 0u32)
+    list.put_word_le(mut ordinary, v + 1)
+    list.put_word_le(mut ordinary, at)
+    list.push(mut ordinary, 1u8)
+    list.push(mut ordinary, 1u8)
+    list.put_word_le(mut ordinary, 1u32)
+    replication_stream_row(mut ordinary, 1, 47)
+    direct_law_advance(mut writer, ordinary)?
+    let forever = 18446744073709551615u64
+    let _ = catch_up(mut f, forever)?
+    let before = snapshot_follower(f, branch_id)?
+    let collision = std.page.stamp(std.page.image_of(before.roots.streams.root))
+    let key = blob_chunk_key(collection, 1, 0, false)?
+    let stored = option.unwrap(std.hex.decode(b"010003000000616263"))
+    let (place, take object) = failure_result_from_rep(pager.seal_direct_chunk(h.store, 109, collision, h.pair.epoch, h.authority_kind, key, arc.new(clone(stored))))?
+    direct_law_advance(mut writer, direct_law_commit(key, place, v + 2, at, false)?)?
+    if let Ok(_) = catch_up(mut f, forever) {
+        fail("Bucket follower passed a withheld pack")
+    }
+    if applied(f, branch_id)?.version != v + 1 {
+        fail("Bucket follower position changed")
+    }
+    let name = failure_result_from_rep(history.history_read_key("p-", history.direct_history_ref(place)))?
+    let due = std.object.deadline_after_ms(writer.source.client, BUCKET_LAW_OP_MS)
+    let (take stored_pack, _) = std.object.store_if(mut writer.source.client, name, Absent, clone(object.wire), due)
+    let Applied(_) = (take stored_pack) ?=> Remote else {
+        fail("pack already existed")
+    }
+    if catch_up(mut f, forever)?.version != v + 2 {
+        fail("Bucket follower failed to catch up")
+    }
+    let after = snapshot_follower(f, branch_id)?
+    if std.page.stamp(std.page.image_of(after.roots.streams.root)) == collision || std.page.stamp(std.page.image_of(before.roots.streams.root)) != collision {
+        fail("fixed stamp aliased a replayed page")
+    }
+    let view_handle = follower_reader(f, 0)?
+    let chunk = BlobInfo(upload: 1, size: 3, chunk: 128, chunks: 1, digest: list.new())
+    if blob_read(view_handle, before, blobs, chunk, 0)? != None || blob_read(view_handle, after, blobs, chunk, 0)? != Some(b"abc") {
+        fail("rebased capture did not preserve both snapshots")
+    }
+    let reopened = replication_writer(tasks, r, sim, 405, Some(id))?
+    if reopened.replay.state.tips[0].head != v + 2 || std.page.stamp(std.page.image_of(reopened.replay.state.tips[0].roots.streams.root)) == collision {
+        fail("claim catch-up reused the fixed stamp")
+    }
+    close_follower_service(take service)?
+    let (tx, rx): (Sender[history.ArchiveFetchReq], Receiver[history.ArchiveFetchReq]) = channel.new(1)
+    let fetcher = task.spawn(tasks, bytes 12582912, (sim.endpoint, sim.time, tasks, take rx), direct_law_fetcher)
+    let mut claimant = take reopened
+    let checked = direct_bucket_archive_law(d, sim, r, tasks, mut claimant, blobs, channel.sender(tx), v + 2, at)
+    drop(take tx)
+    result.unwrap(task.join(take fetcher))?
+    checked
+}
+
+fn direct_law_advance(mut writer: ReplicationWriter, body: Bytes) -> Result[(), Error] waits {
+    let head = history.register_head(writer.register)
+    let ctx = format.DiskContext(store: head.store, role: 2, seq: head.entry.seq + 1)
+    failure_result_from_rep(history.history_packet_header(mut writer.buffers.packet, ctx, head.pair.epoch, head.authority_kind, head.entry))?
+    list.append(mut writer.buffers.packet, failure_result_from_rep(types.capacity(format.disk_seal(ctx, 112, 0x0011, 1, body)))?)
+    let due = std.object.deadline_after_ms(writer.source.client, BUCKET_LAW_OP_MS)
+    let HistoryApplied(_) = failure_result_from_rep(history.history_register_advance(mut writer.source.client, mut writer.register, writer.authority, mut writer.buffers, due))? else {
+        return Error(Undecided)
+    }
+    Ok(())
+}
+
+fn direct_law_fetcher(take input: (std.sim.s3.Endpoint, Clock, Tasks, Receiver[history.ArchiveFetchReq])) -> Result[(), Error] waits {
+    let (endpoint, time, tasks, take rx) = take input
+    let mut client = df_client_host(endpoint, time, tasks, "spare.test", 406, "", 1)?
+    while let Ok(take req) = channel.receive(rx) {
+        history.archive_serve_fetch(mut client, take req)
+    }
+    Ok(())
+}
+
+fn direct_bucket_archive_law(d: Dir, sim: BucketSim, r: Random, tasks: Tasks, mut writer: ReplicationWriter, blobs: Blobs[u64], source: Sender[history.ArchiveFetchReq], ver: u64, wall: u64) -> Result[(), Error] waits {
+    let start = history.register_head(writer.register)
+    let (id, collection) = blobs_identity(blobs)
+    let mut sink = arch_law_sink_client(sim, tasks, 407, "group-archive/")?
+    let due = std.object.deadline_after_ms(sink, BUCKET_LAW_OP_MS)
+    loop {
+        let advanced = failure_result_from_rep(history.archive_step_objects(r, channel.sender(source), start.store, 42, start.pair.epoch, false, mut sink, due))?
+        if !advanced.advanced {
+            break
+        }
+    }
+    let (take initial, tag) = preview_head(mut sink, id, due)?
+    let key = blob_chunk_key(collection, 2, 0, false)?
+    let body = option.unwrap(std.hex.decode(b"01000300000078797a"))
+    let (place, take packed) = failure_result_from_rep(pager.seal_direct_chunk(start.store, 110, writer.replay.next_node + 1, start.pair.epoch, start.authority_kind, key, arc.new(clone(body))))?
+    let ctx = format.DiskContext(store: start.store, role: 2, seq: start.entry.seq + 1)
+    failure_result_from_rep(history.history_packet_header(mut writer.buffers.packet, ctx, start.pair.epoch, start.authority_kind, start.entry))?
+    for remove in[false, true] {
+        let frame = direct_law_commit(key, place, if remove {
+            ver + 2
+        } else {
+            ver + 1
+        }, wall, remove)?
+        let sealed = failure_result_from_rep(types.capacity(format.disk_seal(ctx, list.len(writer.buffers.packet), 0x0011, 1, frame)))?
+        list.append(mut writer.buffers.packet, sealed)
+    }
+    let HistoryApplied(_) = failure_result_from_rep(history.history_register_advance(mut writer.source.client, mut writer.register, writer.authority, mut writer.buffers, due))? else {
+        return Error(Undecided)
+    }
+    if let Ok(_) = history.archive_step_objects(r, channel.sender(source), start.store, 42, start.pair.epoch, false, mut sink, due) {
+        fail("promised a GROUP whose overwritten direct pack was missing")
+    }
+    let (_, unchanged) = preview_head(mut sink, id, due)?
+    if unchanged != tag {
+        fail("missing overwritten pack moved Bucket archive head")
+    }
+    let name = failure_result_from_rep(history.history_read_key("p-", history.direct_history_ref(place)))?
+    let (take packed_put, _) = std.object.store_if(mut writer.source.client, name, Absent, clone(packed.wire), due)
+    let Applied(_) = (take packed_put) ?=> Remote else {
+        fail("duplicate pack")
+    }
+    let newest = history.register_head(writer.register).entry
+    let mut seen: Map[String, ()] = map.new()
+    let held = failure_result_from_rep(history.retained_entry_names(mut writer.source.client, start.store, newest, start.entry, map.new(), mut seen, due))?
+    if held != newest.len + place.pack_len || !map.contains(seen, name) {
+        fail("GROUP receipt missed its overwritten pack")
+    }
+    let shared = failure_result_from_rep(history.retained_entry_names(mut writer.source.client, start.store, newest, start.entry, map.new(), mut seen, due))?
+    if shared != 0 {
+        fail("GROUP receipt double-charged a shared key")
+    }
+    let _ = failure_result_from_rep(history.archive_step_objects(r, channel.sender(source), start.store, 42, start.pair.epoch, false, mut sink, due))?
+    let (take head, _) = preview_head(mut sink, id, due)?
+    if head.incarnation != initial.incarnation || option.unwrap(head.through).main_version != ver + 2 {
+        fail("archive missed the GROUP end")
+    }
+    let RestorePresent(point) = plan_archive_restore(mut sink, id, Version(0, ver + 1), BUCKET_LAW_OP_MS)? else {
+        fail("missing interior GROUP frame")
+    }
+    let work = disk_test_directory(d)
+    let copied = match restore_copy_covered(mut sink, work, point, head, due) {
+        Ok(take exact) => take exact,
+        Error(Store(take e)) => return Error(take e),
+        Error(_) => fail("Bucket interior restore copy failed"),
+    }
+    let loaded = match open_copied(work, sim.time, copied.attempt, opts_for_archive_child(), false) {
+        Ok(take img) => take img,
+        Error(Store(take e)) => return Error(take e),
+        Error(_) => fail("Bucket interior restore reopen failed"),
+    }
+    let chunk = BlobInfo(upload: 2, size: 3, chunk: 128, chunks: 1, digest: list.new())
+    if copied.head != ver + 1 || blob_read(reader(loaded.db, 0)?, snapshot(loaded.db), blobs, chunk, 0)? != Some(b"xyz") {
+        fail("Bucket interior restore lost the original chunk")
+    }
+    // The object exists and every byte matches its advertised digest, but
+    // its HEADER names a different authority than the introducing GROUP.
+    let (wrong, take other_pack) = failure_result_from_rep(pager.seal_direct_chunk(start.store, 111, place.stamp + 1, start.pair.epoch, 3u8 - start.authority_kind, key, arc.new(clone(body))))?
+    let foreign_name = failure_result_from_rep(history.history_read_key("p-", history.direct_history_ref(wrong)))?
+    let (take stored, _) = std.object.store_if(mut writer.source.client, foreign_name, Absent, clone(other_pack.wire), due)
+    let Applied(_) = (take stored) ?=> Remote else {
+        fail("foreign authority fixture already existed")
+    }
+    direct_law_advance(mut writer, direct_law_commit(key, wrong, ver + 3, wall, false)?)?
+    match history.archive_step_objects(r, channel.sender(source), start.store, 42, start.pair.epoch, false, mut sink, due) {
+        Error(Corrupt(types.FaultRep(why: Header, ..))) => (),
+        Error(take e) => return Error(failure_from_rep(take e)),
+        Ok(_) => fail("archive accepted a pack sealed by another authority"),
+    }
+    let (take refused, _) = preview_head(mut sink, id, due)?
+    if refused.rev != head.rev {
+        fail("wrong authority changed archive-head")
+    }
+    Ok(())
+}
+
+@test
+fn test_la13_attached_direct(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = df_complete_expired_sim(tasks, c, 3472)
+    let checked = direct_attached_law(sim, r, tasks)
+    let _ = bucket_law_report(take sim)
+    checked
+}
+
+fn direct_attached_law(sim: BucketSim, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let prefix = "direct-place/"
+    let mut svc = df_start_service_host(sim, tasks, r, "spare.test", 501, df_sid_a(), 2, 0, DF_OP_MS)?
+    let mut db = df_open_attached_host(sim, tasks, r, mut svc, "spare.test", 502, prefix, true)?
+    let mut schema = declare(db, Migrate)?
+    let blobs = declare_blobs(mut schema, "chunks", std.codec.key_u64(), BlobLimits(chunk: 128, max: 4096))?
+    let _ = seal(mut db, take schema)?
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(2)), bucket_law_options(false))
+    let service = bucket_law_start_followers(tasks, plan, 1, "attached direct follower")
+    let mut ids = followers()
+    let mut f = df_open_follower(sim, tasks, mut ids, follower_owner(service)?, plan, "spare.test", 503, prefix)?
+    let _ = blob_law_begin(mut db, blobs)?
+    let submitted = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
+    durable(mut db, submitted)?
+    let forever = 18446744073709551615u64
+    let current = (catch_up(mut f, forever)?).version
+    let before = snapshot_follower(f, follower_main(f))?
+    let (id, collection) = blobs_identity(blobs)
+    let key = blob_chunk_key(collection, 1, 0, false)?
+    let collision = std.page.stamp(std.page.image_of(before.roots.collections.root))
+    let (h, _) = df_head_attach_live(sim, tasks, "spare.test", 504, prefix)?
+    let bytes_in = option.unwrap(std.hex.decode(b"010003000000313233"))
+    let (place, take packed) = failure_result_from_rep(pager.seal_direct_chunk(h.store, 130, collision, h.pair.epoch, h.authority_kind, key, arc.new(clone(bytes_in))))?
+    let body = direct_law_commit(key, place, current + 1, f.capture.state.tips[0].at, false)?
+    let frame = failure_result_from_rep(types.capacity(format.disk_seal(format.DiskContext(store: h.store, role: 2, seq: 1), 72, 0x0011, 1, body)))?
+    db.frame_seq += 1
+    handoff(mut db, Some(Detached(take frame)))?
+    let sent = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
+    durable(mut db, sent)?
+    match catch_up(mut f, forever) {
+        Error(Corrupt(Fault(why: Absent, ..))) => (),
+        Error(take other) => return Error(take other),
+        Ok(_) => fail("attached follower advanced past missing Place pack"),
+    }
+    if applied(f, follower_main(f))?.version != current {
+        fail("failed live batch changed follower position")
+    }
+    let mut place_client = df_client_host(sim.endpoint, sim.time, tasks, "spare.test", 505, prefix, 1)?
+    let name = failure_result_from_rep(history.history_read_key("p-", history.direct_history_ref(place)))?
+    let due = std.object.deadline_after_ms(place_client, DF_OP_MS)
+    let (take added, _) = std.object.store_if(mut place_client, name, Absent, clone(packed.wire), due)
+    let Applied(_) = (take added) ?=> Remote else {
+        fail("attached pack already existed")
+    }
+    if (catch_up(mut f, forever)?).version != current + 1 {
+        fail("attached follower missed completed pack")
+    }
+    let chunk = BlobInfo(upload: 1, size: 3, chunk: 128, chunks: 1, digest: list.new())
+    let handle = follower_reader(f, 0)?
+    if blob_read(handle, before, blobs, chunk, 0)? != None || blob_read(handle, snapshot_follower(f, follower_main(f))?, blobs, chunk, 0)? != Some(b"123") {
+        fail("attached follower read wrong Place bytes")
+    }
+    let _ = take db
+    let mut next_svc = df_start_service_host(sim, tasks, r, "s3.test", 506, df_sid_b(), 2, 0, DF_OP_MS)?
+    let claimed = df_open_attached_host(sim, tasks, r, mut next_svc, "s3.test", 507, prefix, false)?
+    let claimed_snapshot = snapshot(claimed)
+    let Some(inventory) = view claimed_snapshot.roots.collections.paging else {
+        fail("claim omitted the sealed tail pack from its snapshot")
+    }
+    let Some(claimed_row) = std.omap.get(inventory.packs, place.pack) else {
+        fail("claim lost the live-to-sealed pack at cutoff")
+    }
+    let Some(original) = claimed_row.object else {
+        fail("sealed tail pack has no Bucket identity")
+    }
+    if !history.history_ref_matches(original, history.direct_history_ref(place)) || manifest.pack_allocation_next(disk_state(claimed).packs) <= place.pack {
+        fail("claim changed the accepted tail coordinates")
+    }
+    if claimed.store != id || version(claimed_snapshot) != current + 1 || blob_read(reader(claimed, 0)?, claimed_snapshot, blobs, chunk, 0)? != Some(b"123") {
+        fail("attached claim lost journal-only chunk")
+    }
+    let _ = take claimed
+    close_follower_service(take service)?
+    close_journal_service(take svc)?
+    close_journal_service(take next_svc)
+}
+
+@test
+fn test_la13_backup_pack_window(d: Dir) -> Result[(), Error] waits {
+    let src = disk_test_directory(d)
+    let target = disk_test_directory(d)
+    let owner = types.StoreKey(hi: 3469, lo: 15)
+    let key = blob_chunk_key(1, 1, 0, false)?
+    let (fixed, take raw) = direct_law_pack(owner, key, 1, 7, 0, blob_law_chunk(12, 524288))?
+    let path = failure_result_from_rep(manifest.paged_pack_path(1))?
+    failure_result_from_rep(manifest.disk_write_synced(src, path, raw))?
+    let checked = bound bytes 262144u64 {
+        manifest.read_directory_direct(src, owner, fixed, Some(target), false, None)
+    } ?=> |problem| Full(Allocation(problem))
+    let _ = failure_result_from_rep(take checked)?
+    if failure_result_from_rep(manifest.disk_read_file(target, path, fixed.pack_len))? != raw {
+        fail("backup pack differs from journal introduction")
+    }
+    Ok(())
+}
+
+@test
+fn test_la13_claim_adopts_journal_packs(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 346905, None, list.new())
+    let mut db = open_authority(tasks, bucket_law_authority(sim, tasks, "s3.test", 551)?, sim.time, r, bucket_law_options(true)) ?=> |denied| clone(denied.error)
+    let mut schema = declare(db, Migrate)?
+    let files = declare_blobs(mut schema, "claim-chunks", std.codec.key_u64(), BlobLimits(chunk: 1024, max: 4096))?
+    let _ = seal(mut db, take schema)?
+    let upload = blob_law_begin(mut db, files)?
+    let first = manifest.pack_allocation_next(disk_state(db).packs)
+    let _ = blob_law_append(mut db, files, upload, 0, 1, 1024)?
+    let value = blob_law_attach(mut db, files, 10, upload)?
+    let stale = blob_law_begin(mut db, files)?
+    let _ = blob_law_append(mut db, files, stale, 0, 1, 1024)?
+    let _ = blob_law_attach(mut db, files, 11, stale)?
+    let _ = blob_law_erase(mut db, files, 11)?
+    let _ = blob_law_sweep(mut db, files, 18446744073709551615u64, 20)?
+    let submitted = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
+    durable(mut db, submitted)?
+    close(take db)?
+    let mut owner = open_authority(tasks, bucket_law_authority(sim, tasks, "s3.test", 552)?, sim.time, r, bucket_law_options(false)) ?=> |denied| clone(denied.error)
+    let held = snapshot(owner)
+    let Some(inventory) = view held.roots.collections.paging else {
+        fail("claim snapshot has no direct pack inventory")
+    }
+    let Some(row) = std.omap.get(inventory.packs, first) else {
+        fail("claim snapshot lost original pack")
+    }
+    let Some(original) = row.object else {
+        fail("claim snapshot lost original object")
+    }
+    if original.seq != first || original.epoch != 1 || row.inventory.class != 4 || manifest.pack_allocation_next(disk_state(owner).packs) != first + 2 {
+        fail("claim failed to reserve the complete journal pack frontier")
+    }
+    {
+        let suffix = manifest.direct_packs(disk_state(owner).packs)
+        if let None = manifest.disk_index_get(suffix.rows, first + 1) {
+            fail("claim omitted erased journal introduction")
+        }
+    }
+    let cut = checkpoint(mut owner)?
+    durable(mut owner, cut)?
+    {
+        let packs = manifest.pack_locations(disk_state(owner).packs).packs
+        let Some(adopted) = manifest.disk_index_get(packs, first) else {
+            fail("claim cut omitted live original pack")
+        }
+        if adopted.class != 4 || adopted.frames != 1 || adopted.live != 1038 {
+            fail("claim cut changed chunk extent")
+        }
+        if let Some(_) = manifest.disk_index_get(packs, first + 1) {
+            fail("claim cut adopted erased chunk")
+        }
+    }
+    blob_law_reads(reader(owner, 0)?, held, files, value, blob_law_widths(1, 1024, 0))?
+    close(take owner)?
+    let reopened = open_authority(tasks, bucket_law_authority(sim, tasks, "s3.test", 553)?, sim.time, r, bucket_law_options(false)) ?=> |denied| clone(denied.error)
+    blob_law_reads(reader(reopened, 0)?, snapshot(reopened), files, value, blob_law_widths(1, 1024, 0))?
+    close(take reopened)?
+    let _ = bucket_law_report(take sim)
+    Ok(())
+}

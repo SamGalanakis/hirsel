@@ -125,6 +125,7 @@ pub fn descriptor_kind_byte(kind: std.page_descriptor.CollectionKind) -> u8 {
         IndexCollection => 2,
         CellCollection => 3,
         LogCollection => 4,
+        BlobsCollection => 5,
     }
 }
 
@@ -496,6 +497,35 @@ pub fn put_page_row(mut tree: PageTree, key: Bytes, value: Bytes, private_from: 
     }))
 }
 
+pub fn blob_row_prior(tree: PageTree, key: Bytes) -> u32 {
+    let Some(root) = std.page.collection_child(tree.root, list.slice(key, 0, 4)) else {
+        return 0
+    }
+    blob_leaf_prior(root, list.slice(key, 4, list.len(key)))
+}
+
+fn blob_leaf_prior(page: Arc[std.page.Page], key: Bytes) -> u32 {
+    let image = std.page.image_of(page)
+    if let Some(slot) = std.page.descend(image, key) {
+        return blob_leaf_prior(option.unwrap(std.page.child(page, slot)), key)
+    }
+    let (slot, hit) = std.page.search(image, key)
+    if hit {
+        std.page.slot_prior(image, slot)
+    } else {
+        0
+    }
+}
+
+pub fn put_direct_page_row(mut tree: PageTree, key: Bytes, place: format.DirectBlob, resident: Option[Arc[Bytes]], private_from: u64, mut ids: u64) -> Result[(), types.Failure] {
+    let suffix = list.slice(key, 4, list.len(key))
+    page_result(std.page.edit_collection(mut tree.root, list.slice(key, 0, 4), private_from, mut ids, scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
+        std.page.insert_blob_ref(mut root, suffix, format.direct_ref(place), resident, private_from, mut stamps, fn(_ptr: std.page.PagePtr) -> Result[Arc[std.page.Page], std.page.Error] {
+            return Error(MalformedPage)
+        })
+    }))
+}
+
 pub fn put_shared_page_row(mut tree: PageTree, key: Bytes, value: Arc[Bytes], private_from: u64, mut ids: u64) -> Result[(), types.Failure] {
     if tree_domain(tree) != CollectionMap {
         return page_result(std.page.insert_shared(mut tree.root, key, value, tree.inline, private_from, mut ids))
@@ -515,9 +545,13 @@ pub fn remove_page_row(mut tree: PageTree, key: Bytes, private_from: u64, mut id
     if tree_domain(tree) != CollectionMap {
         return page_result(std.page.remove(mut tree.root, key, private_from, mut ids))
     }
-    let present = match get_page_row(tree, key) {
-        Some(_) => true,
-        None => false
+    let present = if collection_kind(tree, list.slice(key, 0, 4)) == Some(BlobsCollection) {
+        blob_row_prior(tree, key) != 0
+    } else {
+        match get_page_row(tree, key) {
+            Some(_) => true,
+            None => false
+        }
     }
     if !present {
         return Ok(false)
@@ -641,6 +675,8 @@ pub fn open_page_collection(mut rows: PageRange, key: Bytes, root: Arc[std.page.
 // append whose full encoded key is not above the preceding one.
 const DATA_ROWS_UNORDERED: u64 = 1u64 << 63
 
+const DATA_ROWS_CHUNKS: u64 = 1u64 << 62
+
 pub type DataRows: shareable + send {
     count_word: u64,
     first: Inline[format.DataOp, 2],
@@ -656,7 +692,15 @@ pub fn new_data_rows() -> DataRows {
 }
 
 pub fn data_row_count(rows: DataRows) -> u64 {
-    rows.count_word & (DATA_ROWS_UNORDERED - 1)
+    rows.count_word & (DATA_ROWS_CHUNKS - 1)
+}
+
+pub fn draft_has_chunks(rows: DataRows) -> bool {
+    rows.count_word & DATA_ROWS_CHUNKS != 0
+}
+
+pub fn mark_chunk_rows(mut rows: DataRows) {
+    rows.count_word = rows.count_word | DATA_ROWS_CHUNKS
 }
 
 pub fn rows_ascending(rows: DataRows) -> bool {

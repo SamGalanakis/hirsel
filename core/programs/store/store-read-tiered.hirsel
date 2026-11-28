@@ -20,9 +20,15 @@ pub fn read_tiered_point_with[R](take backend: pager.TieredPageBackend, packs: s
         }
     }
     if let Some(row) = pager.tiered_replayed_row(tree, logical) {
+        if let ReplayDirect(place) = view row.now {
+            return retry_tiered_read_with(take backend, packs, next_stamp, deadline, root_grant, root, logical, None, TieredPoint, scoped fn(attempt: core.Cell[pager.TieredTouchSet], visible: Map[pager.TieredCacheKey, Arc[format.TieredFrame]]) -> Result[R, types.Failure] {
+                let resident = pager.tiered_pinned_blob(attempt, visible, format.direct_ref(place))?
+                decode_row(Some(view resident))
+            })
+        }
         let stored: Option[View[Bytes]] = match row.now {
             ReplayPut(value) => Some(view value),
-            ReplayAbsent => None,
+            _ => None,
         }
         return decode_row(stored)
     }

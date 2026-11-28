@@ -67,7 +67,7 @@ pub fn plan_bucket_restore(mut source: RestoreSource, mut destination: std.objec
 }
 
 pub fn published_bucket_restore(mut dst: std.object.Client, token: RestoreToken, branch_id: u32, selected_version: u64, at: u64, attempt: Inline[u8, 16], op_ms: u64) -> Result[Option[StoreId], Error] waits {
-    let expected = manifest.RestoreOrigin(parent: store_key_to_rep(token.parent), binding_id: token.binding_id, branch: branch_id, version: selected_version, at, boundary: token.boundary, attempt, capture_attempt: token.capture_attempt)
+    let expected = manifest.RestoreOrigin(parent: store_key_to_rep(token.parent), binding_id: token.binding_id, branch: branch_id, version: selected_version, at, boundary: token.boundary, attempt, capture_attempt: token.capture_attempt, intent: Successor)
     let due = std.object.deadline_after_ms(dst, op_ms)
     let found = restore_bucket_published(mut dst, expected, false, due)?
     match found {

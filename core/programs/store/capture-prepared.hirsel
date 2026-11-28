@@ -245,7 +245,7 @@ fn capture_segment_bounds(s: CaptureSelection, c: Clock, mut segments: List[Prep
         manifest.disk_io(host.sync(mut segments[tail].file))?
         let size = manifest.disk_io(host.stat_file(mut segments[tail].file))?.size
         let mut ignored = ()
-        let (end, _) = capture_scan_frames(mut segments[tail].file, s.id, seq, s.manifest.limits, durable_end, size, true, SkipPayload, mut ignored, fn(mut _state: (), _path: String, _at: u64, _kind: u16, _payload: Bytes) -> Result[(), types.Failure] {
+        let (end, _) = capture_scan_frames(mut segments[tail].file, s.id, seq, s.manifest.limits, durable_end, size, true, SkipPayload, None, mut ignored, fn(mut _state: (), _path: String, _at: u64, _kind: u16, _payload: Bytes) -> Result[(), types.Failure] {
             Ok(())
         })?
         manifest.disk_io(host.unlock(mut segments[tail].file))?
@@ -328,7 +328,7 @@ fn capture_locked_bounds(s: CaptureSelection, c: Clock, mut segments: List[Prepa
     }
     let size = manifest.disk_io(host.stat_file(mut segments[tail].file))?.size
     let mut ignored = ()
-    let (end, _) = capture_scan_frames(mut segments[tail].file, s.id, seq, s.manifest.limits, durable_end, size, true, SkipPayload, mut ignored, fn(mut _state: (), _path: String, _at: u64, _kind: u16, _payload: Bytes) -> Result[(), types.Failure] {
+    let (end, _) = capture_scan_frames(mut segments[tail].file, s.id, seq, s.manifest.limits, durable_end, size, true, SkipPayload, None, mut ignored, fn(mut _state: (), _path: String, _at: u64, _kind: u16, _payload: Bytes) -> Result[(), types.Failure] {
         Ok(())
     })?
     segments[tail].end = end
@@ -383,10 +383,10 @@ pub fn prepared_terminal(p: PreparedState) -> Option[(u64, u64)] {
     Some((terminal.seq, terminal.end))
 }
 
-pub fn scan_prepared_segment[S](mut p: PreparedState, slot: u64, keep: CapturePayload, mut state: S, consume: scoped[view] fn(mut S, String, u64, u16, Bytes) -> Result[(), types.Failure]) -> Result[(u64, u64), types.Failure] waits {
+pub fn scan_prepared_segment[S](mut p: PreparedState, slot: u64, keep: CapturePayload, mut state: S, consume: scoped[view] fn(mut S, String, u64, u16, Bytes) -> Result[(), types.Failure] waits) -> Result[(u64, u64), types.Failure] waits {
     let seq = p.segments[slot].seq
     let limit = p.segments[slot].end
     let start = p.segments[slot].start
-    let (end, frames) = capture_scan_frames(mut p.segments[slot].file, p.id, seq, p.manifest.limits, limit, limit, false, keep, mut state, consume)?
+    let (end, frames) = capture_scan_frames(mut p.segments[slot].file, p.id, seq, p.manifest.limits, limit, limit, false, keep, None, mut state, consume)?
     Ok((end - start, frames))
 }

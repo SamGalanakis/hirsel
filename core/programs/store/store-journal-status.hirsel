@@ -302,7 +302,7 @@ fn open_directory(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options, c
     }
     failure_result_from_rep(object_writer.open_checks(options.group_commits, options.group_bytes, optional_limits_to_rep(options.limits), options.checkpoint_bytes, options.journal_limit))?
     let session = disk_session(d, c, r, options)?
-    open_started(tasks, d, c, options, cadence_spec, take session)
+    open_started(tasks, d, c, r, options, cadence_spec, take session, None)
 }
 
 fn journal_poison(db: Db) -> Option[IoError] {

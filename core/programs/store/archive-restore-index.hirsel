@@ -1,7 +1,7 @@
 // Read the linked pages in reverse publication order. Consumers retain the
 // compact references and fetch individual pages in source order as needed.
-pub fn archive_index_page(mut sink: std.object.Client, store: types.StoreKey, kind: u8, ref: format.ArchiveIndexRefRep, deadline: u64) -> Result[format.ArchiveIndexSegmentRep, types.Failure] waits {
-    let key = format.archive_key(store, format.archive_index_rel(ref.ordinal, ref.digest))
+pub fn archive_index_page(mut sink: std.object.Client, store: types.StoreKey, inc: Inline[u8, 16], kind: u8, ref: format.ArchiveIndexRefRep, deadline: u64) -> Result[format.ArchiveIndexSegmentRep, types.Failure] waits {
+    let key = format.archive_key(store, inc, format.archive_index_rel(ref.ordinal, ref.digest))
     if ref.len > format.ARCHIVE_INDEX_LIMIT || ref.len < 88 || ref.ordinal == 0 {
         return Error(format.disk_fault(key, 0, Malformed))
     }
@@ -76,7 +76,7 @@ pub fn archive_restore_index(mut sink: std.object.Client, head: format.ArchiveHe
     restore_append_intervals(mut intervals, head.intervals, floor, head.source_kind)?
     let mut cursor = tail
     loop {
-        let page = archive_index_page(mut sink, head.store, head.source_kind, cursor, deadline)?
+        let page = archive_index_page(mut sink, head.store, head.incarnation, head.source_kind, cursor, deadline)?
         restore_append_intervals(mut intervals, page.spilled_intervals, floor, head.source_kind)?
         types.capacity(list.try_reserve(mut result_pages, 1))?
         list.push(mut result_pages, cursor)

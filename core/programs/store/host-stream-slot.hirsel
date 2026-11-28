@@ -441,6 +441,10 @@ pub fn slot_max_rows(link: SlotLink) -> u64 {
     link.max_rows
 }
 
+pub fn slot_commit_batches(link: SlotLink) -> View[List[u64]] in link {
+    view link.commit_batches
+}
+
 pub fn slot_last_batch(link: SlotLink) -> u64 {
     link.last_batch_seq
 }

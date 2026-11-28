@@ -105,3 +105,38 @@ fn prepare_page_cut[T](base: manifest.PageLocations, mut next_stamp: u64, attemp
         failure_result_to_rep(attempt(marks, relocated, mut stamp))
     }))
 }
+
+fn disk_wait_cut(db: Db, generation: u64) -> Result[(), Error] {
+    healthy(db)?
+    if db.accounting.checkpointed < generation {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+fn disk_rotate(mut db: Db, id: StoreId, seq: u64, previous: u64) -> Result[(), Error] waits {
+    let c = db.clock
+    let closed = match db.disk {
+        Some(mut storage) => match storage.backend {
+            DirBackend(mut directory) => failure_result_from_rep(journal.rotate(mut directory, c, store_key_to_rep(id), seq, previous))?,
+            ObjectBackend(_) => return Error(Unsupported(1)),
+        },
+        None => return Error(Foreign),
+    }
+    if closed {
+        // The task sends Broken before ending. Preserve that first error.
+        loop {
+            let ack = journal_receive(db);
+            journal_ack(mut db, take ack)?
+        }
+    }
+    journal_poll(mut db)
+}
+
+fn cut_page_base(db: Db, holders: List[manifest.HeldPage], staged: pager.TieredCutStage) -> Result[manifest.PageRetryBase, Error] {
+    let emitted_blobs = failure_result_from_rep(pager.emitted_blob_packs(staged))?
+    let mut base = failure_result_from_rep(manifest.direct_page_retry_base(disk_state(db).packs, holders, staged.roots, emitted_blobs))?
+    failure_result_from_rep(manifest.adopt_direct_packs(mut base.locations, manifest.direct_packs(disk_state(db).packs), staged.direct))?
+    failure_result_from_rep(pager.list_tiered_cut(mut base.locations, staged))?
+    Ok(take base)
+}

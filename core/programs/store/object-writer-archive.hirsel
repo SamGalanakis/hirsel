@@ -95,7 +95,7 @@ fn checkpoint_additional_closure(mut client: std.object.Client, head: history.Hi
 // archive network I/O — uses only stable source metadata + last witnessed
 // `archived_through`). Keeps at least the ordinary `retain - 1` checkpoints,
 // plus unarchived earlier checkpoints that fit inside `hold_bytes` (up to 254).
-pub fn archive_retain_for_cut(mut lane: ObjectJournalSession, previous: history.HistoryMark, prior: pages.HistoryRef, current_seq: u64, retain: u8, binding_id: u64, hold_bytes: u64, hold_bytes_explicit: bool, witnessed_through: u64, deadline: u64) -> Result[history.HistoryRetention, types.Failure] waits {
+pub fn archive_retain_for_cut_with_live(mut lane: ObjectJournalSession, previous: history.HistoryMark, prior: pages.HistoryRef, current_seq: u64, retain: u8, binding_id: u64, hold_bytes: u64, hold_bytes_explicit: bool, witnessed_through: u64, ordinary_keys: Map[String, ()], deadline: u64) -> Result[history.HistoryRetention, types.Failure] waits {
     let ordinary = history_retain(previous, prior, current_seq, retain)?
     if binding_id == 0 {
         return Ok(take ordinary)
@@ -120,16 +120,16 @@ pub fn archive_retain_for_cut(mut lane: ObjectJournalSession, previous: history.
         67108864u64
     }
     // Build the ordinary live key set (from `prior` and any other ordinary retained).
-    let mut live_keys: Map[String, ()] = map.new()
+    let mut live_keys: Map[String, ()] = clone(ordinary_keys)
     for i in total - ordinary_count .. total {
         let cp = all_candidates[i]
-        let mut scratch_seen: Map[String, ()] = map.new()
-        if let Ok((_, ks)) = checkpoint_additional_closure(mut lane.client, head, cp, map.new(), mut scratch_seen, deadline) {
-            for k in ks {
-                let _ = map.try_reserve(mut live_keys, 1)
-                map.insert(mut live_keys, string.from(k), ())
-            }
-        }
+        let _ = checkpoint_additional_closure(mut lane.client, head, cp, map.new(), mut live_keys, deadline)?
+    }
+    let mut newest = head.entry
+    if ordinary_count != 0 {
+        let first = all_candidates[total - ordinary_count]
+        let _ = history.retained_entry_names(mut lane.client, head.store, newest, first, map.new(), mut live_keys, deadline)?
+        newest = first
     }
     // Walk older unarchived candidates from newest to oldest, admitting while
     // cumulative deduplicated additional bytes <= budget (at most 254 total).
@@ -155,8 +155,10 @@ pub fn archive_retain_for_cut(mut lane: ObjectJournalSession, previous: history.
             Ok((bytes_add, _)) => bytes_add,
             Error(_) => break,
         }
-        let candidate_total = int.saturating_add(used_bytes, added)
+        let group_bytes = history.retained_entry_names(mut lane.client, head.store, newest, cp, live_keys, mut trial_seen, deadline)?
+        let candidate_total = int.saturating_add(used_bytes, int.saturating_add(added, group_bytes))
         if candidate_total <= budget {
+            newest = cp
             used_bytes = candidate_total
             seen_extra = take trial_seen
             types.capacity(list.try_reserve(mut extra_rev, 1))?

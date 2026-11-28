@@ -48,6 +48,8 @@ fn tx_tiered_stage_rows(tree: pages.PageTree, rows: pages.DataRows, only: Option
             continue
         }
         let value: Option[Arc[Bytes]] = match op.value {
+            Some(PendingChunk(raw)) => Some(arc.share(raw)),
+            Some(SealedChunk(chunk)) => Some(arc.share(chunk.stored)),
             Some(PageValue(raw)) => Some(arc.new(types.copied(raw)?)),
             Some(BlobBody(raw)) => Some(arc.share(raw)),
             None => None,

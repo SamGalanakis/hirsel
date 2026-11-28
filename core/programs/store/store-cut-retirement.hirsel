@@ -1,14 +1,38 @@
 // The cut's retirements: which removed packs leave now, which a lease
 // carries to a later cut, and the generation's new pack state.
 pub fn cut_retirement(layout: manifest.PagedCutLayout, holders: List[manifest.HeldPage], lease: Option[Arc[manifest.ExportLease]], scrubs: List[Arc[manifest.ScrubLease]], compaction: pager.TieredCompaction, range_lease: Option[(u64, u64)], first: u64, end: u64) -> Result[(manifest.PackDiskState, pager.TieredCompaction, DiskRemovals), types.Failure] {
-    cut_retirement_with_holds(layout, holders, lease, scrubs, compaction, range_lease, None, first, end)
+    cut_retirement_with_holds(layout, holders, lease, scrubs, compaction, range_lease, None, None, first, end)
 }
 
-pub fn cut_retirement_with_holds(layout: manifest.PagedCutLayout, holders: List[manifest.HeldPage], lease: Option[Arc[manifest.ExportLease]], scrubs: List[Arc[manifest.ScrubLease]], compaction: pager.TieredCompaction, range_lease: Option[(u64, u64)], archive_packs: Option[View[Map[u64, ()]]], first: u64, end: u64) -> Result[(manifest.PackDiskState, pager.TieredCompaction, DiskRemovals), types.Failure] {
+pub fn cut_retirement_with_holds(layout: manifest.PagedCutLayout, holders: List[manifest.HeldPage], lease: Option[Arc[manifest.ExportLease]], scrubs: List[Arc[manifest.ScrubLease]], compaction: pager.TieredCompaction, range_lease: Option[(u64, u64)], archive_packs: Option[View[Map[u64, ()]]], introduced: Option[View[manifest.DirectPacks]], first: u64, end: u64) -> Result[(manifest.PackDiskState, pager.TieredCompaction, DiskRemovals), types.Failure] {
     let mut locations = manifest.share_page_locations(layout.locations)
     let mut packs: List[u64] = list.new()
     let mut carried: List[u64] = list.new()
-    for seq in layout.lists.removals {
+    let mut retired: List[u64] = clone(layout.lists.removals)
+    if let Some(direct) = introduced {
+        let mut cursor = std.omap.range(direct.rows.values, Unbounded, Unbounded)
+        while let Some((seq, row)) = std.omap.next(mut cursor) {
+            if row.pack.inventory.foreign != None {
+                continue
+            }
+            if let Some(_) = manifest.disk_index_get(layout.locations.packs, seq) {
+                continue
+            }
+            if let Error(_) = list.binary_search(layout.lists.removals, seq) {
+                types.capacity(list.try_reserve(mut retired, 1))?
+                list.push(mut retired, seq)
+            }
+        }
+    }
+    for seq in retired {
+        let foreign = match manifest.disk_index_get(locations.packs, seq) {
+            Some(record) => record.foreign != None,
+            None => false,
+        }
+        if foreign {
+            let _ = types.capacity(manifest.disk_index_remove(mut locations.packs, seq, manifest.pack_edge_charge))?
+            continue
+        }
         let archive_held = match archive_packs {
             Some(held) => map.contains(held, seq),
             None => false,

@@ -1,0 +1,209 @@
+fn capture_directory_event(dir: Dir, id: StoreId, deadline: Option[(Clock, u64)], take event: format.JournalEvent) -> Result[format.JournalEvent, Error] waits {
+    match take event {
+        Commit(take captured) => {
+            let mut commit = take captured
+            for i in 0u64 .. list.len(commit.data) {
+                let fixed: Option[Arc[format.DirectBlob]] = clone(commit.data[i].direct)
+                if let Some(d) = fixed {
+                    commit.data[i].value = Some(failure_result_from_rep(manifest.read_directory_direct(dir, store_key_to_rep(id), d, None, true, deadline))?)
+                }
+            }
+            Ok(Commit(take commit))
+        },
+        take other => Ok(take other),
+    }
+}
+
+fn capture_fixed_stamps(id: StoreId, mut segments: List[journal.CaptureSegment], torn_tail: bool, limits: types.LimitsRep, deadline: Option[(Clock, u64)]) -> Result[u64, Error] waits {
+    let mut high = 0u64
+    for i in 0u64 .. list.len(segments) {
+        failure_result_from_rep(format.check_journal_deadline(deadline))?
+        let durable_end = match segments[i].boundary {
+            Some(n) => n,
+            None => 72u64,
+        }
+        let torn = torn_tail && i + 1 == list.len(segments)
+        let end = if torn {
+            failure_result_from_rep(manifest.disk_io(host.stat_file(mut segments[i].file)))?.size
+        } else {
+            durable_end
+        }
+        let (fixed, _) = direct_segment_frontier(mut segments[i].file, id, segments[i].seq, limits, durable_end, end, torn, deadline)?
+        high = order.max(high, fixed)
+    }
+    Ok(high)
+}
+
+// All expected failures of I/O and verification propagate unchanged. Only
+// the opener which owns the changed reservation restarts its private replay.
+fn capture_object_event(mut client: std.object.Client, prefix: String, id: types.StoreKey, authority: u8, epoch: u64, deadline: u64, take event: format.JournalEvent, domain: core.Cell[u64], mut replay: pager.JournalReplay) -> Result[format.JournalEvent, Error] waits {
+    match take event {
+        Commit(take captured) => {
+            let mut commit = take captured
+            let mut high = 0u64
+            let mut collision = false
+            for op in commit.data {
+                if let Some(place) = view op.direct {
+                    high = order.max(high, place.stamp)
+                    if place.stamp > cell.get(domain) && place.stamp <= replay.next_node {
+                        collision = true
+                    }
+                }
+            }
+            if collision {
+                cell.set(domain, high)
+                return Error(Changed("direct BLOB stamp"))
+            }
+            replay.next_node = order.max(replay.next_node, high)
+            let mut introductions: List[Arc[format.DirectBlob]] = list.new()
+            for i in 0u64 .. list.len(commit.data) {
+                let fixed: Option[Arc[format.DirectBlob]] = clone(commit.data[i].direct)
+                if let Some(place) = fixed {
+                    let ref = history.direct_history_ref(place)
+                    let rel = failure_result_from_rep(history.history_read_key("p-", ref))?
+                    let path = host_stream.stream_key(prefix, rel)
+                    let raw = failure_result_from_rep(history.history_read_object(mut client, path, ref, deadline))?
+                    let frame = failure_result_from_rep(history.verify_group_pack(path, id, place, raw, authority, epoch))?
+                    commit.data[i].value = Some(failure_result_from_rep(types.copied(list.slice(raw, frame.payload + 8, frame.end)))?)
+                    if let Some(_) = view replay.claim_packs {
+                        failure_result_from_rep(types.capacity(list.try_reserve(mut introductions, 1)))?
+                        list.push(mut introductions, arc.share(place))
+                    }
+                }
+            }
+            if list.len(introductions) != 0 {
+                if let Some(mut claim) = replay.claim_packs {
+                    failure_result_from_rep(manifest.seed_direct_packs(mut claim.disk, introductions))?
+                }
+            }
+            Ok(Commit(take commit))
+        },
+        take other => Ok(take other),
+    }
+}
+
+/// Captures an existing Directory store. The clock drives the terminal
+/// segment fence wait if a dead writer still has a write in flight.
+pub fn open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Error] waits {
+    if let Bucket(_) = options.authority {
+        return Error(Unsupported(1))
+    }
+    failure_result_from_rep(object_writer.open_checks(options.group_commits, options.group_bytes, optional_limits_to_rep(options.limits), options.checkpoint_bytes, options.journal_limit))?
+    let mut restarted = false
+    loop {
+        let (take raw, store, take page_record) = failure_result_from_rep(capture.read_only_manifest(d))?
+        let id = store_key_from_rep(store)
+        failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(options.expect), store_key_to_rep(id)))?
+        failure_result_from_rep(types.check_limits(optional_limits_to_rep(options.limits), page_record.limits))?
+        let candidate = failure_result_from_rep(journal.capture_walk(d, store_key_to_rep(id), page_record.first_live, restarted))?
+        let Some(take selected) = take candidate else {
+            restarted = true
+            continue
+        }
+        let mut walk = take selected
+        failure_result_from_rep(journal.capture_fence(d, c, 18446744073709551615u64, mut walk))?
+        failure_result_from_rep(manifest.disk_io(host.sync_dir(d)))?
+        if failure_result_from_rep(manifest.read_page_manifest_bytes(d))? != raw {
+            restarted = false
+            continue
+        }
+        let mut initial = read_only_checkpoint(d, id, take page_record)?
+        initial.immutable = true
+        let captured = capture_scan(d, id, None, take walk, take initial)
+        if failure_result_from_rep(manifest.read_page_manifest_bytes(d))? != raw {
+            restarted = false
+            continue
+        }
+        let replay = (take captured)?
+        failure_result_from_rep(catalog.over_ceiling(failure_result_from_rep(journal.journal_account(replay))?, options.resident_limit))?
+        let inner = failure_result_from_rep(read.read_only_state(store, replay))?
+        return Ok(ReadOnly(inner: take inner))
+    }
+}
+
+fn direct_segment_frontier(mut file: HostFile, id: StoreId, seq: u64, limits: types.LimitsRep, durable_end: u64, end: u64, torn: bool, deadline: Option[(Clock, u64)]) -> Result[(u64, u64), Error] waits {
+    let mut high = (0u64, 0u64)
+    let _ = failure_result_from_rep(capture.capture_scan_frames(mut file, store_key_to_rep(id), seq, limits, durable_end, end, torn, KeepCommit, deadline, mut high, scoped fn(mut water: (u64, u64), path: String, _at: u64, _kind: u16, raw: Bytes) -> Result[(), types.Failure] {
+        format.check_journal_deadline(deadline)?
+        let mut ops = format.capture_data_ops(path, raw)?
+        while let Some(op) = format.capture_next_op(path, raw, limits.value, mut ops)? {
+            if let CaptureDirect(_, _, _, place) = op {
+                water = (order.max(water.0, place.stamp), order.max(water.1, place.pack))
+            }
+        }
+        Ok(())
+    }))?
+    Ok(high)
+}
+
+fn export_direct_frontier(d: Dir, id: StoreId, first: u64, terminal: u64, limit: u64, limits: types.LimitsRep) -> Result[(u64, u64), Error] waits {
+    let mut high = (0u64, 0u64)
+    let mut seq = first
+    loop {
+        let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
+        let end = if seq == terminal {
+            limit
+        } else {
+            let Some(header) = failure_result_from_rep(manifest.journal_header(d, store_key_to_rep(id), seq + 1, None))? else {
+                return Error(failure_from_rep(format.disk_fault(path, 0, Header)))
+            }
+            header.prev_end
+        }
+        let mut file = host.open(d, path, Read) ?=> Io
+        let (fixed, pack) = direct_segment_frontier(mut file, id, seq, limits, end, end, false, None)?
+        host.close(take file) ?=> Io
+        high = (order.max(high.0, fixed), order.max(high.1, pack))
+        if seq == terminal {
+            return Ok(high)
+        }
+        seq += 1
+    }
+}
+
+fn seed_claim_snapshots(replay: pager.JournalReplay, mut state: pages.State, mut tiered: pager.DiskPagerState) -> Result[(), Error] {
+    let Some(claim) = view replay.claim_packs else {
+        return Ok(())
+    }
+    seed_direct_snapshots(claim.disk, claim.checkpoint, claim.generation, replay.next_node, mut state, mut tiered)
+}
+
+fn seed_direct_snapshots(disk: manifest.PackDiskState, checkpoint_inventory: Option[Arc[pages.TieredReadInventory]], generation: u64, next_node: u64, mut state: pages.State, mut tiered: pager.DiskPagerState) -> Result[(), Error] {
+    let direct = manifest.direct_packs(disk)
+    if std.omap.len(direct.rows.values) == 0 {
+        return Ok(())
+    }
+    let mut packs = match view checkpoint_inventory {
+        Some(base) => std.omap.snapshot(base.packs),
+        None => std.omap.new(),
+    }
+    let mut ids = 0u64
+    let mut rows = std.omap.range(direct.rows.values, Unbounded, Unbounded)
+    while let Some((seq, row)) = std.omap.next(mut rows) {
+        let (take revised, _) = std.omap.insert_owned(mut ids, take packs, seq, clone(row.pack))
+        packs = take revised
+    }
+    let lease = arc.new(pages.TieredReadInventory(packs: take packs, generation, next_stamp: failure_result_from_rep(catalog.stamp_after(next_node))?))
+    failure_result_from_rep(pager.reserve_direct_lease(mut tiered))?
+    pager.hold_direct_lease(mut tiered, lease)
+    for i in 0u64 .. list.len(state.tips) {
+        if pages.needs_read_inventory(state.tips[i].roots.collections.root, scoped fn(seq: u64) -> bool {
+            if let Some(row) = std.omap.get(lease.packs, seq) {
+                return row.inventory.class == 4
+            }
+            false
+        }) {
+            state.tips[i].roots.collections.paging = Some(arc.share(lease))
+        }
+    }
+    for i in 0u64 .. list.len(state.pins) {
+        if pages.needs_read_inventory(state.pins[i].roots.collections.root, scoped fn(seq: u64) -> bool {
+            if let Some(row) = std.omap.get(lease.packs, seq) {
+                return row.inventory.class == 4
+            }
+            false
+        }) {
+            state.pins[i].roots.collections.paging = Some(arc.share(lease))
+        }
+    }
+    Ok(())
+}

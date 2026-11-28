@@ -1,0 +1,72 @@
+// The capture decoder retains only offsets into a checksummed frame.
+pub type CaptureOp = CapturePut(u64, u64, u64, u64) | CaptureDirect(u64, u64, u64, DirectBlob) | CaptureDelete(u64, u64, u64) | CaptureTrim(u32, u64, u64)
+
+pub type CaptureOps {
+    at: u64,
+    left: u64,
+    identities: Option[DirectIdentities]
+}
+
+pub fn capture_data_ops(path: String, raw: Bytes) -> Result[CaptureOps, types.Failure] {
+    let mut at = 20u64
+    let sections = disk_number(path, raw, mut at, 1)?
+    if sections == 0 || sections > 4 {
+        return Error(disk_fault(path, at, Malformed))
+    }
+    let tag = disk_number(path, raw, mut at, 1)?
+    if tag > 3 {
+        return Error(disk_fault(path, at, Malformed))
+    }
+    let op_count = if tag == 0 {
+        disk_count(path, raw, mut at, 9)?
+    } else {
+        0u64
+    }
+    Ok(CaptureOps(at: at, left: op_count, identities: None))
+}
+
+pub fn capture_blob_width(path: String, raw: Bytes, mut at: u64, limit: u64) -> Result[u64, types.Failure] {
+    let size = disk_number(path, raw, mut at, 4)?
+    if size > limit || size > list.len(raw) - at {
+        return Error(disk_fault(path, at, Malformed))
+    }
+    Ok(size)
+}
+
+pub fn capture_next_op(path: String, raw: Bytes, value_limit: u64, mut ops: CaptureOps) -> Result[Option[CaptureOp], types.Failure] {
+    if ops.left == 0 {
+        return Ok(None)
+    }
+    ops.left -= 1
+    let kind = disk_number(path, raw, mut ops.at, 1)?
+    if kind == 3 {
+        let at = ops.at
+        if list.len(raw) - at < 20 {
+            return Error(disk_fault(path, at, Malformed))
+        }
+        let id: u32 = list.word_be(raw, at)
+        ops.at += 20
+        return Ok(Some(CaptureTrim(id, word_be(raw, at + 4), word_be(raw, at + 12))))
+    }
+    if kind != 1 && kind != 2 && kind != 4 {
+        return Error(disk_fault(path, ops.at - 1, Malformed))
+    }
+    let key_len = capture_blob_width(path, raw, mut ops.at, 4096)?
+    let key_at = ops.at
+    ops.at += key_len
+    let prior = disk_number(path, raw, mut ops.at, 4)?
+    if key_len < 4 || prior > types.FORMAT_VALUE_MAX + 1 {
+        return Error(disk_fault(path, key_at, Malformed))
+    }
+    if kind == 2 {
+        return Ok(Some(CaptureDelete(key_at, key_len, prior)))
+    }
+    if kind == 4 {
+        let direct = decode_direct_blob(path, raw, mut ops.at, list.slice(raw, key_at, key_at + key_len), value_limit)?
+        record_direct_identity(path, key_at, mut ops.identities, direct)?
+        return Ok(Some(CaptureDirect(key_at, key_len, prior, direct)))
+    }
+    let value_len = capture_blob_width(path, raw, mut ops.at, value_limit)?
+    ops.at += value_len
+    Ok(Some(CapturePut(key_at, key_len, value_len, prior)))
+}

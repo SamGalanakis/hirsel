@@ -297,6 +297,9 @@ fn fold_ops(mut ops: pages.DataOps, below: List[Arc[pages.Staged]], streams: boo
     for (id, state) in logs {
         map.insert(mut ops.logs, id, state)
     }
+    if pages.draft_has_chunks(rows) {
+        pages.mark_chunk_rows(mut ops.rows)
+    }
     let staged = pages.data_row_count(rows)
     let pages.DataRows(first: take first, rest: take rest, ..) = take rows
     let mut head = take first
@@ -439,6 +442,36 @@ pub fn apply_put[Event: inert + shareable + send](mut tx: TxState[Event], take p
         tx.frame_tail = slot_order
     }
     tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), charge)
+    tx.wrote = true
+    Ok(())
+}
+
+pub fn stage_chunk[Event: inert + shareable + send](mut tx: TxState[Event], take key: Bytes, schema: u16, chunk: Bytes, tail: bool) -> Result[(), types.Failure] {
+    let Some(current) = tx.frame_bytes else {
+        fail("store: direct chunk requires a journal")
+    }
+    let len = list.len(chunk)
+    if 6 + len > tx.limits.value {
+        return Error(Limit(Value))
+    }
+    let frame = indexes.price_data_edit(tx.ops, tx.below, tx.extra_bytes, key, current, types.transaction_limit(tx.limits), 9 + list.len(key) + format.DIRECT_BLOB_BYTES)?
+    let mut stored: Bytes = list.new()
+    types.capacity(list.try_reserve(mut stored, 6 + len))?
+    list.put_word_le(mut stored, schema)
+    let width: u32 = int.truncate(len)
+    list.put_word_le(mut stored, width)
+    list.append(mut stored, chunk)
+    let charge = memory_data_charge(tx, key, stored)
+    let (old_charge, height, prior) = put_charge(mut tx, key)?
+    let _ = reserve_ids(mut tx, height)?
+    let (slot, replaced) = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take key, Some(PendingChunk(arc.new(take stored))), prior)
+    pages.mark_chunk_rows(mut tx.ops.rows)
+    mark_tx_view_slot(tx.view_tree, list.len(tx.below), replaced)
+    if tail {
+        tx.frame_tail = slot
+    }
+    tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), charge)
+    tx.frame_bytes = frame
     tx.wrote = true
     Ok(())
 }

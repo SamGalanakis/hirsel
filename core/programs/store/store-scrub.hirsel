@@ -4,10 +4,12 @@
 // The packs a tour may still read. The Db keeps one share; the tour keeps the
 // other. A cut that finds its share unique drops it: the tour has ended.
 pub type ScrubLease: shareable + send {
+    objects: std.omap.OMap[u64, pages.TieredPagerPack],
     packs: List[u64]
 }
 
 pub type ScrubPack: send {
+    object: Option[pages.HistoryRef],
     seq: u64,
     class: u8,
     frames: u64,

@@ -22,7 +22,12 @@ pub fn rebuild_page_store(take validated: manifest.ValidatedPageManifest, locato
         if allow_tiered {
             let mut paging: Option[Arc[pages.TieredReadInventory]] = None
             for slot in 0u64 .. list.len(all) {
-                if pages.tiered_collections(all[slot].collections.root) {
+                if pages.needs_read_inventory(all[slot].collections.root, scoped fn(seq: u64) -> bool {
+                    if let Some(row) = manifest.disk_index_get(locations.packs, seq) {
+                        return row.class == 4
+                    }
+                    false
+                }) {
                     if let None = paging {
                         paging = Some(recovered_tiered_inventory(locations, locator, page_record.generation, page_record.next_stamp)?)
                     }

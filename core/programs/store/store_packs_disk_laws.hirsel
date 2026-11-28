@@ -74,7 +74,7 @@ fn check_paged_generation(d: Dir) -> Result[(), Error] waits {
     publish_page_manifest(directory, id, page_record, None, mut buffers.out)?
     // Both pack vectors were assembled independently from AP3, AP14 and
     // the frame checksum binding. The persisted account is one 78-byte row.
-    if failure_result_from_rep(manifest.disk_read_paged_file(directory, "p-1", 121))? != manifest.page_data_pack_vector() || failure_result_from_rep(manifest.disk_read_paged_file(directory, "p-2", 156))? != page_list_pack_vector() {
+    if failure_result_from_rep(manifest.disk_read_paged_file(directory, "p-1", 121))? != manifest.page_data_pack_vector() || failure_result_from_rep(manifest.disk_read_paged_file(directory, "p-2", 157))? != page_list_pack_vector() {
         return Error(Foreign)
     }
     if !law_generation_locations(layout.locations) {
@@ -138,7 +138,7 @@ fn check_pack_membership_selection() -> Result[(), Error] {
             47 => (0u64, 8u64),
             _ => (8u64, 8u64),
         }
-        failure_result_from_rep(types.capacity(manifest.disk_index_put(mut installed.packs, seq, pages.PagePack(class: class, frames: int.truncate(frames), live: 16 * live_bytes, payload_bytes: 16 * frames, index: 0), manifest.pack_edge_charge)))?
+        failure_result_from_rep(types.capacity(manifest.disk_index_put(mut installed.packs, seq, pages.PagePack(foreign: None, class: class, frames: int.truncate(frames), live: 16 * live_bytes, payload_bytes: 16 * frames, index: 0), manifest.pack_edge_charge)))?
         for slot in 0u64 .. live_bytes {
             let stamp = law_pack_stamp(seed, seq, slot)
             let ptr = std.page.PagePtr(pack: seq, offset: 72 + 32 * slot, len: 16, checksum: stamp, stamp: stamp)

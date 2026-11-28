@@ -165,6 +165,17 @@ pub fn read_page_list[S](mut source: S, id: types.StoreKey, manifest: PageManife
                 }
                 types.capacity(map.try_reserve(mut lists.packs, 1))?
                 let pack = pack_record(path, ptr.offset, raw)?
+                if let Some(ref) = pack.foreign {
+                    let Some(origin) = manifest.origin else {
+                        return Error(format.disk_fault(path, ptr.offset, Malformed))
+                    }
+                    let Preview(incarnation, _) = origin.intent else {
+                        return Error(format.disk_fault(path, ptr.offset, Malformed))
+                    }
+                    if ref.parent != origin.parent || ref.incarnation != incarnation || (origin.boundary.source_kind == format.ARCHIVE_SOURCE_LOG && ref.epoch != 0) {
+                        return Error(format.disk_fault(path, ptr.offset, Malformed))
+                    }
+                }
                 if !lists.allow_tiered && pack.class >= 3 {
                     return Error(Unsupported(0x0023))
                 }

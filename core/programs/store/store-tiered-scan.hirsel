@@ -98,16 +98,17 @@ pub fn tiered_ahead_siblings(page: Arc[std.page.Page], selected: u64, window: u6
     found
 }
 
-fn tiered_scan_overlay(edits: Arc[pages.ReplayOverlay], low: Bytes, high: Bytes, reverse: bool) -> Option[(Bytes, Arc[Bytes])] {
+fn tiered_scan_overlay(edits: Arc[pages.ReplayOverlay], low: Bytes, high: Bytes, reverse: bool) -> Option[(Bytes, pages.ReplayValue)] {
     let mut cursor = if reverse {
         std.omap.range_reverse(edits.entries, Included(clone(low)), Excluded(clone(high)))
     } else {
         std.omap.range(edits.entries, Included(clone(low)), Excluded(clone(high)))
     }
     while let Some((key, row)) = std.omap.next(mut cursor) {
-        if let ReplayPut(stored) = view row.now {
-            return Some((clone(key), arc.share(stored)))
+        if let ReplayAbsent = view row.now {
+            continue
         }
+        return Some((clone(key), clone(row.now)))
     }
     None
 }
@@ -165,7 +166,14 @@ pub fn tiered_scan_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCa
         let value = tiered_point_value(attempt, visible, row.page, row.slot)?
         return Ok(Some((take logical, take value)))
     }
-    Ok(take staged)
+    match take staged {
+        Some((take key, ReplayPut(take stored))) => Ok(Some((take key, take stored))),
+        Some((take key, ReplayDirect(place))) => {
+            let stored = tiered_pinned_blob(attempt, visible, format.direct_ref(place))?
+            Ok(Some((take key, arc.share(stored))))
+        },
+        _ => Ok(None),
+    }
 }
 
 pub fn tiered_snapshot_primary(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[format.TieredFrame]], tree: pages.PageTree, edge: std.page.Slot, primary: Bytes, owner: u32) -> Result[Arc[Bytes], types.Failure] {

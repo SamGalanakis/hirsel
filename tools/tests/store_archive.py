@@ -16,8 +16,8 @@ from store_gap_recovery import check_archive_gap
 from store_archive_server import ArchiveServer, KEYS
 
 
-FIXTURE = Path("tools/tests/fixtures/store-archive-format14.json")
-PARENT = "5ecfd92b020e2a1e0a6d81c54c6fdbda"
+FIXTURE = Path("tools/tests/fixtures/store-archive-format15.json")
+PARENT = "0bf3a9c6c8ae7ecec7ae1379345336d2"
 
 
 def drill(hirsel, server, work, release):
@@ -58,6 +58,10 @@ def drill(hirsel, server, work, release):
 
     info = run("store", "archive", "describe", source, "--json")["result"]
     assert info["parent"] == PARENT and info["floor_base"] == "4" and not info["open_gap"]
+    hold, = info["holds"]
+    assert (hold["child"], hold["base"], hold["until_ms"]) == (
+        "00000000000000070000000000000004", "6", str(2**64 - 1)), hold
+    assert int(hold["stamp"]) > 0
     interval, = info["intervals"]
     assert (interval["first_version"], interval["through_version"]) == ("2", "4")
     assert verify()["result"]["verification"] == "references"
@@ -95,6 +99,7 @@ def drill(hirsel, server, work, release):
     stale = expire("--at", interval["first_ms"])
     advance = expire("--keep-from", "6")
     assert advance["result"]["plan"]["proposed_base"] == "6"
+    assert advance["result"]["plan"]["limiting_holds"] == []
     assert server.objects == original
     unexpected = [req for req in server.requests if req[:2] != ("reader", "GET")]
     assert not unexpected, unexpected
@@ -175,6 +180,6 @@ if __name__ == "__main__":
                                 "--grant", "Process", "--grant", "Stderr", "--limit", "2147483648",
                                 "-o", artifact], cwd=root, check=True)
         check_index_repair(compiler, indexed, root)
-        check_archive_gap(compiler, release, root, FIXTURE.parent / "store-archive-gap-format14.json")
+        check_archive_gap(compiler, release, root, FIXTURE.parent / "store-archive-gap-format15.json")
         with ArchiveServer(FIXTURE) as archive:
             drill(compiler, archive, root, release)

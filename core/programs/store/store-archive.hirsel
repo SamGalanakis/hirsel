@@ -115,6 +115,7 @@ type ArchiveLane {
 }
 
 type ArchiveWorkerInput: send {
+    random: Random,
     store: types.StoreKey,
     binding_id: u64,
     op_ms: u64,
@@ -156,11 +157,11 @@ fn archive_error_summary(problem: types.Failure) -> String {
     }
 }
 
-fn archive_lane_step_once(source: ArchiveLaneSource, store: types.StoreKey, binding_id: u64, allow_rebind: bool, mut sink: std.object.Client, op_ms: u64) -> Result[history.ArchiveStepResult, types.Failure] waits {
+fn archive_lane_step_once(r: Random, source: ArchiveLaneSource, store: types.StoreKey, binding_id: u64, allow_rebind: bool, mut sink: std.object.Client, op_ms: u64) -> Result[history.ArchiveStepResult, types.Failure] waits {
     let deadline = std.object.deadline_after_ms(sink, op_ms)
     match source {
-        ArchiveDirSource(d) => history.archive_step_directory(d, store, binding_id, allow_rebind, mut sink, deadline),
-        ArchiveObjectSource(src_tx, holder_epoch) => history.archive_step_objects(channel.sender(src_tx), store, binding_id, holder_epoch, allow_rebind, mut sink, deadline),
+        ArchiveDirSource(d) => history.archive_step_directory(r, d, store, binding_id, allow_rebind, mut sink, deadline),
+        ArchiveObjectSource(src_tx, holder_epoch) => history.archive_step_objects(r, channel.sender(src_tx), store, binding_id, holder_epoch, allow_rebind, mut sink, deadline),
     }
 }
 
@@ -204,7 +205,7 @@ fn archive_update_status(shared: Latest[ArchiveStatusSnapshot], mut snap: Archiv
 const ARCHIVE_LANE_BUDGET: u64 = 33554432
 
 fn archive_lane_worker(take input: ArchiveWorkerInput) waits {
-    let ArchiveWorkerInput(store, binding_id, op_ms, allow_rebind, source: take source, sink_requests: take sink_requests, control: take control, status: take status) = take input
+    let ArchiveWorkerInput(random, store, binding_id, op_ms, allow_rebind, source: take source, sink_requests: take sink_requests, control: take control, status: take status) = take input
     let mut sink = std.object.attach(take sink_requests, None)
     let mut snap = ArchiveStatusSnapshot(seq: 0, binding_id, state: ArchiveUnknown, archived_through: None, acked_gen: 0, acked_digest: 0, acked_seg: 0, acked_entry: 0, last_error: None)
     let mut stopped = false
@@ -221,7 +222,7 @@ fn archive_lane_worker(take input: ArchiveWorkerInput) waits {
                 if stopped {
                     continue
                 }
-                let res = archive_lane_step_once(source, store, binding_id, allow_next_rebind, mut sink, op_ms)
+                let res = archive_lane_step_once(random, source, store, binding_id, allow_next_rebind, mut sink, op_ms)
                 if let Ok(step) = view res {
                     if step.advanced {
                         allow_next_rebind = false
@@ -240,7 +241,7 @@ fn archive_lane_worker(take input: ArchiveWorkerInput) waits {
                     let _ = channel.send(reply_to, Error(Diverged(0)))
                     continue
                 }
-                let res = archive_lane_step_once(source, store, binding_id, allow_next_rebind, mut sink, op_ms)
+                let res = archive_lane_step_once(random, source, store, binding_id, allow_next_rebind, mut sink, op_ms)
                 if let Ok(step) = view res {
                     if step.advanced {
                         allow_next_rebind = false
@@ -328,7 +329,7 @@ fn start_archive_lane_returning(mut db: Db, take sink: std.object.Client, config
             return Error((Full(Allocation(problem)), std.object.attach(take sink_requests, take sink_workers)))
         },
     }
-    let worker_input = ArchiveWorkerInput(store, binding_id: config.binding_id, op_ms: config.op_ms, allow_rebind, source: take source, sink_requests: take sink_requests, control: take control_rx, status: latest.handle(status))
+    let worker_input = ArchiveWorkerInput(random: disk_state(db).random, store, binding_id: config.binding_id, op_ms: config.op_ms, allow_rebind, source: take source, sink_requests: take sink_requests, control: take control_rx, status: latest.handle(status))
     let worker = match task.try_spawn(tasks, bytes ARCHIVE_LANE_BUDGET, take worker_input, archive_lane_worker) {
         Ok(take running) => take running,
         Error((problem, take ret_in)) => {
@@ -419,6 +420,7 @@ pub fn bind_archive(mut db: Db, take sink: std.object.Client, config: ArchiveOpt
     if !is_disk(db) {
         return Error(Unsupported(1))
     }
+    failure_result_from_rep(manifest.independent_source(manifest.pack_restore_origin(disk_state(db).packs)))?
     check_archive_options(config)?
     if object_writer_open(db) {
         let sink_bucket = std.object.bucket_config(sink)

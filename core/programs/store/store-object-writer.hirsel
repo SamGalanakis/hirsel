@@ -1,3 +1,22 @@
+type DiskState {
+    scrub_reader: Option[(std.object.Opener, u64)],
+    preview: Option[pager.PreviewRead],
+    random: Random,
+    open: u64,
+    options: Options,
+    transfer: transfer.TransferState,
+    // The schema commits main published since the lease last moved
+    // (§3.5a "Catch-up"): they reach the child as the round's STEPS.
+    retention: journal.RecordRetention,
+    packs: manifest.PackDiskState,
+    archive_hold: manifest.DirArchiveHold,
+    pending_binding: Option[u64],
+    archiver: Option[ArchiveLane],
+    backend: Backend,
+    tasks: Tasks,
+    tiered: pager.DiskPagerState
+}
+
 fn log_directory(db: Db) -> Result[Dir, Error] {
     let Some(d) = disk_directory(disk_state(db)) else {
         return Error(Unsupported(1))
@@ -70,8 +89,8 @@ pub fn open_authority(tasks: Tasks, take authority: Authority, c: Clock, r: Rand
             }
             Ok(take db)
         },
-        ObjectAuthority(take config) => open_object_writer(tasks, take config, c, r, options, 1),
-        SimAuthority(take config) => open_object_writer(tasks, take config, c, r, options, 2),
+        ObjectAuthority(take config) => open_object_writer(tasks, take config, c, r, options, 1, None),
+        SimAuthority(take config) => open_object_writer(tasks, take config, c, r, options, 2, None),
     }
 }
 
@@ -82,7 +101,8 @@ type ObjectWriterOpen {
     workspace: history.HistoryBuffers,
     blank: history.HistoryOpenBase,
     journal_worker: object_writer.ObjectWorkerOpen,
-    pager_task: Option[Task[()]],
+    tiered: pager.DiskPagerState,
+    claim: Option[pager.ClaimPacks],
     options: Options,
     levels: List[String],
     link: Option[host_stream.SlotLink]
@@ -137,9 +157,18 @@ fn prepare_object_writer(tasks: Tasks, mut opening: Option[history.ObjectPackRea
     let held_options = disk_allocation(scoped fn() -> Result[Options, Error] {
         Ok(clone(options))
     })?
-    let (take register, take opened, (take started, take pager_task), take metadata) = history_open_with(mut opening, c, r, options, declaration.levels, authority_kind, take genesis_authority, mut workspace, op_ms, mut link, scoped fn(id: StoreId, epoch: u64, deferred: bool, client: std.object.Client, replay: pager.JournalReplay) -> Result[(Db, Option[Task[()]]), Error] {
+    let preview = match opening {
+        Some(source) => match source.preview {
+            Some(s) => Some(pager.share_preview(s)),
+            None => None,
+        },
+        None => None,
+    }
+    let (take register, take opened, (take started, take tiered), take metadata) = history_open_with(mut opening, c, r, options, declaration.levels, authority_kind, take genesis_authority, mut workspace, op_ms, mut link, scoped fn(id: StoreId, epoch: u64, deferred: bool, client: std.object.Client, replay: pager.JournalReplay) -> Result[(Db, pager.DiskPagerState), Error] {
         failure_result_from_rep(txn.check_stream_quota(replay.state.tips[0u64].roots.streams, options.streams_max))?
-        let state = failure_result_from_rep(host_stream.copy_follow_state(replay.state))?
+        let mut state = failure_result_from_rep(host_stream.copy_follow_state(replay.state))?
+        let mut tiered = pager.disk_pager_state(None)
+        seed_claim_snapshots(replay, mut state, mut tiered)?
         let mut prepared = disk_allocation(scoped fn() -> Result[Db, Error] {
             Ok(empty_db(c, id, options))
         })?
@@ -153,14 +182,20 @@ fn prepare_object_writer(tasks: Tasks, mut opening: Option[history.ObjectPackRea
         let pager_task = if deferred || store_has_tiered(prepared) {
             let funding = pager.TieredPagerFunding(cache_bytes: options.cache_bytes, writer_pin_bytes: options.writer_pin_bytes, pager_task_bytes: options.pager_task_bytes, cut_pins: true)
             let authority = disk_allocation(scoped fn() -> Result[pager.TieredPagerSource, Error] {
-                Ok(PagerBucket(std.object.opener(client), op_ms, cache))
+                match preview {
+                    Some(s) => Ok(PreviewBucket(std.object.opener(client), op_ms, cache, pager.share_preview(s))),
+                    None => Ok(PagerBucket(std.object.opener(client), op_ms, cache)),
+                }
             })?
             let connected = failure_result_from_rep(object_writer.start_tiered_pager_link(tasks, store_key_to_rep(id), epoch, take authority, funding, pager.TIERED_PAGER_QUEUE))?
             Some(attach_tiered_pager(mut prepared, take connected))
         } else {
             None
         }
-        Ok((take prepared, take pager_task))
+        if let Some(take connected_worker) = take pager_task {
+            pager.set_worker(mut tiered, take connected_worker)
+        }
+        Ok((take prepared, take tiered))
     })?
     if let Some(mut attaching) = link {
         if let Some(take answers) = host_stream.slot_take_answers(mut attaching) {
@@ -168,7 +203,7 @@ fn prepare_object_writer(tasks: Tasks, mut opening: Option[history.ObjectPackRea
         }
     }
     // The journaled forks after the checkpoint wait for the next cut's rows.
-    let pager.JournalReplay(forked: take forked, ..) = take opened
+    let pager.JournalReplay(forked: take forked, claim_packs: take claim, ..) = take opened
     let uninstalled: Option[List[manifest.LineageFork]] = match opening {
         Some(mut source) => match source.admitted_base {
             Some(mut admitted) => {
@@ -183,7 +218,7 @@ fn prepare_object_writer(tasks: Tasks, mut opening: Option[history.ObjectPackRea
         history.set_open_base_forks(mut blank, take forks)
     }
     let history.HistoryConfig(levels: take names_in_order, ..) = take declaration
-    Ok(ObjectWriterOpen(db: take started, register: take register, metadata: take metadata, workspace: take workspace, blank: take blank, journal_worker: take journal_worker, pager_task: take pager_task, options: take held_options, levels: take names_in_order, link: take link))
+    Ok(ObjectWriterOpen(db: take started, register: take register, metadata: take metadata, workspace: take workspace, blank: take blank, journal_worker: take journal_worker, tiered: take tiered, claim: take claim, options: take held_options, levels: take names_in_order, link: take link))
 }
 
 fn wrap_object_authority(take config: ObjectAuthorityConfig, kind: u8) -> Authority {
@@ -194,7 +229,7 @@ fn wrap_object_authority(take config: ObjectAuthorityConfig, kind: u8) -> Author
     }
 }
 
-fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock, r: Random, options: Options, authority_kind: u8) -> Result[Db, Refusal] waits {
+fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock, r: Random, options: Options, authority_kind: u8, take preview: Option[pager.PreviewRead]) -> Result[Db, Refusal] waits {
     if let Error(take problem) = failure_result_from_rep(object_writer.object_open_checks(options.group_commits, options.group_bytes, optional_limits_to_rep(options.limits), options.checkpoint_bytes, options.journal_limit, options.head_poll_ms, options.checkpoint_entries, options.retain)) {
         return Error(Refusal(error: take problem, authority: wrap_object_authority(take config, authority_kind)))
     }
@@ -203,6 +238,12 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     }
     let ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache, archive: take archive) = take config
     let mut initial_source = history.history_reader(take client, 0)
+    initial_source.writer_claim = true
+    initial_source.archiving = match archive {
+        Some(_) => true,
+        None => false
+    }
+    initial_source.preview = take preview
     initial_source.cache = cache
     let mut opening = Some(take initial_source)
     let outcome = prepare_object_writer(tasks, mut opening, c, r, options, level_name, op_ms, sim, authority_kind, stream, cache)
@@ -214,19 +255,25 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
             return Error(Refusal(error: take problem, authority: wrap_object_authority(ObjectAuthorityConfig(client: take returned, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root, cache, archive: take archive), authority_kind)))
         },
     }
-    let ObjectWriterOpen(db: take started, register: take register, metadata: take metadata, workspace: take workspace, blank: take blank, journal_worker: take journal_worker, pager_task: take pager_task, options: take held_options, levels: take names_in_order, link: take link) = take prepared
+    let ObjectWriterOpen(db: take started, register: take register, metadata: take metadata, workspace: take workspace, blank: take blank, journal_worker: take journal_worker, tiered: take tiered, claim: take claim, options: take held_options, levels: take names_in_order, link: take link) = take prepared
     let mut db = take started
     let head = history.register_head(register)
-    let history.ObjectPackRead(client: take owned_client, locator: take locator, admitted_base: take base, ..) = take read_source
+    let history.ObjectPackRead(preview: take source_preview, client: take owned_client, locator: take locator, admitted_base: take base, ..) = take read_source
+    let scrub_reader = std.object.opener(owned_client)
     let src_bucket = std.object.bucket_config(owned_client)
     let chosen_base = match take base {
         Some(take admitted) => take admitted,
         None => take blank,
     }
     let binding_id = history.open_base_binding_id(chosen_base)
-    let (generation, fence, recorded_after, sweep, take pages) = history.open_base_parts(take chosen_base)
+    let (generation, fence, recorded_after, sweep, take checkpoint_packs) = history.open_base_parts(take chosen_base)
+    let mut pages = take checkpoint_packs
+    if let Some(take won) = take claim {
+        let pager.ClaimPacks(disk: take accepted, ..) = take won
+        manifest.install_claim_packs(mut pages, take accepted)
+    }
     let (take requests, take workers) = std.object.split(take owned_client)
-    let activation = object_writer.activate_worker(take journal_worker, take requests, take workers, take src_bucket, take register, take metadata, take workspace, op_ms, sweep, generation, manifest.pack_next(pages), take names_in_order, take locator, cache, take link)
+    let activation = object_writer.activate_worker(take journal_worker, take requests, take workers, take src_bucket, take register, take metadata, take workspace, op_ms, sweep, generation, manifest.pack_allocation_next(pages), take names_in_order, take locator, cache, take link)
     let (take object, force_open_cut) = match take activation {
         Ok(take active) => take active,
         Error((take returned, take returned_workers)) => {
@@ -237,7 +284,7 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     db.accounting.checkpointed = generation
     catalog.restore_fence(mut db.schema, fence)
     db.accounting.page_resident = manifest.resident_location_charge(manifest.pack_locations(pages))
-    db.disk = Some(DiskState(open: head.pair.epoch, options: take held_options, transfer: transfer.new_state(), retention: journal.record_retention(head.checkpoint.seq, recorded_after), packs: take pages, archive_hold: manifest.recovered_archive_hold(binding_id, None, head.checkpoint.seq, list.new()), pending_binding: None, archiver: None, backend: ObjectBackend(take object), tasks, tiered: pager.disk_pager_state(take pager_task)))
+    db.disk = Some(DiskState(scrub_reader: Some((take scrub_reader, op_ms)), preview: take source_preview, random: r, open: head.pair.epoch, options: take held_options, transfer: transfer.new_state(), retention: journal.record_retention(head.checkpoint.seq, recorded_after), packs: take pages, archive_hold: manifest.recovered_archive_hold(binding_id, None, head.checkpoint.seq, list.new()), pending_binding: None, archiver: None, backend: ObjectBackend(take object), tasks, tiered: take tiered))
     // Forced open-time cut (§12.11.5 step 7, AP16): a refused cut does not fail open.
     if force_open_cut {
         if let Ok(cut_ticket) = checkpoint(mut db) {
@@ -376,6 +423,10 @@ fn object_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(m
     let mut observed: Option[host_stream.DeferredSlotReport] = None
     let mut completion: Option[host_stream.DeferredSlotReport] = None
     let outcome = object_cut_work(mut db, mut lane, take delta, write_seal, target, pack_bytes, limit, mut observed, mut completion)
+    let allocated = object_writer.cut_next_pack(lane)
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        manifest.reserve_pack_frontier(mut state.packs, allocated)
+    })
     if let Error(problem) = outcome {
         if object_writer.paused_terminal(lane) {
             let saved: Error = clone(problem)
@@ -410,21 +461,20 @@ fn object_cut_work(mut db: Db, mut lane: object_writer.ObjectJournalSession, tak
         Some(next_b) => next_b,
         None => disk_state(db).archive_hold.binding_id,
     }
-    let retained = failure_result_from_rep(object_writer.archive_retain_for_cut(mut lane, previous, old.checkpoint, seq, disk_state(db).options.retain, cut_binding, disk_state(db).archive_hold.hold_bytes, disk_state(db).archive_hold.hold_bytes_explicit, archive_witnessed_through(db), now))?
     let participants = disk_allocation(scoped fn() -> Result[manifest.CutParticipants, Error] {
         cut_participants(db, delta)
     })?
     let manifest.CutParticipants(holders: take participants_held, roots: take roots, branches: take branches, heads, promote) = take participants
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        manifest.prune_pack_scrubs(mut state.packs)
         pager.prune_leases(mut state.tiered)
     })
-    let mut staged = stage_tiered_cut(db, delta, take roots, branches, heads, promote, pack_bytes, object_writer.cut_next_pack(lane))?
+    let mut staged = stage_tiered_cut(db, delta, take roots, branches, heads, promote, pack_bytes, order.max(object_writer.cut_next_pack(lane), manifest.pack_allocation_next(disk_state(db).packs)))?
     pages.set_next_node(mut db.holders, staged.stamp_end - 1)
     raise_materialized_pin(mut delta, staged)
     let holders = failure_result_from_rep(pager.sealed_cut_holders(take participants_held, staged))?
-    let read_packs = failure_result_from_rep(object_writer.reclaim_read_packs(staged.compaction.held))?
-    let mut base = failure_result_from_rep(manifest.page_retry_base(manifest.pack_locations(disk_state(db).packs), manifest.pack_owners(disk_state(db).packs), holders, staged.roots))?
-    failure_result_from_rep(pager.list_tiered_cut(mut base.locations, staged))?
+    let read_packs = failure_result_from_rep(object_writer.reclaim_read_packs(staged.compaction.held, manifest.pack_scrubs(disk_state(db).packs)))?
+    let mut base = cut_page_base(db, holders, staged)?
     let lineage_rows = settle_lineage_kills(cut_lineage_rows(db, delta, branches, staged.queue.added)?, db, delta, staged.queue, mut base.locations.packs)?
     failure_result_from_rep(catalog.over_ceiling(base.account, txn.available_resident(db.accounting, db.call_streams.keyed_credit)))?
     if let Some(wanted) = target {
@@ -447,17 +497,20 @@ fn object_cut_work(mut db: Db, mut lane: object_writer.ObjectJournalSession, tak
             plan_page_cut(base, holders, manifest.pack_lists(installed), staged.queue, lineage_rows, None, staged.next_pack, pack_bytes, marks, relocated, mut stamp)?
         }
         let mut buffers = failure_result_from_rep(manifest.cut_output_buffers(cut_plan, manifest_bytes, limit))?
-        let (generation, take layout, take refs) = failure_result_from_rep(object_writer.write_cut_packs(mut lane, old, take cut_plan, staged.packs, object_writer.object_locator(object_state(db)), cache_dir, mut buffers, mut workspace, now))?
+        let (generation, take layout, take refs) = failure_result_from_rep(object_writer.write_cut_packs(mut lane, old, take cut_plan, staged.packs, object_writer.object_locator(object_state(db)), manifest.direct_packs(disk_state(db).packs), cache_dir, mut buffers, mut workspace, now))?
         fill_cut_manifest(mut buffers.out, db, delta, staged.roots, generation, seq, seq, layout, stamp, base.account, write_seal)?
         let (take pages, take compaction, _) = disk_allocation(scoped fn() -> Result[(manifest.PackDiskState, pager.TieredCompaction, journal.DiskRemovals), Error] {
             failure_result_from_rep(journal.cut_retirement(layout, holders, None, list.new(), staged.compaction, None, seq, seq))
         })?
         let (_, take parsed) = disk_read_page_manifest("MANIFEST", buffers.out)?
         let page_record = take parsed
-        let locator = failure_result_from_rep(history.locator_for_cut(refs))?
+        let mut locator = failure_result_from_rep(history.locator_for_cut(refs))?
         let settled = failure_result_from_rep(history.prepare_tiered_install(mut staged, manifest.pack_locations(pages), Some(view locator), generation, stamp))?
         let tails = prepare_sealed_tail_bases(db, delta, staged, heads)?
-        let published = failure_result_from_rep(object_writer.publish_page_cut(mut lane, old, seq, take page_record, retained, take refs, object_writer.object_locator(object_state(db)), check_target, activation, object_writer.drops_attach(object_state(db)), mut workspace, now, mut observed, mut completion))?
+        let (installed, take locate_root) = failure_result_from_rep(object_writer.prepare_page_publication(mut lane, old, seq, take page_record, take refs, object_writer.object_locator(object_state(db)), mut locator, check_target, mut workspace, now))?
+        let ordinary_keys = failure_result_from_rep(object_writer.ordinary_cut_names(mut lane, locator, read_packs, cut_binding != 0))?
+        let retained = failure_result_from_rep(object_writer.archive_retain_for_cut_with_live(mut lane, previous, old.checkpoint, seq, disk_state(db).options.retain, cut_binding, disk_state(db).archive_hold.hold_bytes, disk_state(db).archive_hold.hold_bytes_explicit, archive_witnessed_through(db), ordinary_keys, now))?
+        let published = failure_result_from_rep(object_writer.publish_cut(mut lane, installed, retained, locate_root, activation, take locator, object_writer.drops_attach(object_state(db)), mut workspace, now, mut observed, mut completion))?
         Ok((take pages, take compaction, take published, generation, settled, take tails))
     })
     pages.set_next_node(mut db.holders, next_stamp - 1)

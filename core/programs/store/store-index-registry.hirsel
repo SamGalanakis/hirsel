@@ -88,7 +88,7 @@ pub type Catalog {
     revision: Bytes
 }
 
-pub type CatalogRecord = CatalogTable | CatalogCell | CatalogLog | CatalogIndex(IndexRecord)
+pub type CatalogRecord = CatalogTable | CatalogCell | CatalogLog | CatalogBlobs | CatalogIndex(IndexRecord)
 
 pub type IndexRecord {
     shape: IndexShape,
@@ -103,6 +103,7 @@ pub fn catalog_kind(record: CatalogRecord) -> std.page_descriptor.CollectionKind
         CatalogIndex(_) => IndexCollection,
         CatalogCell => CellCollection,
         CatalogLog => LogCollection,
+        CatalogBlobs => BlobsCollection,
     }
 }
 
@@ -194,7 +195,7 @@ pub fn decode_catalog(raw: Bytes) -> Result[Catalog, types.Failure] {
     let id: u32 = int.truncate(take_le(raw, mut at, 4)?)
     let owner: u32 = int.truncate(take_le(raw, mut at, 4)?)
     let epoch = take_le(raw, mut at, 8)?
-    if kind < 1 || kind > 4 || id == 0 || epoch == 0 || (kind == 2 && owner == 0) {
+    if kind < 1 || kind > 5 || id == 0 || epoch == 0 || (kind == 2 && owner == 0) {
         return Error(pages.malformed(0))
     }
     let key = take_blob(raw, mut at)?
@@ -223,6 +224,7 @@ pub fn decode_catalog(raw: Bytes) -> Result[Catalog, types.Failure] {
         2 => CatalogIndex(decode_index_record(raw, mut at)?),
         3 => CatalogCell,
         4 => CatalogLog,
+        5 => CatalogBlobs,
         _ => return Error(pages.malformed(0)),
     }
     if at != list.len(raw) {
@@ -442,6 +444,10 @@ pub fn edit_frame(ops: pages.DataOps, below: List[Arc[pages.Staged]], extra: u64
         Some(size) => 13 + size,
         None => 9u64,
     } + list.len(key)
+    price_data_edit(ops, below, extra, key, current, transaction, width)
+}
+
+pub fn price_data_edit(ops: pages.DataOps, below: List[Arc[pages.Staged]], extra: u64, key: Bytes, current: u64, transaction: u64, width: u64) -> Result[Option[u64], types.Failure] {
     let after = int.saturating_add(current - pages.old_data_op_size(ops, below, false, key), width)
     if int.saturating_add(after, extra) - 16 > transaction {
         return Error(Limit(Transaction))

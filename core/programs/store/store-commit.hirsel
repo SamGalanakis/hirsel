@@ -301,6 +301,7 @@ fn settle_and_wait[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Admi
         Ready(take ready, take plan) => (take ready, take plan),
         OverLimit(take rejected, problem) => return Ok(OverLimit(take rejected, problem)),
     }
+    let mut publishing = take publication
     let mut draft = take admitted
     if let NoCut = decision {} else {
         if let Some(InGroup(n)) = draft.frame {
@@ -322,6 +323,15 @@ fn settle_and_wait[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Admi
         }
         if let (Reseal, Some(Detached(take frame))) = (decision, replace(mut draft.frame, None)) {
             let mut raw = take frame
+            if pages.draft_has_chunks(draft.edits) {
+                match rebind_direct_after_cut(mut db, i, mut draft, mut raw) {
+                    Ok(take revised) => {
+                        publishing = take revised
+                    },
+                    Error(Full(problem)) => return Ok(OverLimit(take draft, problem)),
+                    Error(take problem) => return Error(take problem),
+                }
+            }
             if let Error(c) = format.seal_frame(mut raw, format.DiskContext(store: store_key_to_rep(db.store), role: 2, seq: file_seq(db)), file_end(db)) {
                 return Ok(OverLimit(take draft, Allocation(c)))
             }
@@ -329,7 +339,7 @@ fn settle_and_wait[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Admi
         }
     }
     wait_for_frame_room(mut db, draft.frame)?
-    Ok(Ready(take draft, take publication))
+    Ok(Ready(take draft, take publishing))
 }
 
 fn settle_admit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome[R, A], Error] waits {
@@ -348,6 +358,11 @@ fn settle_admit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome
             }
             if let Some(problem) = reserve_tiered_freed(mut db, draft) {
                 return Ok(Refused(problem))
+            }
+            match secure_direct_writes(mut db, draft) {
+                Ok(()) => (),
+                Error(Full(problem)) => return Ok(Refused(problem)),
+                Error(take problem) => return Error(take problem),
             }
             let (take outcome, take frame) = commit_prepared(mut db, i, take draft, take publication)
             handoff(mut db, take frame)?

@@ -11,7 +11,7 @@ pub type TieredReadInventory: shareable + send {
     next_stamp: u64
 }
 
-pub type ReplayValue: shareable + send = ReplayPut(Arc[Bytes]) | ReplayAbsent
+pub type ReplayValue: shareable + send = ReplayPut(Arc[Bytes]) | ReplayDirect(Arc[format.DirectBlob]) | ReplayAbsent
 
 pub type ReplayRow: shareable + send {
     base: u32,
@@ -40,7 +40,16 @@ pub type ReplayBranch: shareable + send {
     charged: u64
 }
 
+pub type ForeignPack: key + send {
+    parent: types.StoreKey,
+    incarnation: Inline[u8, 16],
+    epoch: u64,
+    len: u64,
+    digest: u64
+}
+
 pub type PagePack: shareable + send {
+    foreign: Option[ForeignPack],
     class: u8,
     frames: u32,
     live: u64,

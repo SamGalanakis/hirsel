@@ -1,5 +1,7 @@
 pub opaque type Scrub {
-    d: Dir,
+    d: Option[Dir],
+    bucket_reader: Option[(std.object.Opener, u64)],
+    preview: Option[pager.PreviewRead],
     store: StoreId,
     generation: u64,
     next_stamp: u64,
@@ -48,17 +50,41 @@ pub fn begin_scrub_with_mode(mut db: Db, mode: ScrubMode) -> Result[Scrub, Error
         let mut seqs: List[u64] = list.new()
         let mut cursor = std.omap.range(manifest.pack_locations(disk_state(db).packs).packs.values, Unbounded, Unbounded)
         while let Some((seq, pack)) = std.omap.next(mut cursor) {
-            list.push(mut packs, manifest.ScrubPack(seq: seq, class: pack.class, frames: int.widen(pack.frames), payload_bytes: pack.payload_bytes, index: pack.index))
+            let object: Option[pages.HistoryRef] = match cut_locator(db) {
+                Some(locator) => match map.get(history.locator_rows(locator), seq) {
+                    Some(item) => Some(clone(item)),
+                    None => None,
+                },
+                None => None,
+            }
+            list.push(mut packs, manifest.ScrubPack(object, seq: seq, class: pack.class, frames: int.widen(pack.frames), payload_bytes: pack.payload_bytes, index: pack.index))
             list.push(mut seqs, seq)
         }
         Ok((take packs, take seqs))
     })?
-    let lease = arc.new(manifest.ScrubLease(packs: take seqs))
+    let mut ids = 0u64
+    let mut objects: std.omap.OMap[u64, pages.TieredPagerPack] = std.omap.new()
+    for row in packs {
+        if let Some(ref) = row.object {
+            let pack = option.unwrap(manifest.disk_index_get(manifest.pack_locations(disk_state(db).packs).packs, row.seq))
+            let (take revised, _) = std.omap.insert_owned(mut ids, take objects, row.seq, pages.TieredPagerPack(inventory: clone(pack), object: Some(ref)))
+            objects = take revised
+        }
+    }
+    let lease = arc.new(manifest.ScrubLease(objects: take objects, packs: take seqs))
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Result[(), Error] {
         failure_result_from_rep(manifest.add_pack_scrub(mut state.packs, arc.share(lease)))
     })?
     let remaining = list.len(packs)
-    Ok(Scrub(d: log_directory(db)?, store: db.store, generation: db.accounting.checkpointed, next_stamp: next_stamp, packs: take packs, position: 0, remaining: remaining, mode: mode, provenance: None, at: 0, open: None, checked: 0, known: manifest.share_page_locations(manifest.pack_locations(disk_state(db).packs)), lease: take lease))
+    let preview: Option[pager.PreviewRead] = match disk_state(db).preview {
+        Some(source) => Some(pager.share_preview(source)),
+        None => None,
+    }
+    let bucket_reader: Option[(std.object.Opener, u64)] = match disk_state(db).scrub_reader {
+        Some((read, ms)) => Some((std.object.share_opener(read), ms)),
+        None => None,
+    }
+    Ok(Scrub(d: disk_directory(disk_state(db)), bucket_reader: take bucket_reader, preview: take preview, store: db.store, generation: db.accounting.checkpointed, next_stamp: next_stamp, packs: take packs, position: 0, remaining: remaining, mode: mode, provenance: None, at: 0, open: None, checked: 0, known: manifest.share_page_locations(manifest.pack_locations(disk_state(db).packs)), lease: take lease))
 }
 
 // Reads at least one frame, then stops once budget bytes are read this step.
@@ -79,6 +105,18 @@ pub fn scrub_step(mut tour: Scrub, budget: u64) -> Result[ScrubReport, Error] wa
                 list.push(mut faults, Fault(file: take path, offset: tour.at, why: Kind(kind)))
                 scrub_finish_pack(mut tour)?
             },
+            Error(Remote(NotFound)) => {
+                let seq = tour.packs[tour.position].seq
+                if let Some(pack) = manifest.disk_index_get(tour.known.packs, seq) {
+                    if pack.foreign != None {
+                        let Some(source) = view tour.preview else {
+                            return Error(Missing("preview archive"))
+                        }
+                        failure_result_from_rep(pager.preview_recheck(source))?
+                    }
+                }
+                return Error(Lost)
+            },
             Error(take problem) => return Error(take problem),
         }
     }
@@ -94,8 +132,7 @@ pub fn scrub_step(mut tour: Scrub, budget: u64) -> Result[ScrubReport, Error] wa
 fn scrub_finish_pack(mut tour: Scrub) -> Result[(), Error] waits {
     if let Some(take reading) = replace(mut tour.open, None) {
         let manifest.ScrubInput(input: take input, ..) = take reading
-        let handle = format.take_journal_file(take input)
-        failure_result_from_rep(manifest.disk_io(host.close(take handle)))?
+        failure_result_from_rep(format.close_scrub_input(take input))?
     }
     tour.remaining -= 1
     tour.position += 1
@@ -110,32 +147,54 @@ fn scrub_finish_pack(mut tour: Scrub) -> Result[(), Error] waits {
 // against the pack's record. Charges bytes as they are examined.
 fn scrub_next(mut tour: Scrub, mut spent: u64) -> Result[(), Error] waits {
     let seq = tour.packs[tour.position].seq
+    let foreign = match manifest.disk_index_get(tour.known.packs, seq) {
+        Some(pack) => pack.foreign,
+        None => None,
+    }
     let class = tour.packs[tour.position].class
     let unopened = match tour.open {
         Some(_) => false,
         None => true
     }
     if unopened {
-        let path = failure_result_from_rep(manifest.paged_pack_path(seq))?
         let expected = failure_result_from_rep(manifest.scrub_pack_pointers(tour.known, seq))?
-        let (take opened, source) = scrub_open(tour.d, path, tour.mode)?
-        // One fallback makes the cumulative tour unsuitable as evidence of
-        // an all-device pass, even when later files support direct reads.
-        if tour.provenance != Some(BufferedFallback) {
-            tour.provenance = Some(source)
-        }
-        let mut input = if source == Direct {
-            failure_result_from_rep(format.open_device_input(take opened, fn() -> Result[Bytes, types.Failure] {
-                manifest.disk_allocation(fn() -> Result[Bytes, types.Failure] {
-                    Ok(list.with_capacity_aligned(journal.JOURNAL_CHUNK_BYTES, 65536))
-                })
-            }))?
+        let (take path, take checked_input, context, provenance) = if let Some(row) = foreign {
+            let Some(source) = view tour.preview else {
+                return Error(Missing("preview archive"))
+            }
+            let (take key, take object_input) = failure_result_from_rep(pager.preview_scrub_input(source, seq, row))?
+            let ref = pages.HistoryRef(seq, epoch: row.epoch, len: row.len, digest: row.digest)
+            scrub_object_header(take key, take object_input, row.parent, ref, mut spent)?
+        } else if let Some(ref) = tour.packs[tour.position].object {
+            let Some((read, ms)) = view tour.bucket_reader else {
+                return Error(Missing("object reader"))
+            }
+            let key = failure_result_from_rep(history.history_read_key("p-", ref))?
+            let object_input = format.object_scrub_input(std.object.share_opener(read), ms, ref.len, ref.digest, failure_result_from_rep(manifest.disk_read_buffer(65536))?)
+            scrub_object_header(take key, take object_input, store_key_to_rep(tour.store), ref, mut spent)?
         } else {
-            failure_result_from_rep(journal.journal_input(take opened, false))?
+            let Some(dir) = tour.d else {
+                return Error(Lost)
+            }
+            let path = failure_result_from_rep(manifest.paged_pack_path(seq))?
+            let (take opened, source) = scrub_open(dir, path, tour.mode)?
+            let mut input = if source == Direct {
+                failure_result_from_rep(format.open_device_input(take opened, fn() -> Result[Bytes, types.Failure] {
+                    manifest.disk_allocation(fn() -> Result[Bytes, types.Failure] {
+                        Ok(list.with_capacity_aligned(journal.JOURNAL_CHUNK_BYTES, 65536))
+                    })
+                }))?
+            } else {
+                failure_result_from_rep(journal.journal_input(take opened, false))?
+            }
+            let header = failure_result_from_rep(manifest.disk_read_header(path, failure_result_from_rep(manifest.scrub_prefix(mut input, path, 0, 72, mut spent))?, 3, Some(seq), optional_store_key_to_rep(Some(tour.store))))?
+            (take path, take input, header.context, source)
         }
-        let header = failure_result_from_rep(manifest.disk_read_header(path, failure_result_from_rep(manifest.scrub_prefix(mut input, path, 0, 72, mut spent))?, 3, Some(seq), optional_store_key_to_rep(Some(tour.store))))?
+        if tour.provenance != Some(BufferedFallback) {
+            tour.provenance = Some(provenance)
+        }
         let index_at = tour.packs[tour.position].index
-        tour.open = Some(failure_result_from_rep(manifest.scrub_input(take input, take path, header.context, manifest.pack_scan_indexed(class, tour.next_stamp, index_at), take expected))?)
+        tour.open = Some(failure_result_from_rep(manifest.scrub_input(take checked_input, take path, context, manifest.pack_scan_indexed(class, tour.next_stamp, index_at), take expected))?)
         tour.at = 72
         return Ok(())
     }
@@ -163,4 +222,15 @@ fn scrub_open(dir: Dir, path: String, mode: ScrubMode) -> Result[(HostFile, Scru
         Error(Other(code)) if code == host.DEVICE_READ_UNAVAILABLE => Ok((host.open(dir, path, Read) ?=> Io, BufferedFallback)),
         Error(e) => Error(Io(e)),
     }
+}
+
+fn scrub_object_header(take path: String, take object_input: format.JournalInput, id: types.StoreKey, ref: pages.HistoryRef, mut spent: u64) -> Result[(String, format.JournalInput, format.DiskContext, ScrubRead), Error] waits {
+    let mut input = take object_input
+    let raw = failure_result_from_rep(manifest.scrub_prefix(mut input, path, 0, 72, mut spent))?
+    let ctx = if ref.epoch == 0 {
+        failure_result_from_rep(manifest.disk_read_header(path, raw, 3, Some(ref.seq), Some(id)))?.context
+    } else {
+        failure_result_from_rep(manifest.history_object_context(path, id, 3, ref, raw))?
+    }
+    Ok((take path, take input, ctx, BufferedFallback))
 }

@@ -515,12 +515,14 @@ fn source_layout_witness(outlined: bool) -> Result[(), Error] {
         list.set_word_le(mut raw, 0, i)
         let value = pages.stage_value(clone(raw), 1024)
         let expected_value: std.page.BatchValue = match value {
+            PendingChunk(_) => fail("ordinary value staged as chunk"),
+            SealedChunk(_) => fail("ordinary value sealed as chunk"),
             BlobBody(shared) => BatchShared(arc.share(shared)),
             PageValue(inline_value) => BatchBytes(clone(inline_value)),
         }
         list.push(mut edits, std.page.BatchEdit(key: take key, value: Some(take expected_value), prior: None))
         pages.push_data_row(mut staged, format.DataOp(key: clone(logical), value: Some(take value), trim: None, prior: None))
-        list.push(mut journal, format.JournalOp(key: take logical, value: Some(take raw), prior: 0, trim: None))
+        list.push(mut journal, format.JournalOp(key: take logical, value: Some(take raw), direct: None, prior: 0, trim: None))
     }
     let mut expected_tree = pages.share_page_tree(base)
     let mut expected_next = first
@@ -596,7 +598,7 @@ fn source_rightmost_witness() -> Result[(), Error] {
     for i in 5u64 .. 7 {
         let key = types.key_word(i)
         let raw = prior_fixture_value(32)
-        list.push(mut right_ops, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, key))?, value: Some(clone(raw)), prior: 0, trim: None))
+        list.push(mut right_ops, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, key))?, value: Some(clone(raw)), direct: None, prior: 0, trim: None))
         list.push(mut right_edits, std.page.BatchEdit(key: take key, value: Some(BatchBytes(take raw)), prior: Some(0u32)))
     }
     failure_result_from_rep(pages.page_result(std.page.apply_sorted_batch(mut reference, right_edits, 1024, mut reference_stamps)))?
@@ -645,6 +647,8 @@ fn batch_law_collection_edits(ops: pages.DataRows, order: format.DataOrder, id: 
         let value: Option[std.page.BatchValue] = match view op.value {
             Some(PageValue(raw)) => Some(BatchBytes(clone(raw))),
             Some(BlobBody(raw)) => Some(BatchShared(arc.share(raw))),
+            Some(PendingChunk(raw)) => Some(BatchShared(arc.share(raw))),
+            Some(SealedChunk(chunk)) => Some(BatchShared(arc.share(chunk.stored))),
             None => None,
         }
         list.push(mut edits, std.page.BatchEdit(key: clone(list.slice(op.key, 4, list.len(op.key))), value: take value, prior: None))
@@ -657,7 +661,7 @@ fn batch_law_rows(ops: List[u64], prior: u32) -> Result[List[format.JournalOp], 
     for n in ops {
         let mut raw = prior_fixture_value(8)
         list.set_word_le(mut raw, 0, n)
-        list.push(mut rows, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, types.key_word(n)))?, value: Some(take raw), prior: prior, trim: None))
+        list.push(mut rows, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, types.key_word(n)))?, value: Some(take raw), direct: None, prior: prior, trim: None))
     }
     Ok(take rows)
 }
@@ -850,8 +854,8 @@ fn replay_prior_grants() -> Result[(), Error] {
     failure_result_from_rep(catalog.define_store_collection(mut base, 1, 1, mut ids))?
     let seed = ids
     let mut wrong: List[format.JournalOp] = list.new()
-    list.push(mut wrong, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, types.key_word(0)))?, value: Some(prior_fixture_value(65536)), prior: 0, trim: None))
-    list.push(mut wrong, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, types.key_word(1)))?, value: None, prior: 1, trim: None))
+    list.push(mut wrong, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, types.key_word(0)))?, value: Some(prior_fixture_value(65536)), direct: None, prior: 0, trim: None))
+    list.push(mut wrong, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, types.key_word(1)))?, value: None, direct: None, prior: 1, trim: None))
     let mut account = pager.ReplayTieredAccount(total: 0, exact: true)
     // 4 KiB covers the fault but cannot admit the first 64 KiB value copy.
     let readonly_refusal = bound bytes 4096 {
@@ -889,8 +893,8 @@ fn replay_prior_grants() -> Result[(), Error] {
             }
         }
         let mut mismatch: List[format.JournalOp] = list.new()
-        list.push(mut mismatch, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, types.key_word(0)))?, value: None, prior: 65536, trim: None))
-        list.push(mut mismatch, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, types.key_word(1)))?, value: None, prior: 0, trim: None))
+        list.push(mut mismatch, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, types.key_word(0)))?, value: None, direct: None, prior: 65536, trim: None))
+        list.push(mut mismatch, format.JournalOp(key: failure_result_from_rep(catalog.logical_key(1, types.key_word(1)))?, value: None, direct: None, prior: 0, trim: None))
         match journal_apply_ops("wrong existing prior", mut candidate_ids, mut candidate, mismatch, mut account, immutable) {
             Error(Corrupt(Fault(why: Malformed, ..))) => (),
             _ => return Error(Missing("existing row accepted a mismatched prior")),

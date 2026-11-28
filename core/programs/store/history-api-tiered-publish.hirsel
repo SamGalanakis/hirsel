@@ -8,12 +8,16 @@ pub fn prepare_tiered_install(mut cut_stage: pager.TieredCutStage, installed: ma
     }
     let paging = recovered_tiered_inventory(installed, locator, generation, next_stamp)?
     for slot in 0u64 .. list.len(cut_stage.roots) {
-        let had_paging = match view cut_stage.roots[slot].collections.paging {
-            Some(_) => true,
-            None => false,
-        }
-        if had_paging || pages.tiered_collections(cut_stage.roots[slot].collections.root) {
-            cut_stage.roots[slot].collections.paging = Some(arc.share(paging))
+        let needs_lease = pages.needs_read_inventory(cut_stage.roots[slot].collections.root, scoped fn(seq: u64) -> bool {
+            if let Some(row) = std.omap.get(paging.packs, seq) {
+                return row.inventory.class == 4
+            }
+            false
+        })
+        cut_stage.roots[slot].collections.paging = if needs_lease {
+            Some(arc.share(paging))
+        } else {
+            None
         }
     }
     Ok(settled)

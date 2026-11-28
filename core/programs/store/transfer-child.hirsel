@@ -52,6 +52,7 @@ pub fn child_cut_tiered(mut tree: pages.PageTree, d: Dir, id: types.StoreKey, mu
 pub fn clone_replay_value(val: pages.ReplayValue) -> pages.ReplayValue {
     match val {
         ReplayPut(raw) => ReplayPut(arc.share(raw)),
+        ReplayDirect(place) => ReplayDirect(arc.share(place)),
         ReplayAbsent => ReplayAbsent,
     }
 }

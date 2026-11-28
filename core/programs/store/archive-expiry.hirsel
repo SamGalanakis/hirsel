@@ -8,6 +8,7 @@ pub type ExpiryPlan: key + send {
 
 pub type ExpiryResult: send {
     plan: ExpiryPlan,
+    limiting_holds: List[format.PreviewHoldRep],
     deleted: u64
 }
 
@@ -53,7 +54,7 @@ fn expiry_candidate(head: format.ArchiveHeadRep, floor: format.ArchiveBaseRowRep
     let Some(revision) = int.checked_add(head.rev, 1u64) else {
         return Error(Limit(Manifest))
     }
-    Ok(format.ArchiveHeadRep(store: head.store, source_kind: head.source_kind, binding_id: head.binding_id, holder_epoch: head.holder_epoch, rev: revision, open_gap: head.open_gap, through: head.through, floor_base: Some(format.archive_base_summary(floor)), index_tail: head.index_tail, intervals: take surviving))
+    Ok(format.ArchiveHeadRep(store: head.store, source_kind: head.source_kind, binding_id: head.binding_id, holder_epoch: head.holder_epoch, rev: revision, open_gap: head.open_gap, through: head.through, floor_base: Some(format.archive_base_summary(floor)), index_tail: head.index_tail, intervals: take surviving, incarnation: head.incarnation, holds: clone(head.holds)))
 }
 
 fn expiry_digest_name(raw: Bytes, offset: u64) -> bool {
@@ -119,10 +120,10 @@ fn expiry_below(name: String, kind: u8, floor: format.ArchiveBaseRowRep) -> bool
     (raw[0] == b'p' && seq < frontier.next_pack) || (raw[0] == b'm' && seq < frontier.next_gen)
 }
 
-fn expiry_push_namespace(mut src: std.object.Client, id: types.StoreKey) -> String {
+fn expiry_push_namespace(mut src: std.object.Client, id: types.StoreKey, inc: Inline[u8, 16]) -> String {
     let cfg = std.object.bucket_config(src)
     let mut prefix = string.from(cfg.prefix)
-    string.push(mut prefix, format.archive_key(id, ""))
+    string.push(mut prefix, format.archive_key(id, inc, ""))
     std.object.set_prefix(mut src, take prefix)
 }
 
@@ -159,7 +160,21 @@ pub fn archive_expire(mut src: std.object.Client, parent: StoreId, cutoff: Expir
     }
     let idx = failure_result_from_rep(history.archive_restore_index(mut src, head, deadline))?
     let rows = restore_base_rows(mut src, head, idx, deadline)?
-    let floor = expiry_select(rows, cutoff, protected_from_ms)?
+    let requested = expiry_select(rows, cutoff, protected_from_ms)?
+    let kept = failure_result_from_rep(history.kept_preview_holds(head.holds, std.object.client_wall_ms(src)))?
+    let mut limiting_holds: List[format.PreviewHoldRep] = list.new()
+    failure_result_from_rep(types.capacity(list.try_reserve(mut limiting_holds, list.len(kept))))?
+    let mut floor_ordinal = requested.base_ordinal
+    for h in kept {
+        if h.boundary.base_ordinal < requested.base_ordinal {
+            list.push(mut limiting_holds, h)
+        }
+        floor_ordinal = order.min(floor_ordinal, h.boundary.base_ordinal)
+    }
+    let floor = expiry_select(rows, KeepFromBase(floor_ordinal), None)?
+    if floor.base_ordinal != floor_ordinal {
+        return Error(Lost)
+    }
     let previous = restore_base_token(parent, head.source_kind, rows[0u64], head.binding_id)
     let point = restore_base_token(parent, head.source_kind, floor, head.binding_id)
     let plan = ExpiryPlan(head: tag, floor: point, previous)
@@ -168,7 +183,8 @@ pub fn archive_expire(mut src: std.object.Client, parent: StoreId, cutoff: Expir
             return Error(Conflict("expiry plan changed"))
         }
     }
-    let candidate = expiry_candidate(head, floor)?
+    let mut candidate = expiry_candidate(head, floor)?
+    candidate.holds = take kept
     let held = expiry_verify_survivors(mut src, candidate, parent, scratch, deadline)?
     let mut removed = 0u64
     if let Some(_) = approved {
@@ -178,10 +194,10 @@ pub fn archive_expire(mut src: std.object.Client, parent: StoreId, cutoff: Expir
             ArchiveCasUncertain => return Error(Undecided),
             ArchiveCasApplied(_) => (),
         }
-        let prefix = expiry_push_namespace(mut src, id)
+        let prefix = expiry_push_namespace(mut src, id, candidate.incarnation)
         let res = expiry_erase(mut src, head.source_kind, floor, held, deadline)
         let _ = std.object.set_prefix(mut src, take prefix)
         removed = res?
     }
-    Ok(ExpiryResult(plan, deleted: removed))
+    Ok(ExpiryResult(plan, limiting_holds: take limiting_holds, deleted: removed))
 }

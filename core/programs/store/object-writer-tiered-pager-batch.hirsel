@@ -3,8 +3,12 @@
 fn tiered_pager_read_edges(mut input: pager.TieredPagerInput, mut pager_cache: pager.TieredCache, owner: types.StoreKey, demand: pager.TieredPointDemand, edges: List[format.TieredTarget]) -> Result[List[Result[Arc[format.TieredFrame], types.Failure]], types.Failure] waits {
     let mut fetched: List[Result[Arc[format.TieredFrame], types.Failure]] = list.new()
     let local = match input {
-        PagerLocal(_) => true,
-        PagerObjects(..) => false,
+        PagerLocal(..) => true,
+        PagerObjects(_, _, _, preview) => if let Some(_) = preview {
+            true
+        } else {
+            false
+        },
     }
     if local || list.len(edges) == 1 {
         types.capacity(list.try_reserve(mut fetched, list.len(edges)))?
@@ -58,7 +62,7 @@ fn tiered_pager_bucket_batch(mut input: pager.TieredPagerInput, mut pager_cache:
         }
     }
     if list.len(misses) != 0 {
-        if let PagerObjects(client, op_ms, cache) = input {
+        if let PagerObjects(client, op_ms, cache, _) = input {
             let deadline = if demand.deadline == 0 {
                 std.object.opener_deadline_ms(client, op_ms)
             } else {

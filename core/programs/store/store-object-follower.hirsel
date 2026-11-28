@@ -164,6 +164,42 @@ fn object_follow_replay(mut source: history.ObjectPackRead, latest: history.Hist
 }
 
 fn object_follow_capture(mut source: history.ObjectPackRead, previous: Option[Arc[object_writer.FollowCapture]], expected: Option[StoreId], ceiling: u64, require_fresh: bool) -> Result[Option[Arc[object_writer.FollowCapture]], Error] waits {
+    cell.set(source.direct_floor, 0u64)
+    let old_charge = match previous {
+        Some(old) => old.resident,
+        None => 0u64
+    }
+    let mut floor = 0u64
+    loop {
+        let selected = if floor == 0 {
+            object_follow_capture_attempt(mut source, previous, expected, ceiling, require_fresh)
+        } else {
+            object_follow_capture_attempt(mut source, None, expected, ceiling - old_charge, require_fresh)
+        }
+        if let Error(Changed(_)) = view selected {
+            if cell.get(source.direct_floor) > floor {
+                floor = cell.get(source.direct_floor)
+                source.locator = history.empty_history_locator()
+                continue
+            }
+        }
+        if floor != 0 {
+            if let Error(Full(Resident(refused))) = view selected {
+                return Error(Full(Resident(Capacity(requested: int.saturating_add(old_charge, refused.requested), available: ceiling))))
+            }
+            if let Some(old) = previous {
+                if let Ok(Some(newer)) = view selected {
+                    if newer.state.tips[0].head < old.state.tips[0].head {
+                        return Error(Behind(Position(store: store_key_from_rep(old.store), branch: 0, version: old.state.tips[0].head)))
+                    }
+                }
+            }
+        }
+        return take selected
+    }
+}
+
+fn object_follow_capture_attempt(mut source: history.ObjectPackRead, previous: Option[Arc[object_writer.FollowCapture]], expected: Option[StoreId], ceiling: u64, require_fresh: bool) -> Result[Option[Arc[object_writer.FollowCapture]], Error] waits {
     if let Some(_) = source.stream_root {
         return stream_follow_capture(mut source, previous, expected, ceiling, require_fresh)
     }

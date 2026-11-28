@@ -160,6 +160,7 @@ fn history_open_existing[T](mut read_source: history.ObjectPackRead, c: Clock, r
         }
         let auth = history_check_open(read_source.client, selected, requested_levels, authority_kind, opening)?
         opening.claim_auth = Some(clone(auth))
+        let reserved = cell.get(read_source.direct_floor)
         let trial = match replace(mut admitted, None) {
             Some((base, take replay)) if selected.head.checkpoint.seq <= base.entry.seq => {
                 if selected.head.floor < base.floor {
@@ -170,6 +171,7 @@ fn history_open_existing[T](mut read_source: history.ObjectPackRead, c: Clock, r
             _ => history_load_admitted(mut read_source, selected.head, options.resident_limit),
         }
         let replay = match take trial {
+            Error(Changed(_)) if cell.get(read_source.direct_floor) > reserved => continue,
             Ok(take ready) => take ready,
             Error(HistoryMissing(take file, missing_seq)) => {
                 let verdict = failure_result_from_rep(history.history_witness(mut read_source.client, selected.head, Some(pair), file, missing_seq, mut workspace.witness, read_source.deadline))?
@@ -255,7 +257,7 @@ fn history_open_existing[T](mut read_source: history.ObjectPackRead, c: Clock, r
 fn history_rebase_suffix(mut read_source: history.ObjectPackRead, head: history.HistoryHead, from: pages.HistoryRef, take initial: pager.JournalReplay, ceiling: u64) -> Result[pager.JournalReplay, Error] waits {
     let suffix = failure_result_from_rep(history.history_suffix(mut read_source.client, head, from, read_source.deadline))?
     let mut replay = take initial
-    history_apply_suffix(mut read_source.client, head, from.seq, suffix, mut replay, ceiling, read_source.deadline)?
+    history_apply_suffix(read_source.direct_floor, mut read_source.client, head, from.seq, suffix, mut replay, ceiling, read_source.deadline)?
     Ok(take replay)
 }
 

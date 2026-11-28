@@ -9,7 +9,7 @@ import sys
 import tempfile
 
 
-CORPUS = Path("core/programs/store/corpus/format-14/directory").resolve()
+CORPUS = Path("core/programs/store/corpus/format-15/directory").resolve()
 
 
 def contents(directory):
@@ -93,7 +93,7 @@ def drill(hirsel, work):
 
     run("store", "restore", export, dest, code=2)
     assert plan("latest")["result"]["point"]["version"] == "4"
-    assert plan("at:1,1795810935995")["result"]["point"]["version"] == "3"
+    assert plan("at:1,1795860956983")["result"]["point"]["version"] == "3"
     review = plan("version:1,3")
     cut = review["result"]["point"]
     assert (cut["parent"], cut["branch"], cut["version"]) == (stamp[1], "1", "3")

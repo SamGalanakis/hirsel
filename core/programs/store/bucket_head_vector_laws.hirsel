@@ -1,13 +1,13 @@
 // STORE L60. Little-endian fields and XXH3 frame checks were derived
 // independently of the store encoder.
-// L60 wire vectors use §2.1, the current-format (14) §2.3 HEADER, §12.2 and libxxhash.
+// L60 wire vectors use §2.1, the current-format (15) §2.3 HEADER, §12.2 and libxxhash.
 @test
 fn bucket_test_m2_head_vectors() -> Result[(), Error] {
     let config = history.object_history_config(std.object.Bucket(endpoint: "https://s3.amazonaws.com", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), "bucket")
     let payload = failure_result_from_rep(history.history_config_bytes(config))?
     let test_id = StoreId(hi: 9, lo: 10)
     let base = pages.HistoryRef(seq: 1, epoch: 1, len: 189, digest: 0x2701)
-    let first = history.HistoryHead(authority_kind: 1, store: store_key_to_rep(test_id), pair: history.HistoryPair(epoch: 1, holder: types.StoreKey(hi: 11, lo: 12)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: None)
+    let first = history.HistoryHead(authority_kind: 1, store: store_key_to_rep(test_id), pair: history.HistoryPair(epoch: 1, holder: types.StoreKey(hi: 11, lo: 12)), activation: 0, entry: base, checkpoint: base, floor: 1, binding: [0; 32], origin: None)
     let mut raw: Bytes = list.with_capacity(history.HISTORY_HEAD_LIMIT)
     failure_result_from_rep(history.history_encode_head(mut raw, first, payload))?
     let mut attempt2: Bytes = list.with_capacity(16)

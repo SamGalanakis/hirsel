@@ -1,80 +1,14 @@
-// The capture decoder retains only offsets into a checksummed frame.
-pub type CaptureOp = CapturePut(u64, u64, u64, u64) | CaptureDelete(u64, u64, u64) | CaptureTrim(u32, u64, u64)
-
-pub type CaptureOps {
-    at: u64,
-    left: u64
-}
-
-fn capture_data_ops(path: String, raw: Bytes) -> Result[CaptureOps, types.Failure] {
-    let mut at = 20u64
-    let sections = format.disk_number(path, raw, mut at, 1)?
-    if sections == 0 || sections > 4 {
-        return Error(format.disk_fault(path, at, Malformed))
-    }
-    let tag = format.disk_number(path, raw, mut at, 1)?
-    if tag > 3 {
-        return Error(format.disk_fault(path, at, Malformed))
-    }
-    let op_count = if tag == 0 {
-        format.disk_count(path, raw, mut at, 9)?
-    } else {
-        0u64
-    }
-    Ok(CaptureOps(at: at, left: op_count))
-}
-
-pub fn capture_blob_width(path: String, raw: Bytes, mut at: u64, limit: u64) -> Result[u64, types.Failure] {
-    let size = format.disk_number(path, raw, mut at, 4)?
-    if size > limit || size > list.len(raw) - at {
-        return Error(format.disk_fault(path, at, Malformed))
-    }
-    Ok(size)
-}
-
-pub fn capture_next_op(path: String, raw: Bytes, value_limit: u64, mut ops: CaptureOps) -> Result[Option[CaptureOp], types.Failure] {
-    if ops.left == 0 {
-        return Ok(None)
-    }
-    ops.left -= 1
-    let kind = format.disk_number(path, raw, mut ops.at, 1)?
-    if kind == 3 {
-        let at = ops.at
-        if list.len(raw) - at < 20 {
-            return Error(format.disk_fault(path, at, Malformed))
-        }
-        let id: u32 = list.word_be(raw, at)
-        ops.at += 20
-        return Ok(Some(CaptureTrim(id, format.word_be(raw, at + 4), format.word_be(raw, at + 12))))
-    }
-    if kind != 1 && kind != 2 {
-        return Error(format.disk_fault(path, ops.at - 1, Malformed))
-    }
-    let key_len = capture_blob_width(path, raw, mut ops.at, 4096)?
-    let key_at = ops.at
-    ops.at += key_len
-    let prior = format.disk_number(path, raw, mut ops.at, 4)?
-    if key_len < 4 || prior > types.FORMAT_VALUE_MAX + 1 {
-        return Error(format.disk_fault(path, key_at, Malformed))
-    }
-    if kind == 2 {
-        return Ok(Some(CaptureDelete(key_at, key_len, prior)))
-    }
-    let value_len = capture_blob_width(path, raw, mut ops.at, value_limit)?
-    ops.at += value_len
-    Ok(Some(CapturePut(key_at, key_len, value_len, prior)))
-}
-
 // The last refill is sized exactly to the selected end. Both the frame parser
 // and host reads stop there, even when a live writer extends the file.
 type CaptureChunk {
     raw: Bytes,
     base: u64,
+    deadline: Option[(Clock, u64)],
     end: u64
 }
 
 fn new_capture_chunk(end: u64) -> CaptureChunk {
-    CaptureChunk(raw: list.new(), base: end, end: end)
+    CaptureChunk(raw: list.new(), base: end, deadline: None, end: end)
 }
 
 fn capture_chunk_at(mut file: HostFile, path: String, mut source: CaptureChunk, at: u64) -> Result[u64, types.Failure] waits {
@@ -83,7 +17,15 @@ fn capture_chunk_at(mut file: HostFile, path: String, mut source: CaptureChunk, 
     }
     source.raw = list.new()
     source.base = at
-    source.raw = manifest.read_disk_bytes(mut file, path, at, order.min(journal.JOURNAL_CHUNK_BYTES, source.end - at))?
+    let width = order.min(journal.JOURNAL_CHUNK_BYTES, source.end - at)
+    source.raw = manifest.disk_read_buffer(width)?
+    while list.len(source.raw) < width {
+        format.check_journal_deadline(source.deadline)?
+        let off = at + list.len(source.raw)
+        if manifest.disk_io(host.read_at(mut file, off, mut source.raw))? == 0 {
+            return Error(format.disk_fault(path, off, Truncated))
+        }
+    }
     Ok(0u64)
 }
 
@@ -138,12 +80,13 @@ fn capture_read_frame(mut file: HostFile, path: String, mut source: CaptureChunk
     }))
 }
 
-pub fn capture_scan_frames[S](mut file: HostFile, id: types.StoreKey, seq: u64, limits: types.LimitsRep, durable_end: u64, end: u64, torn: bool, keep: CapturePayload, mut state: S, consume: scoped[view] fn(mut S, String, u64, u16, Bytes) -> Result[(), types.Failure]) -> Result[(u64, u64), types.Failure] waits {
+pub fn capture_scan_frames[S](mut file: HostFile, id: types.StoreKey, seq: u64, limits: types.LimitsRep, durable_end: u64, end: u64, torn: bool, keep: CapturePayload, deadline: Option[(Clock, u64)], mut state: S, consume: scoped[view] fn(mut S, String, u64, u16, Bytes) -> Result[(), types.Failure] waits) -> Result[(u64, u64), types.Failure] waits {
     let path = manifest.journal_path(seq, "")?
     if durable_end < 72 || end < durable_end || manifest.disk_io(host.stat_file(mut file))?.size < end {
         return Error(format.disk_fault(path, end, Truncated))
     }
     let mut source = new_capture_chunk(end)
+    source.deadline = deadline
     let header = manifest.disk_read_header(path, capture_prefix(mut file, path, mut source, 0, 72)?, 2, Some(seq), Some(id))?
     let mut at = 72u64
     let mut frames = 0u64

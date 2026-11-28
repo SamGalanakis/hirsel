@@ -130,6 +130,7 @@ fn begin_copy(mut db: Db, take into: transfer.ExportInto, take attempt: Bytes, a
     if !is_disk(db) || list.len(attempt) != 16 {
         return Error(ExportMismatch)
     }
+    failure_result_from_rep(manifest.independent_source(manifest.pack_restore_origin(disk_state(db).packs))) ?=> Store
     if let Some(_) = transfer.active_lease(disk_state(db).transfer) {
         return Error(AttemptBusy)
     }
@@ -321,7 +322,10 @@ fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool)
         let state = failure_result_from_rep(types.capacity(manifest.manifest_state(selected, holders)))?
         Ok((take state, tiered))
     }))?
-    let replay = deploy_result(failure_result_from_rep(pager.journal_replay_manifest(take initial, selected)))?
+    let mut replay = deploy_result(failure_result_from_rep(pager.journal_replay_manifest(take initial, selected)))?
+    let (stamp_high, pack_high) = deploy_result(export_direct_frontier(d, id, selected.first_live, stamp.terminal, stamp.end, replay.limits))?
+    replay.next_node = order.max(replay.next_node, stamp_high)
+    let next_pack = order.max(selected.next_pack, deploy_result(failure_result_from_rep(history.history_next_id(pack_high)))?)
     let replayed = deploy_result(replay_export(d, id, selected.first_live, 72, stamp.terminal, stamp.end, list.new(), take replay))?
     if replayed.state.tips[0].head != stamp.head {
         return Error(ExportMismatch)
@@ -341,7 +345,7 @@ fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool)
     db.limits = limits_from_rep(selected.limits)
     pages.set_next_node(mut db.holders, ids)
     catalog.set_next_table(mut db.schema, stamp.next_table)
-    Ok(Preparation(db: take db, stamp: take stamp, shipped: None, dir: d, next_pack: cell.new(selected.next_pack), pack_bytes: options.pack_bytes, dirty_bytes: options.dirty_bytes, deferred_frees: list.new()))
+    Ok(Preparation(db: take db, stamp: take stamp, shipped: None, dir: d, next_pack: cell.new(next_pack), pack_bytes: options.pack_bytes, dirty_bytes: options.dirty_bytes, deferred_frees: list.new()))
 }
 
 fn read_export_stamp(d: Dir) -> Result[ExportStamp, DeployError] waits {
@@ -384,7 +388,7 @@ fn replay_export(d: Dir, id: StoreId, first: u64, from: u64, terminal: u64, limi
         if seq == terminal && format.journal_input_size(source) > boundary {
             return Error(failure_from_rep(format.disk_fault(path, boundary, Malformed)))
         }
-        let _ = journal_scan(mut source, path, id, seq, start, Some(boundary), false, mut replay, scoped fn(mut recovered_state: pager.JournalReplay, take event: format.JournalEvent) -> Result[(), Error] {
+        let _ = journal_scan(mut source, path, id, seq, start, Some(boundary), false, mut replay, scoped fn(mut recovered_state: pager.JournalReplay, take event: format.JournalEvent) -> Result[(), Error] waits {
             let through = match event {
                 Commit(commit) => if commit.branch == 0u32 {
                     int.saturating_sub(commit.version, 1u64)
@@ -398,7 +402,7 @@ fn replay_export(d: Dir, id: StoreId, first: u64, from: u64, terminal: u64, limi
                 },
             }
             failure_result_from_rep(transfer.apply_steps(path, mut recovered_state, steps, mut stepped, through))?
-            journal_apply(path, mut recovered_state, take event)
+            journal_apply(path, mut recovered_state, capture_directory_event(d, id, None, take event)?)
         })?
         let file = format.take_journal_file(take source)
         failure_result_from_rep(manifest.disk_io(host.close(take file)))?

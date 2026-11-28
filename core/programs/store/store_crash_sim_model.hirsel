@@ -487,3 +487,16 @@ fn csim_go(n: CsimNext) -> bool {
         _ => false,
     }
 }
+
+// Independently generate each acknowledged logical chunk for the crash oracle.
+fn csim_upload_byte(n: u64, at: u64) -> u8 {
+    int.truncate(17u64 + 13u64 * n + at * 7u64)
+}
+
+fn csim_upload_chunk(n: u64) -> Bytes {
+    let mut body: Bytes = list.with_capacity(1024)
+    for at in 0u64 .. 1024 {
+        list.push(mut body, csim_upload_byte(n, at))
+    }
+    take body
+}

@@ -287,6 +287,8 @@ Rules for reading the table:
 
 ### 3.5 Declaration-level placement (v3.1, Findings 5–7 of 3115)
 
+Format 15 places the structural COMMIT op decoder in `format`. Both `manifest` receipt retention and `capture` consume its offset-based traversal. The five declarations and their owners are recorded in `tools/placement.tsv`.
+
 **v3.2 (L2).** `Head` carries branch data. The root keeps each live `Latest[Snapshot]` in `Db.followers`, keyed by head id and removed with the head. The root computes holder record sizes using `branch_root_bytes`, `pin_root_bytes` and `keyed_root_record_bytes`. Those helpers keep their L4 owners. `pages.HolderTable` takes the computed byte counts and updates them in the same operation as the holder change.
 
 **L4 compaction ruling.** The pack allocator, locations, lists, owners and scrub leases move into `manifest.PackDiskState`. The root keeps `TieredCompaction` separately on `Db` through L4. L5 moves it and `TieredProbeCursor` into `pager.DiskPagerState`. The coordinator installs the candidate pack state and compaction progress after MANIFEST or Object checkpoint publication, in the existing cut order.

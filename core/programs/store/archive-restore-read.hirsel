@@ -1,14 +1,17 @@
 // Exact native units are named by the pinned archive head and its index.
 fn restore_archive_bytes(mut sink: std.object.Client, path: String, reference: pages.HistoryRef, deadline: u64) -> Result[Bytes, Error] waits {
-    let mut raw = failure_result_from_rep(manifest.disk_read_buffer(reference.len))?
-    let _ = failure_result_from_rep(history.history_fetch(mut sink, path, mut raw, deadline))?
+    restore_archive_bytes_read(std.object.opener(sink), path, reference, deadline)
+}
+
+fn restore_archive_bytes_read(sink: std.object.Opener, path: String, reference: pages.HistoryRef, deadline: u64) -> Result[Bytes, Error] waits {
+    let (_, take raw) = restore_range_read(sink, path, 0, reference.len, deadline)?
     failure_result_from_rep(history.history_object_digest(path, reference, raw))?
     Ok(take raw)
 }
 
-fn restore_object_key(parent: StoreId, lead: String, r: pages.HistoryRef) -> Result[String, Error] {
+fn restore_object_key(parent: StoreId, inc: Inline[u8, 16], lead: String, r: pages.HistoryRef) -> Result[String, Error] {
     let rel = failure_result_from_rep(history.history_read_key(lead, r))?
-    Ok(format.archive_key(store_key_to_rep(parent), rel))
+    Ok(format.archive_key(store_key_to_rep(parent), inc, rel))
 }
 
 fn restore_base_ref(row: format.ArchiveBaseRowRep) -> pages.HistoryRef {
@@ -16,19 +19,23 @@ fn restore_base_ref(row: format.ArchiveBaseRowRep) -> pages.HistoryRef {
 }
 
 fn restore_base_token(parent: StoreId, kind: u8, row: format.ArchiveBaseRowRep, binding_id: u64) -> RestoreToken {
-    let boundary = manifest.RestoreBoundary(source_kind: kind, base_ordinal: row.base_ordinal, base_digest: row.digest, unit: row.first_unit, epoch: row.epoch, unit_digest: row.digest, frame_end: 0)
+    let boundary = format.RestoreBoundary(source_kind: kind, base_ordinal: row.base_ordinal, base_digest: row.digest, unit: row.first_unit, epoch: row.epoch, unit_digest: row.digest, frame_end: 0)
     RestoreToken(parent, binding_id, capture_attempt: [0; 16], boundary)
 }
 
-fn restore_archive_manifest(mut sink: std.object.Client, parent: StoreId, kind: u8, row: format.ArchiveBaseRowRep, deadline: u64) -> Result[(manifest.PageManifest, history.HistoryActivation), Error] waits {
+fn restore_archive_manifest(mut sink: std.object.Client, parent: StoreId, inc: Inline[u8, 16], kind: u8, row: format.ArchiveBaseRowRep, deadline: u64) -> Result[(manifest.PageManifest, history.HistoryActivation), Error] waits {
+    restore_archive_manifest_read(std.object.opener(sink), parent, inc, kind, row, deadline)
+}
+
+fn restore_archive_manifest_read(sink: std.object.Opener, parent: StoreId, inc: Inline[u8, 16], kind: u8, row: format.ArchiveBaseRowRep, deadline: u64) -> Result[(manifest.PageManifest, history.HistoryActivation), Error] waits {
     let id = store_key_to_rep(parent)
     let reference = restore_base_ref(row)
     let (m, activation) = if kind == format.ARCHIVE_SOURCE_LOG {
         if row.len > manifest.PAGE_MANIFEST_FILE_LIMIT || row.epoch != 0 {
             return Error(failure_from_rep(format.disk_fault("archive-index", 72, Malformed)))
         }
-        let key = format.archive_key(id, format.archive_log_manifest_rel(row.base_ordinal, row.digest))
-        let raw = restore_archive_bytes(mut sink, key, reference, deadline)?
+        let key = format.archive_key(id, inc, format.archive_log_manifest_rel(row.base_ordinal, row.digest))
+        let raw = restore_archive_bytes_read(sink, key, reference, deadline)?
         let (owner, take parsed) = failure_result_from_rep(manifest.disk_read_page_manifest(key, raw))?
         if owner != id || parsed.generation != row.base_ordinal {
             return Error(failure_from_rep(format.disk_fault(key, 0, Header)))
@@ -38,11 +45,11 @@ fn restore_archive_manifest(mut sink: std.object.Client, parent: StoreId, kind: 
         if row.len > 112 + 16 + 8213 + 16 + 1048576 {
             return Error(failure_from_rep(format.disk_fault("archive-index", 72, Malformed)))
         }
-        let key = restore_object_key(parent, "e-", reference)?
-        let raw = restore_archive_bytes(mut sink, key, reference, deadline)?
+        let key = restore_object_key(parent, inc, "e-", reference)?
+        let raw = restore_archive_bytes_read(sink, key, reference, deadline)?
         let mark = failure_result_from_rep(history.history_read_mark(key, id, reference, raw))?
-        let mkey = restore_object_key(parent, "m-", mark.manifest)?
-        let bytes_in = restore_archive_bytes(mut sink, mkey, mark.manifest, deadline)?
+        let mkey = restore_object_key(parent, inc, "m-", mark.manifest)?
+        let bytes_in = restore_archive_bytes_read(sink, mkey, mark.manifest, deadline)?
         let parsed = failure_result_from_rep(history.history_decode_manifest(mkey, id, mark, reference.seq, take bytes_in))?
         (take parsed, mark.activation)
     }
@@ -53,8 +60,12 @@ fn restore_archive_manifest(mut sink: std.object.Client, parent: StoreId, kind: 
 }
 
 fn restore_range(mut sink: std.object.Client, key: String, lo: u64, hi: u64, deadline: u64) -> Result[(std.object.Meta, Bytes), Error] waits {
+    restore_range_read(std.object.opener(sink), key, lo, hi, deadline)
+}
+
+fn restore_range_read(sink: std.object.Opener, key: String, lo: u64, hi: u64, deadline: u64) -> Result[(std.object.Meta, Bytes), Error] waits {
     let buf = failure_result_from_rep(manifest.disk_read_buffer(hi - lo))?
-    let (take answer, take raw) = std.object.fetch_range(mut sink, key, lo, hi, take buf, deadline)
+    let (take answer, take raw) = std.object.read_range(sink, std.object.GetRange(key: clone(key), lo, hi, buffer: take buf, deadline))
     let meta = (take answer) ?=> Remote
     if list.len(raw) != hi - lo || meta.size < hi {
         return Error(failure_from_rep(format.disk_fault(key, lo, Truncated)))
@@ -62,7 +73,11 @@ fn restore_range(mut sink: std.object.Client, key: String, lo: u64, hi: u64, dea
     Ok((meta, take raw))
 }
 
-fn restore_entry_chain(mut sink: std.object.Client, parent: StoreId, row: format.ArchiveBaseRowRep, end: pages.HistoryRef, deadline: u64) -> Result[List[history.HistoryLink], Error] waits {
+fn restore_entry_chain(mut sink: std.object.Client, parent: StoreId, inc: Inline[u8, 16], row: format.ArchiveBaseRowRep, end: pages.HistoryRef, deadline: u64) -> Result[List[history.HistoryLink], Error] waits {
+    restore_entry_chain_read(std.object.opener(sink), parent, inc, row, end, deadline)
+}
+
+fn restore_entry_chain_read(sink: std.object.Opener, parent: StoreId, inc: Inline[u8, 16], row: format.ArchiveBaseRowRep, end: pages.HistoryRef, deadline: u64) -> Result[List[history.HistoryLink], Error] waits {
     let start = restore_base_ref(row)
     if end.seq < start.seq {
         return Error(failure_from_rep(format.disk_fault("archive-index", 72, Order)))
@@ -70,8 +85,8 @@ fn restore_entry_chain(mut sink: std.object.Client, parent: StoreId, row: format
     let mut suffix = failure_result_from_rep(history.history_link_slots(end.seq - start.seq))?
     let mut unit = end
     while unit.seq > start.seq {
-        let key = restore_object_key(parent, "e-", unit)?
-        let (meta, take prefix) = restore_range(mut sink, key, 0, 112, deadline)?
+        let key = restore_object_key(parent, inc, "e-", unit)?
+        let (meta, take prefix) = restore_range_read(sink, key, 0, 112, deadline)?
         if meta.size != unit.len {
             return Error(failure_from_rep(format.disk_fault(key, 0, Truncated)))
         }
@@ -85,9 +100,13 @@ fn restore_entry_chain(mut sink: std.object.Client, parent: StoreId, row: format
     Ok(take suffix)
 }
 
-fn restore_read_entry[S](mut sink: std.object.Client, parent: StoreId, unit: pages.HistoryRef, deadline: u64, mut state: S, visit: scoped fn(mut S, u16, u16, u64, Bytes) -> Result[(), Error] waits) -> Result[(), Error] waits {
-    let key = restore_object_key(parent, "e-", unit)?
-    let (meta, take prefix) = restore_range(mut sink, key, 0, 112, deadline)?
+fn restore_read_entry[S](mut sink: std.object.Client, parent: StoreId, inc: Inline[u8, 16], unit: pages.HistoryRef, deadline: u64, mut state: S, visit: scoped fn(mut S, u16, u16, u64, Bytes) -> Result[(), Error] waits) -> Result[(), Error] waits {
+    restore_read_entry_read(std.object.opener(sink), parent, inc, unit, deadline, mut state, visit)
+}
+
+fn restore_read_entry_read[S](sink: std.object.Opener, parent: StoreId, inc: Inline[u8, 16], unit: pages.HistoryRef, deadline: u64, mut state: S, visit: scoped fn(mut S, u16, u16, u64, Bytes) -> Result[(), Error] waits) -> Result[(), Error] waits {
+    let key = restore_object_key(parent, inc, "e-", unit)?
+    let (meta, take prefix) = restore_range_read(sink, key, 0, 112, deadline)?
     if meta.size != unit.len {
         return Error(failure_from_rep(format.disk_fault(key, 0, Truncated)))
     }
@@ -100,7 +119,7 @@ fn restore_read_entry[S](mut sink: std.object.Client, parent: StoreId, unit: pag
         if unit.len - pos < 16 {
             return Error(failure_from_rep(format.disk_fault(key, pos, Truncated)))
         }
-        let (part, take hdr) = restore_range(mut sink, key, pos, pos + 16, deadline)?
+        let (part, take hdr) = restore_range_read(sink, key, pos, pos + 16, deadline)?
         if part.etag != meta.etag {
             return Error(Lost)
         }
@@ -116,7 +135,7 @@ fn restore_read_entry[S](mut sink: std.object.Client, parent: StoreId, unit: pag
         let payload: Bytes = if fh.size == 0 {
             list.new()
         } else {
-            let (chunk, take bytes_in) = restore_range(mut sink, key, pos + 16, frame_end, deadline)?
+            let (chunk, take bytes_in) = restore_range_read(sink, key, pos + 16, frame_end, deadline)?
             if chunk.etag != meta.etag {
                 return Error(Lost)
             }
@@ -149,18 +168,18 @@ fn restore_read_entry[S](mut sink: std.object.Client, parent: StoreId, unit: pag
     Ok(())
 }
 
-fn restore_archive_entries(mut sink: std.object.Client, parent: StoreId, row: format.ArchiveBaseRowRep, end: pages.HistoryRef, mut walk: RestoreScan, deadline: u64) -> Result[(), Error] waits {
-    let suffix = restore_entry_chain(mut sink, parent, row, end, deadline)?
+fn restore_archive_entries(mut sink: std.object.Client, parent: StoreId, inc: Inline[u8, 16], row: format.ArchiveBaseRowRep, end: pages.HistoryRef, mut walk: RestoreScan, deadline: u64) -> Result[(), Error] waits {
+    let suffix = restore_entry_chain(mut sink, parent, inc, row, end, deadline)?
     for i in 0u64 .. list.len(suffix) {
         let unit = history.history_length(suffix[i], row.base_ordinal + i + 1)
-        restore_read_entry(mut sink, parent, unit, deadline, mut walk, scoped fn(mut scan_state: RestoreScan, kind: u16, flags: u16, frame_end: u64, payload: Bytes) -> Result[(), Error] {
+        restore_read_entry(mut sink, parent, inc, unit, deadline, mut walk, scoped fn(mut scan_state: RestoreScan, kind: u16, flags: u16, frame_end: u64, payload: Bytes) -> Result[(), Error] {
             let mut token = scan_state.base
             token.boundary.unit = unit.seq
             token.boundary.epoch = unit.epoch
             token.boundary.unit_digest = unit.digest
             token.boundary.frame_end = frame_end
             if format.journal_event_kind(kind) {
-                let key = restore_object_key(parent, "e-", unit)?
+                let key = restore_object_key(parent, inc, "e-", unit)?
                 let ev = journal_decode(key, kind, payload)?
                 restore_scan_event(mut scan_state, token, key, take ev)?
             } else {

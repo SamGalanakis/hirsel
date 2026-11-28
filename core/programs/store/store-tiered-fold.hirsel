@@ -371,15 +371,11 @@ fn inherited_fold_value(inherited: Option[View[Arc[pages.ReplayOverlay]]], key: 
     let Some(row) = replay_overlay_at(previous, key) else {
         return false
     }
-    match now {
-        ReplayAbsent => match row.now {
-            ReplayAbsent => true,
-            ReplayPut(_) => false,
-        },
-        ReplayPut(after) => match row.now {
-            ReplayAbsent => false,
-            ReplayPut(before) => list.compare_bytes(before, after) == Equal,
-        },
+    match (view now, view row.now) {
+        (ReplayAbsent, ReplayAbsent) => true,
+        (ReplayDirect(after), ReplayDirect(before)) => after == before,
+        (ReplayPut(after), ReplayPut(before)) => list.compare_bytes(before, after) == Equal,
+        _ => false,
     }
 }
 

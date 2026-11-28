@@ -1,0 +1,251 @@
+fn read_preview_list(source: pager.PreviewRead, m: manifest.PageManifest, parent: types.StoreKey, ptr: std.page.PagePtr, kind: manifest.ListKind, mut lists: manifest.ListedPages) -> Result[(), Error] waits {
+    let mut previous: Option[u64] = None
+    let mut unused = ()
+    failure_result_from_rep(manifest.read_page_list(mut unused, parent, m, ptr, None, kind, mut previous, mut lists, scoped fn(mut _unit: (), id: types.StoreKey, p: std.page.PagePtr) -> Result[(String, std.page.Image), types.Failure] waits {
+        let row = pager.preview_pack_ref(source, p.pack)?
+        let path = pager.preview_pack_key(source, p.pack, row)?
+        let width: u64 = int.widen(p.len)
+        if width > manifest.PAGE_LIMIT || p.offset > row.len || row.len - p.offset < 16 + width {
+            return Error(format.disk_fault(path, p.offset, Malformed))
+        }
+        let raw = pager.preview_pack_range(source, p.pack, row, p.offset, p.offset + 16 + width, 0)?
+        let image = manifest.decode_list_page(path, id, p, take raw)?
+        Ok((take path, take image))
+    }))
+}
+
+fn preview_lists() -> manifest.ListedPages {
+    manifest.empty_listed_pages(true, manifest.PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new()))
+}
+
+fn preview_foundation_lists(source: pager.PreviewRead, foundation: Dir, scratch: Dir, parent: types.StoreKey, child: types.StoreKey, mut m: manifest.PageManifest, pack_bytes: u64) -> Result[(), Error] waits {
+    let mut data = preview_lists()
+    read_preview_list(source, m, parent, m.pack_root, PackList, mut data)?
+    let mut metadata = preview_lists()
+    read_preview_list(source, m, parent, m.lineage, LineageList, mut metadata)?
+    read_preview_list(source, m, parent, m.deferred_frees, DeferredList, mut metadata)?
+    let mut locations = manifest.new_page_locations()
+    for (seq, pack) in data.packs {
+        if map.contains(data.class_two, seq) || map.contains(metadata.class_two, seq) {
+            return Error(failure_from_rep(format.disk_fault("pack list", seq, Malformed)))
+        }
+        let mut imported: pages.PagePack = clone(pack)
+        imported.foreign = Some(failure_result_from_rep(pager.preview_pack_ref(source, seq))?)
+        failure_result_from_rep(types.capacity(manifest.disk_index_put(mut locations.packs, seq, imported, manifest.pack_edge_charge)))?
+    }
+    // The child keeps the actual queue keys and stamps. Rebind only the
+    // class-2 packs reached by the queue and lineage to the child seal.
+    for (seq, _) in metadata.class_two {
+        let ref = failure_result_from_rep(pager.preview_pack_ref(source, seq))?
+        let mut raw = failure_result_from_rep(pager.preview_pack_range(source, seq, ref, 0, ref.len, 0))?
+        let header = failure_result_from_rep(types.capacity(format.disk_header_bytes(format.DiskContext(store: parent, role: 3, seq), 0, 0)))?
+        for i in 0u64 .. 72 {
+            raw[i] = header[i]
+        }
+        let path = failure_result_from_rep(manifest.paged_pack_path(seq))?
+        failure_result_from_rep(manifest.disk_write_synced(scratch, path, raw))?
+        failure_result_from_rep(manifest.reseal_restore_pack(scratch, foundation, parent, child, seq))?
+    }
+    let (first_pack, first_stamp) = pager.preview_frontier(source)
+    let mut stamp = first_stamp
+    let issued = cell.new(stamp)
+    let lists = plan_paged_lists(mut locations, manifest.empty_paged_lists(), manifest.no_cut_queue(), manifest.empty_lineage(), None, first_pack, pack_bytes, mut stamp, issued, None)?
+    for plan in lists.run_packs.packs {
+        let path = failure_result_from_rep(manifest.paged_pack_path(plan.seq))?
+        let mut raw: Bytes = failure_result_from_rep(manifest.disk_read_buffer(plan.size))?
+        failure_result_from_rep(manifest.encode_pack(child, lists.run_packs, plan, mut locations, mut raw))?
+        failure_result_from_rep(manifest.disk_write_synced(foundation, path, raw))?
+    }
+    m.pack_root = manifest.published_tree_pointer(locations, lists.roots.packs)
+    m.next_stamp = cell.into_inner(take issued)
+    m.next_pack = lists.run_packs.next_pack
+    Ok(())
+}
+
+// The private child replays only frames through the named boundary. Both
+// the parent segment envelope and the new child envelope bind the offset.
+fn preview_journal(scratch: Dir, foundation: Dir, parent: types.StoreKey, child: types.StoreKey, first: u64, terminal: u64, end: u64) -> Result[(), Error] waits {
+    let target = format.DiskContext(store: child, role: 2, seq: 1)
+    let mut file = failure_result_from_rep(manifest.disk_io(host.open(foundation, "j-1", Write)))?
+    restore_output(mut file, failure_result_from_rep(types.capacity(format.disk_header_bytes(target, 0, 0)))?)?
+    let mut offset = 72u64
+    let mut previous = 0u64
+    for seq in first ..= terminal {
+        let path = failure_result_from_rep(manifest.journal_path(seq, ""))?
+        let mut input = failure_result_from_rep(manifest.disk_io(host.open(scratch, path, Read)))?
+        let size = failure_result_from_rep(manifest.disk_io(host.stat_file(mut input)))?.size
+        if seq == terminal && size != end {
+            return Error(failure_from_rep(format.disk_fault(path, end, Truncated)))
+        }
+        let header = failure_result_from_rep(manifest.disk_read_header(path, failure_result_from_rep(manifest.read_disk_bytes(mut input, path, 0, 72))?, 2, Some(seq), Some(parent)))?
+        if seq != first && header.prev_end != previous {
+            return Error(failure_from_rep(format.disk_fault(path, 0, Order)))
+        }
+        let mut pos = 72u64
+        while pos < size {
+            if size - pos < 16 {
+                return Error(failure_from_rep(format.disk_fault(path, pos, Truncated)))
+            }
+            let raw = failure_result_from_rep(manifest.read_disk_bytes(mut input, path, pos, 16))?
+            let frame = failure_result_from_rep(manifest.disk_read_frame_head(path, raw, pos))?
+            failure_result_from_rep(manifest.disk_check_frame_kind(path, header.context, frame.kind, frame.flags, pos))?
+            if frame.size > size - pos - 16 {
+                return Error(failure_from_rep(format.disk_fault(path, pos, Truncated)))
+            }
+            let payload = failure_result_from_rep(manifest.read_disk_bytes(mut input, path, pos + 16, frame.size))?
+            if failure_result_from_rep(types.capacity(format.disk_check(header.context, pos, raw, payload)))? != frame.checksum {
+                return Error(failure_from_rep(format.disk_fault(path, pos, Checksum)))
+            }
+            let bytes_out = failure_result_from_rep(types.capacity(format.disk_seal(target, offset, frame.kind, frame.flags, payload)))?
+            restore_output(mut file, bytes_out)?
+            offset += list.len(bytes_out)
+            pos += list.len(bytes_out)
+        }
+        previous = size
+        failure_result_from_rep(manifest.disk_io(host.close(take input)))?
+    }
+    failure_result_from_rep(manifest.disk_io(host.sync(mut file)))?
+    failure_result_from_rep(manifest.disk_io(host.close(take file)))
+}
+
+fn preview_stage(tasks: Tasks, archive: std.object.Opener, source: pager.PreviewRead, foundation: Dir, scratch: Dir, hold: PreviewHold, point: RestorePoint, origin: manifest.RestoreOrigin, c: Clock, r: Random, options: Options, op_ms: u64) -> Result[(), Error] waits {
+    let parent = hold.parent
+    let inc = hold.incarnation
+    let child = hold.record.child
+    let b = hold.record.boundary
+    let base = pager.preview_base(source)
+    let due = std.object.opener_deadline_ms(archive, op_ms)
+    let (take initial, release) = restore_archive_manifest_read(archive, parent, inc, b.source_kind, base, due)?
+    if release.number != point.activation || release.binding != point.binding {
+        return Error(Foreign)
+    }
+    let mut m = take initial
+    preview_foundation_lists(source, foundation, scratch, store_key_to_rep(parent), child, mut m, options.pack_bytes)?
+    m.generation = 1
+    m.first_live = 1
+    m.prev_first = 1
+    m.main_transition = false
+    m.binding_id = 0
+    m.origin = Some(origin)
+    m.sweep = manifest.SweepCursor(position: 0, epoch: 0, digest: 0)
+    let (terminal, end) = if b.source_kind == format.ARCHIVE_SOURCE_LOG {
+        restore_copy_log_read(archive, scratch, parent, inc, base, b, due)?
+    } else {
+        restore_copy_entries_read(archive, scratch, parent, inc, base, b, due)?
+    }
+    preview_journal(scratch, foundation, store_key_to_rep(parent), child, base.first_unit, terminal, end)?
+    failure_result_from_rep(manifest.disk_publish_manifest(foundation, child, m))?
+    let mut db = open_directory_with_mode(tasks, foundation, c, r, options, journal.DIRECTORY_JOURNAL_CADENCE, ServingPreview(pager.share_preview(source)))?
+    {
+        let heads = pages.holder_heads(db.holders)
+        let main = heads[0u64]
+        let slot: u64 = int.widen(point.branch)
+        if main.head != point.main_version || main.at != point.main_at || slot >= list.len(heads) || heads[slot].head != point.version || heads[slot].at != point.at {
+            return Error(Lost)
+        }
+    }
+    if b.frame_end != 0 {
+        let cut = cut_install(mut db, RemovePins(list.new()))?
+        durable(mut db, cut)?
+    }
+    close(take db)
+}
+
+fn preview_origin(hold: PreviewHold, point: RestorePoint, attempt: Inline[u8, 16]) -> Result[manifest.RestoreOrigin, Error] {
+    if point.token.parent != hold.parent || point.token.boundary != hold.record.boundary || point.token.binding_id != hold.record.binding_id || point.token.capture_attempt !=[0u8; 16] {
+        return Error(Foreign)
+    }
+    let mut origin = restore_origin_for(point, attempt)
+    origin.intent = Preview(hold.incarnation, hold.record.stamp)
+    Ok(origin)
+}
+
+fn preview_publish_files(to: Dir, work: String, foundation: Dir) -> Result[(), Error] waits {
+    let names = std.dir.list(foundation, None) ?=> |problem| match problem {
+        Io(e) => Io(e),
+        NotUtf8 => Lost,
+    }
+    for entry in names {
+        if entry.name == "LOCK" || entry.name == "MANIFEST" {
+            continue
+        }
+        let mut path = string.from(work)
+        string.push(mut path, "/child/")
+        string.push(mut path, entry.name)
+        failure_result_from_rep(manifest.disk_io(host.rename(to, path, entry.name)))?
+    }
+    let mut path = string.from(work)
+    string.push(mut path, "/child/MANIFEST")
+    failure_result_from_rep(manifest.disk_io(host.rename(to, path, "MANIFEST")))?
+    failure_result_from_rep(manifest.disk_io(host.sync_dir(to)))
+}
+
+pub fn mount_preview_directory(tasks: Tasks, archive: std.object.Opener, hold: PreviewHold, point: RestorePoint, to: Dir, attempt: Inline[u8, 16], c: Clock, r: Random, options: Options, op_ms: u64) -> Result[Restored, DeployError] waits {
+    let origin = deploy_result(preview_origin(hold, point, attempt))?
+    let source = deploy_result(preview_source(archive, hold.record.child, origin, op_ms))?
+    let work = restore_work_name(origin)?
+    let lock = deploy_result(failure_result_from_rep(journal.disk_lock(to, c, options.lock_wait_ms)))?
+    let fenced = deploy_result(failure_result_from_rep(journal.disk_exists(to, "EXPORT")))?
+    let installed = deploy_result(failure_result_from_rep(journal.disk_exists(to, "MANIFEST")))?
+    if !fenced && !installed {
+        restore_check_initial_files(to, work)?
+        match host.open_dir(to, work) {
+            Ok(_) => (),
+            Error(NotFound) => {
+                scratch_result(failure_result_from_rep(manifest.disk_io(host.mkdir(to, work))))?
+                scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
+            },
+            Error(e) => return Error(Scratch(Io(e))),
+        }
+    }
+    let (child, published) = reserve_restore_child(to, work, point, origin, r, Some(hold.record.child))?
+    if !published {
+        match host.remove_tree(to, work) {
+            Ok(_) => (),
+            Error(NotFound) => (),
+            Error(e) => return Error(Scratch(Io(e))),
+        }
+        scratch_result(failure_result_from_rep(manifest.disk_io(host.mkdir(to, work))))?
+        let scratch = scratch_result(failure_result_from_rep(manifest.disk_io(host.open_dir(to, work))))?
+        scratch_result(failure_result_from_rep(manifest.disk_io(host.mkdir(scratch, "child"))))?
+        let foundation = scratch_result(failure_result_from_rep(manifest.disk_io(host.open_dir(scratch, "child"))))?
+        match preview_stage(tasks, archive, source, foundation, scratch, hold, point, origin, c, r, options, op_ms) {
+            Ok(()) => (),
+            Error(Remote(NotFound)) => {
+                deploy_result(failure_result_from_rep(pager.preview_recheck(source)))?
+                return Error(Store(Lost))
+            },
+            Error(take problem) => return Error(Store(take problem)),
+        }
+        deploy_result(failure_result_from_rep(pager.preview_recheck(source)))?
+        scratch_result(preview_publish_files(to, work, foundation))?
+        scratch_result(failure_result_from_rep(manifest.disk_io(host.remove_tree(to, work))))?
+        scratch_result(failure_result_from_rep(manifest.disk_io(host.remove(to, "EXPORT"))))?
+        scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
+    }
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.close(take lock))))?
+    Ok(Restored(child, point, attempt))
+}
+
+fn preview_source(archive: std.object.Opener, child: types.StoreKey, origin: manifest.RestoreOrigin, op_ms: u64) -> Result[pager.PreviewRead, Error] waits {
+    let mut source = failure_result_from_rep(pager.preview_open(archive, child, origin, op_ms))?
+    let Preview(inc, _) = origin.intent else {
+        return Error(Foreign)
+    }
+    let due = std.object.opener_deadline_ms(archive, op_ms)
+    let parsed = restore_archive_manifest_read(archive, store_key_from_rep(origin.parent), inc, origin.boundary.source_kind, pager.preview_base(source), due)
+    let (take m, _) = match take parsed {
+        Ok(take found) => take found,
+        Error(Remote(NotFound)) => {
+            failure_result_from_rep(pager.preview_recheck(source))?
+            return Error(Lost)
+        },
+        Error(take problem) => return Error(take problem),
+    }
+    let mut lists = preview_lists()
+    read_preview_list(source, m, origin.parent, m.pack_root, PackList, mut lists)?
+    let manifest.ListedPages(packs: take data, ..) = take lists
+    let refs = preview_prefix(archive, store_key_from_rep(origin.parent), inc, pager.preview_base(source), origin.boundary, due)?
+    failure_result_from_rep(pager.preview_data_inventory(mut source, take data, refs, m.next_pack, m.next_stamp))?
+    Ok(take source)
+}

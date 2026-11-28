@@ -8,6 +8,8 @@ pub type TieredWritePlan {
 fn tiered_staged_value(op: format.DataOp) -> Result[pages.ReplayValue, types.Failure] {
     match op.value {
         Some(BlobBody(raw)) => Ok(ReplayPut(arc.share(raw))),
+        Some(PendingChunk(raw)) => Ok(ReplayPut(arc.share(raw))),
+        Some(SealedChunk(chunk)) => Ok(ReplayDirect(arc.new(chunk.place))),
         Some(PageValue(raw)) => Ok(ReplayPut(arc.new(types.copied(raw)?))),
         None => Ok(ReplayAbsent),
     }

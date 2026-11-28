@@ -206,3 +206,41 @@ pub fn owned_cell(root: Arc[std.page.Page], descriptor: Bytes) -> Option[Arc[Byt
     let std.page.CursorRow(value: take raw, ..) = take item
     Some(take raw)
 }
+
+// Memory Blobs leaves retain resident payloads and their physical ownership
+// edges. Only a listed class-4 coordinate gives the holder a read lease.
+fn reaches_chunk(page: Arc[std.page.Page], listed: scoped fn(u64) -> bool) -> bool {
+    let image = std.page.image_of(page)
+    for slot in 0u64 .. std.page.count(image) {
+        if std.page.level(image) != 0 {
+            if reaches_chunk(option.unwrap(std.page.child(page, slot)), listed) {
+                return true
+            }
+        } else if let Some(BlobEdge(edge)) = std.page.owning_edge(image, slot) {
+            if edge.pack != 0 && listed(edge.pack) {
+                return true
+            }
+        }
+    }
+    false
+}
+
+pub fn needs_read_inventory(root: Arc[std.page.Page], listed: scoped fn(u64) -> bool) -> bool {
+    let image = std.page.image_of(root)
+    for slot in 0u64 .. std.page.count(image) {
+        if std.page.level(image) != 0 {
+            if needs_read_inventory(option.unwrap(std.page.child(root, slot)), listed) {
+                return true
+            }
+        } else {
+            let desc = unwrap_collection_descriptor(std.page.value_at(root, slot))
+            if desc.residency == ResidentTiered {
+                return true
+            }
+            if desc.kind == BlobsCollection && reaches_chunk(option.unwrap(std.page.child(root, slot)), listed) {
+                return true
+            }
+        }
+    }
+    false
+}

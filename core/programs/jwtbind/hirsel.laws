@@ -1,9 +1,9 @@
 hirsel.laws 1
 hirsel.ai/jwtbind@1/jwtbind/jwt_caller_map src=dd61e1c10e9b8fab sig=c2494ed25e196d37 run=a58227ecac7d1e85 bug=- oracle=- rows=pending
 hirsel.ai/jwtbind@1/jwtbind/jwt_config_refused src=2d5f881587181ee3 sig=1eefd1e43f24e349 run=a58227ecac7d1e85 bug=- oracle=- rows=pending
-hirsel.ai/jwtbind@1/jwtbind/jwt_default_place src=93b5a9797342f824 sig=09282ec96a8303ad run=607dcf6bff52df2b bug=- oracle=- rows=pending
+hirsel.ai/jwtbind@1/jwtbind/jwt_default_place src=93b5a9797342f824 sig=ff0c1129e26a5a44 run=607dcf6bff52df2b bug=- oracle=- rows=pending
 hirsel.ai/jwtbind@1/jwtbind/jwt_expiry_instant src=5e6005efc2204050 sig=1f065ba6d22a6bc4 run=a58227ecac7d1e85 bug=- oracle=- rows=pending
-hirsel.ai/jwtbind@1/jwtbind/jwt_hmac_bind src=047f6279c20ce90d sig=05b0e48b0401bc92 run=b068454df6ce3cee bug=- oracle=- rows=pending
+hirsel.ai/jwtbind@1/jwtbind/jwt_hmac_bind src=047f6279c20ce90d sig=1f3f0c26a5a5e77b run=b068454df6ce3cee bug=- oracle=- rows=pending
 hirsel.ai/jwtbind@1/jwtbind/jwt_rotation src=1cfae0c1d8e54d40 sig=d7319bf04af97701 run=a58227ecac7d1e85 bug=- oracle=- rows=pending
 hirsel.ai/jwtbind@1/jwtbind/jwt_unavailable_remote src=6066aafd55ddc6bf sig=986b82f1cceb1e3a run=a58227ecac7d1e85 bug=- oracle=- rows=pending
 hirsel.ai/jwtbind@1/jwtbind/jwt_unavailable_seed src=9b896839227d04a4 sig=3821917fa1115fda run=a58227ecac7d1e85 bug=- oracle=- rows=pending

@@ -1,0 +1,199 @@
+// A COMMIT's data section, when present, comes first. Collect introductions
+// before applying any edits so a later overwrite cannot drop a dependency.
+pub fn commit_direct_blobs(path: String, raw: Bytes, mut refs: List[Arc[format.DirectBlob]]) -> Result[(), types.Failure] {
+    let mut cursor = format.capture_data_ops(path, raw)?
+    while let Some(op) = format.capture_next_op(path, raw, types.FORMAT_VALUE_MAX, mut cursor)? {
+        if let CaptureDirect(_, _, _, place) = op {
+            types.capacity(list.try_reserve(mut refs, 1))?
+            list.push(mut refs, arc.new(place))
+        }
+    }
+    Ok(())
+}
+
+pub fn direct_pack_frame(path: String, ctx: format.DiskContext, d: format.DirectBlob, raw: Bytes) -> Result[format.DiskFrame, types.Failure] {
+    if list.len(raw) != d.pack_len || std.check.xxh3(raw, 0, list.len(raw)) != d.digest {
+        return Error(format.disk_fault(path, 0, Checksum))
+    }
+    let frame = history_frame(path, ctx, raw, d.offset, 0x0022)?
+    if frame.end - frame.payload < 8 || frame.end - frame.payload - 8 != d.len || format.read_le(raw, frame.payload, 8) != d.stamp || std.check.xxh3(raw, frame.payload + 8, frame.end) != d.checksum {
+        return Error(format.disk_fault(path, d.offset, Checksum))
+    }
+    let mut pos = 72u64
+    let mut prev = 0u64
+    let mut last = 0u64
+    let mut data_end = 72u64
+    let mut indexed_end = 72u64
+    let mut indexed = false
+    while pos < list.len(raw) {
+        let current = disk_read_frame(path, ctx, raw, pos)?
+        if current.kind == PACK_INDEX_KIND {
+            let body = list.slice(raw, current.payload, current.end)
+            let (link, take first) = start_pack_index(path, pos, body, last)?
+            if link != prev {
+                return Error(format.disk_fault(path, pos, Order))
+            }
+            prev = pos
+            let mut cursor = take first
+            while let Some(row) = next_pack_index(path, pos, body, mut cursor)? {
+                last = row.offset
+                let width: u64 = int.widen(row.len)
+                if row.offset != indexed_end || row.kind != 0x22 || width != format.read_le(raw, row.offset + 4, 4) || row.stamp != format.read_le(raw, row.offset + 16, 8) {
+                    return Error(format.disk_fault(path, pos, Malformed))
+                }
+                indexed_end = row.offset + 16 + width
+                if row.offset == d.offset {
+                    indexed = true
+                }
+            }
+        } else if current.kind != 0x0022 || prev != 0 || current.end - current.payload < 8 {
+            return Error(format.disk_fault(path, pos, Malformed))
+        } else {
+            data_end = current.end
+        }
+        pos = current.end
+    }
+    if !indexed || indexed_end != data_end {
+        return Error(format.disk_fault(path, d.offset, Dangling(d.stamp)))
+    }
+    Ok(frame)
+}
+
+pub fn directory_direct_frame(path: String, id: types.StoreKey, d: format.DirectBlob, raw: Bytes) -> Result[format.DiskFrame, types.Failure] {
+    if d.epoch != 0 {
+        return Error(format.disk_fault(path, 0, Header))
+    }
+    let header = disk_read_header(path, raw, 3, Some(d.pack), Some(id))?
+    direct_pack_frame(path, header.context, d, raw)
+}
+
+// Each retained segment here has a successor. Its HEADER is the durable
+// boundary even if the preceding file has bytes beyond that boundary.
+pub fn retained_segment_packs(dir: Dir, id: types.StoreKey, first: u64, end: u64) -> Result[List[(u64, Arc[format.DirectBlob])], types.Failure] waits {
+    let mut retained: List[(u64, Arc[format.DirectBlob])] = list.new()
+    for seq in first .. end {
+        let next = journal_path(seq + 1, "")?
+        let mut successor = disk_io(host.open(dir, next, Read))?
+        let raw = read_disk_bytes(mut successor, next, 0, 72)?
+        disk_io(host.close(take successor))?
+        let limit = disk_read_header(next, raw, 2, Some(seq + 1), Some(id))?.prev_end
+        let path = journal_path(seq, "")?
+        let file = disk_io(host.open(dir, path, Read))?
+        let mut input = format.open_journal_input(take file, false, None, fn() -> Result[Bytes, types.Failure] {
+            disk_read_buffer(65536)
+        })?
+        let header = disk_read_header(path, journal_prefix(mut input, path, 0, 72)?, 2, Some(seq), Some(id))?
+        if limit < 72 || limit > format.journal_input_size(input) {
+            return Error(format.disk_fault(path, limit, Truncated))
+        }
+        let mut at = 72u64
+        while at < limit {
+            let frame = journal_read_frame(mut input, path, header.context, at)?
+            if frame.end > limit {
+                return Error(format.disk_fault(path, at, Truncated))
+            }
+            if frame.kind == 0x0011 {
+                let Some(body) = view frame.payload else {
+                    fail("missing COMMIT payload")
+                }
+                let mut refs: List[Arc[format.DirectBlob]] = list.new()
+                commit_direct_blobs(path, body, mut refs)?
+                for ref in refs {
+                    let _ = read_directory_direct(dir, id, ref, None, false, None)?
+                    types.capacity(list.try_reserve(mut retained, 1))?
+                    list.push(mut retained, (seq, arc.share(ref)))
+                }
+            }
+            at = frame.end
+        }
+        disk_io(host.close(format.take_journal_file(take input)))?
+    }
+    Ok(take retained)
+}
+
+// Validate the indexed envelopes on one open descriptor. The final digest
+// pass copies the bytes it hashes, keeping only an input window and an index
+// frame in the checker's scratch. Only resident replay requests a body.
+pub fn read_directory_direct(dir: Dir, id: types.StoreKey, d: format.DirectBlob, target: Option[Dir], resident: bool, deadline: Option[(Clock, u64)]) -> Result[Bytes, types.Failure] waits {
+    let path = paged_pack_path(d.pack)?
+    format.check_journal_deadline(deadline)?
+    let source_file = match host.open(dir, path, Read) {
+        Ok(take opened) => take opened,
+        Error(NotFound) => return Error(format.disk_fault(path, 0, Absent)),
+        Error(cause) => return Error(Io(cause)),
+    }
+    let mut input = format.open_journal_input(take source_file, false, deadline, fn() -> Result[Bytes, types.Failure] {
+        disk_read_buffer(65536)
+    })?
+    if format.journal_input_size(input) != d.pack_len {
+        return Error(format.disk_fault(path, 0, Checksum))
+    }
+    if d.epoch != 0 {
+        return Error(format.disk_fault(path, 0, Header))
+    }
+    let header = disk_read_header(path, journal_prefix(mut input, path, 0, 72)?, 3, Some(d.pack), Some(id))?
+    let mut expected: List[std.page.PagePtr] = list.with_capacity(1)
+    list.push(mut expected, std.page.PagePtr(pack: d.pack, offset: d.offset, len: int.truncate(d.len + 8), checksum: d.checksum, stamp: d.stamp))
+    let scan = pack_scan_indexed(4, 18446744073709551615u64, d.pack_len)
+    let mut reading = scrub_input(take input, string.from(path), header.context, take scan, take expected)?
+    let mut at = 72u64
+    let mut spent = 0u64
+    loop {
+        if at < reading.checked_pack.index {
+            let head = journal_prefix(mut reading.input, path, at, 16)?
+            if format.read_le(head, 0, 2) == int.widen(PACK_INDEX_KIND) {
+                reading.checked_pack.index = at
+            }
+        }
+        let count = reading.checked_pack.frames
+        let Some(next) = scrub_frame(mut reading, count, d.pack_len, at, mut spent)? else {
+            break
+        }
+        at = next
+    }
+    let value = if resident {
+        journal_prefix(mut reading.input, path, d.offset + 24, d.len)?
+    } else {
+        list.new()
+    }
+    let mut output = match target {
+        Some(to) => Some(disk_io(host.open(to, path, Write))?),
+        None => None,
+    }
+    let mut digest = std.check.start()
+    at = 0
+    while at < d.pack_len {
+        let start = format.refill_journal_chunk(mut reading.input, path, at)?
+        let chunk = format.journal_input_chunk(reading.input)
+        let width = order.min(list.len(chunk) - start, d.pack_len - at)
+        std.check.add(mut digest, chunk, start, start + width)
+        if let Some(mut file) = output {
+            match host.write(mut file, list.slice(chunk, start, start + width)) {
+                Ok(()) => (),
+                Error(problem) => return Error(Io(problem.error)),
+            }
+        }
+        at += width
+    }
+    if std.check.finish(digest) != d.digest {
+        return Error(format.disk_fault(path, 0, Checksum))
+    }
+    if let Some(take finished) = take output {
+        let mut file = take finished
+        disk_io(host.sync(mut file))?
+        disk_io(host.close(take file))?
+    }
+    Ok(take value)
+}
+
+pub fn claim_pack_disk(next_pack: u64) -> PackDiskState {
+    let mut state = genesis_pack_disk()
+    state.next_pack = next_pack
+    take state
+}
+
+pub fn install_claim_packs(mut state: PackDiskState, take journal: PackDiskState) {
+    let PackDiskState(direct: take rows, allocation_next, ..) = take journal
+    install_direct_packs(mut state, take rows)
+    reserve_pack_frontier(mut state, allocation_next)
+}

@@ -31,7 +31,7 @@ pub fn check_list_pack(d: Dir, id: types.StoreKey, seq: u64, next_stamp: u64, of
     }
     let handle = format.take_journal_file(take input)
     manifest.disk_io(host.close(take handle))?
-    Ok(pages.PagePack(class: 2, frames: int.truncate(checked_pack.frames), live: live_bytes, payload_bytes: checked_pack.payload_bytes, index: 0))
+    Ok(pages.PagePack(foreign: None, class: 2, frames: int.truncate(checked_pack.frames), live: live_bytes, payload_bytes: checked_pack.payload_bytes, index: 0))
 }
 
 type SegmentSpan: send {

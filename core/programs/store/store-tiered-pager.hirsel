@@ -1,6 +1,14 @@
-pub type TieredPagerSource: send = PagerDirectory(Dir) | PagerBucket(std.object.Opener, u64, Option[ObjectsCache])
+pub type TieredPagerSource: send = PagerDirectory(Dir) | PagerBucket(std.object.Opener, u64, Option[ObjectsCache]) | PreviewDirectory(Dir, PreviewRead) | PreviewBucket(std.object.Opener, u64, Option[ObjectsCache], PreviewRead)
 
-pub type TieredPagerInput = PagerLocal(Dir) | PagerObjects(std.object.Opener, u64, Option[ObjectsCache])
+pub type TieredPagerInput = PagerLocal(Dir, Option[PreviewRead]) | PagerObjects(std.object.Opener, u64, Option[ObjectsCache], Option[PreviewRead])
+
+pub fn pager_preview(input: TieredPagerInput) -> Option[View[PreviewRead] in input] {
+    match input {
+        PagerLocal(_, Some(source)) => Some(view source),
+        PagerObjects(_, _, _, Some(source)) => Some(view source),
+        _ => None,
+    }
+}
 
 pub type TieredPagerTarget: send {
     edge: format.TieredTarget,

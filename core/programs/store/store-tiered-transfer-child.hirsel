@@ -179,6 +179,9 @@ fn apply_one_tiered_round_op(mut db: Db, mut tree: pages.PageTree, key: Bytes, t
                 let prior_width = failure_result_from_rep(pager.tiered_plan_prior(attempt, pins.frames, staged, key))?
                 let present = prior_width != 0
                 match view replay_val {
+                    ReplayDirect(_) => if present != prior {
+                        return Ok(Error(ImportMalformed))
+                    },
                     ReplayPut(_) => if present != prior {
                         return Ok(Error(ImportMalformed))
                     },
@@ -261,6 +264,10 @@ fn check_queued_rewrites(take backend: pager.TieredPageBackend, writer_pin_bytes
             }
             let old_bytes: Option[Bytes] = if let Some(row) = pager.tiered_replayed_row(tree, qr.logical) {
                 match row.now {
+                    ReplayDirect(place) => {
+                        let bytes_value = pager.tiered_pinned_blob(attempt, visible, format.direct_ref(place)) ?=> failure_from_rep
+                        Some(failure_result_from_rep(types.copied(bytes_value))?)
+                    },
                     ReplayPut(v) => Some(failure_result_from_rep(types.copied(v))?),
                     ReplayAbsent => None,
                 }
@@ -352,6 +359,7 @@ fn validate_rewrite_base_tiered(db: Db, rewrites: List[transfer.ActivationRewrit
         for (cid, key, logical) in cold_rows {
             if let Some(replayed) = pager.tiered_replayed_row(tree, logical) {
                 match replayed.now {
+                    ReplayDirect(_) => continue,
                     ReplayPut(_) => continue,
                     ReplayAbsent => return Ok(false),
                 }

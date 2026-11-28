@@ -151,7 +151,10 @@ pub fn validate_receipt_packs(d: Dir, id: types.StoreKey, path: String, page_rec
     }
     let mut packs: List[u64] = list.new()
     types.capacity(list.try_reserve(mut packs, map.len(lists.packs) + map.len(lists.class_two)))?
-    for (seq, _) in lists.packs {
+    for (seq, pack) in lists.packs {
+        if pack.foreign != None {
+            continue
+        }
         list.push(mut packs, seq)
     }
     for (seq, _) in lists.class_two {
@@ -202,7 +205,7 @@ fn scan_archive_manifest_entries(d: Dir) -> Result[List[(u64, bool)], types.Fail
     Ok(take out)
 }
 
-type CollectedArchiveHolds {
+pub type CollectedArchiveHolds {
     kept_receipts: List[HeldReceipt],
     protected_packs: Map[u64, ()],
     stale_files: List[(u64, bool)]
@@ -240,6 +243,12 @@ fn collect_directory_archive_holds(d: Dir, id: types.StoreKey, current: PageMani
         let digest = std.check.xxh3(raw, 0, list.len(raw))
         types.capacity(list.try_reserve(mut kept_receipts, 1))?
         list.push(mut kept_receipts, HeldReceipt(generation: gen, binding_id: parsed.binding_id, first_live: parsed.first_live, prev_first: parsed.prev_first, manifest_bytes: list.len(raw), digest, packs: take packs))
+    }
+    if current.binding_id != 0 {
+        for (_, place) in retained_segment_packs(d, id, current.prev_first, current.first_live)? {
+            types.capacity(map.try_reserve(mut protected_packs, 1))?
+            map.insert(mut protected_packs, place.pack, ())
+        }
     }
     Ok(CollectedArchiveHolds(kept_receipts: take kept_receipts, protected_packs: take protected_packs, stale_files: take stale_files))
 }
@@ -320,8 +329,44 @@ fn cleanup_segments_below(d: Dir, prev_first: u64, mut name: String) -> Result[(
 // matching older `m-<g>` receipts BEFORE any erasure, protect their union of
 // pack closures and `[prev_first, first_live)` segments when bound, and remove
 // stale/future receipts, dead packs and obsolete segments.
-pub fn cleanup_page_manifest_with_holds(d: Dir, id: types.StoreKey, validated: ValidatedPageManifest) -> Result[List[HeldReceipt], types.Failure] waits {
-    let CollectedArchiveHolds(kept_receipts: take kept_receipts, protected_packs: take protected_packs, stale_files: take stale_files) = collect_directory_archive_holds(d, id, validated.manifest)?
+pub fn directory_cleanup_plan(d: Dir, id: types.StoreKey, validated: ValidatedPageManifest, introduced: List[Arc[format.DirectBlob]]) -> Result[CollectedArchiveHolds, types.Failure] waits {
+    let mut holds = collect_directory_archive_holds(d, id, validated.manifest)?
+    types.capacity(map.try_reserve(mut holds.protected_packs, map.len(validated.inventory) + list.len(introduced)))?
+    for (seq, row) in validated.inventory {
+        if row.foreign != None {
+            continue
+        }
+        map.insert(mut holds.protected_packs, seq, ())
+    }
+    for place in introduced {
+        if place.len > validated.manifest.limits.value {
+            return Error(format.disk_fault("MANIFEST", 72, Malformed))
+        }
+        if place.pack < validated.manifest.next_pack || place.stamp < validated.manifest.next_stamp {
+            return Error(format.disk_fault("MANIFEST", 72, Order))
+        }
+        map.insert(mut holds.protected_packs, place.pack, ())
+    }
+    Ok(take holds)
+}
+
+// Journal-only packs below the installed frontier belong to old receipts.
+// Feed their names to the next cut's ordinary lease-aware retirement.
+pub fn carry_historical_packs(mut state: PackDiskState, kept: Map[u64, ()]) -> Result[(), types.Failure] {
+    for (seq, _) in kept {
+        if seq >= state.next_pack {
+            continue
+        }
+        if let None = disk_index_get(state.locations.packs, seq) {
+            types.capacity(list.try_reserve(mut state.carried, 1))?
+            list.push(mut state.carried, seq)
+        }
+    }
+    Ok(())
+}
+
+pub fn cleanup_page_manifest_with_holds(d: Dir, current: PageManifest, take holds: CollectedArchiveHolds) -> Result[List[HeldReceipt], types.Failure] waits {
+    let CollectedArchiveHolds(kept_receipts: take kept_receipts, protected_packs: take protected_packs, stale_files: take stale_files) = take holds
     let mut name = disk_allocation(scoped fn() -> Result[String, types.Failure] {
         Ok(string.with_capacity(32))
     })?
@@ -335,13 +380,13 @@ pub fn cleanup_page_manifest_with_holds(d: Dir, id: types.StoreKey, validated: V
         }
         let _ = disk_remove_optional(d, name)?
     }
-    cleanup_dead_packs_keeping(d, validated.inventory, Some(view protected_packs), mut name)?
-    if validated.manifest.binding_id == 0 {
-        for old in validated.manifest.prev_first .. validated.manifest.first_live {
+    cleanup_dead_packs_keeping(d, map.new(), Some(view protected_packs), mut name)?
+    if current.binding_id == 0 {
+        for old in current.prev_first .. current.first_live {
             remove_numbered(d, "j-", old, true, mut name)?
         }
     } else {
-        cleanup_segments_below(d, validated.manifest.prev_first, mut name)?
+        cleanup_segments_below(d, current.prev_first, mut name)?
     }
     Ok(take kept_receipts)
 }
@@ -365,7 +410,7 @@ fn segment_files_size(d: Dir, seq: u64) -> Result[u64, types.Failure] waits {
     Ok(int.saturating_add(seg_size, end_size))
 }
 
-fn compute_extra_hold_bytes(d: Dir, candidates: List[HeldReceipt], start_idx: u64, live_packs_next: Map[u64, ()], seg_from: u64, seg_end: u64, ordinary_prev_first: u64) -> Result[u64, types.Failure] waits {
+fn compute_extra_hold_bytes(d: Dir, journal_packs: List[(u64, Arc[format.DirectBlob])], candidates: List[HeldReceipt], start_idx: u64, live_packs_next: Map[u64, ()], seg_from: u64, seg_end: u64, ordinary_prev_first: u64) -> Result[u64, types.Failure] waits {
     let mut total = 0u64
     let mut seen_packs: Map[u64, ()] = map.new()
     for i in start_idx .. list.len(candidates) {
@@ -378,6 +423,13 @@ fn compute_extra_hold_bytes(d: Dir, candidates: List[HeldReceipt], start_idx: u6
             types.capacity(map.try_reserve(mut seen_packs, 1))?
             map.insert(mut seen_packs, seq, ())
             total = int.saturating_add(total, optional_file_size(d, paged_pack_path(seq)?)?)
+        }
+    }
+    for (segment, place) in journal_packs {
+        if segment >= seg_from && !map.contains(live_packs_next, place.pack) && !map.contains(seen_packs, place.pack) {
+            types.capacity(map.try_reserve(mut seen_packs, 1))?
+            map.insert(mut seen_packs, place.pack, ())
+            total = int.saturating_add(total, place.pack_len)
         }
     }
     let archive_only_end = order.min(seg_end, ordinary_prev_first)
@@ -397,7 +449,7 @@ fn live_generation_bytes(d: Dir, live_packs_next: Map[u64, ()], manifest_len: u6
     Ok(order.max(total, 1u64))
 }
 
-pub fn plan_directory_archive_cut(d: Dir, hold: DirArchiveHold, target_binding: Option[u64], current_gen: u64, old_first_live: u64, new_first_live: u64, ordinary_prev_first: u64, export_lease_first: Option[u64], live_packs_old: List[u64], live_packs_next: Map[u64, ()], next_manifest_estimate: u64) -> Result[DirArchiveCutPlan, types.Failure] waits {
+pub fn plan_directory_archive_cut(d: Dir, id: types.StoreKey, hold: DirArchiveHold, target_binding: Option[u64], current_gen: u64, old_first_live: u64, new_first_live: u64, ordinary_prev_first: u64, export_lease_first: Option[u64], live_packs_old: List[u64], live_packs_next: Map[u64, ()], next_manifest_estimate: u64) -> Result[DirArchiveCutPlan, types.Failure] waits {
     let new_binding = match target_binding {
         Some(b) => b,
         None => hold.binding_id,
@@ -406,9 +458,25 @@ pub fn plan_directory_archive_cut(d: Dir, hold: DirArchiveHold, target_binding: 
         Some(ef) => order.min(ef, new_first_live),
         None => new_first_live,
     }
+    let continuing = hold.binding_id != 0 && hold.binding_id == new_binding
+    let segment_floor = if continuing {
+        order.min(hold.prev_first, bound_lease_floor)
+    } else {
+        bound_lease_floor
+    }
+    let journal_packs = retained_segment_packs(d, id, segment_floor, new_first_live)?
+    let mut protected_packs: Map[u64, ()] = map.new()
+    for (segment, place) in journal_packs {
+        if segment >= bound_lease_floor {
+            types.capacity(map.try_reserve(mut protected_packs, 1))?
+            map.insert(mut protected_packs, place.pack, ())
+        }
+    }
     // Unbound -> Unbound
     if hold.binding_id == 0 && new_binding == 0 {
-        return Ok(empty_archive_cut_plan(0, ordinary_prev_first, 0, false))
+        let mut plan = empty_archive_cut_plan(0, ordinary_prev_first, 0, false)
+        plan.protected_packs = take protected_packs
+        return Ok(take plan)
     }
     // Detach cut (Bound -> Unbound): release all holds after MANIFEST rename.
     if new_binding == 0 {
@@ -417,7 +485,7 @@ pub fn plan_directory_archive_cut(d: Dir, hold: DirArchiveHold, target_binding: 
         for r in hold.receipts {
             list.push(mut after, r.generation)
         }
-        return Ok(DirArchiveCutPlan(new_binding: 0, new_prev_first: order.min(ordinary_prev_first, hold.prev_first), archive_seg_first: None, save_current_receipt: None, unlink_before_sync: list.new(), unlink_after_sync: take after, kept_receipts: list.new(), protected_packs: map.new(), released_unarchived: false, effective_hold_bytes: 0, hold_bytes_explicit: false))
+        return Ok(DirArchiveCutPlan(new_binding: 0, new_prev_first: order.min(ordinary_prev_first, hold.prev_first), archive_seg_first: None, save_current_receipt: None, unlink_before_sync: list.new(), unlink_after_sync: take after, kept_receipts: list.new(), protected_packs: take protected_packs, released_unarchived: false, effective_hold_bytes: 0, hold_bytes_explicit: false))
     }
     let effective_budget = if hold.hold_bytes_explicit {
         hold.hold_bytes
@@ -431,9 +499,14 @@ pub fn plan_directory_archive_cut(d: Dir, hold: DirArchiveHold, target_binding: 
         for r in hold.receipts {
             list.push(mut after, r.generation)
         }
-        return Ok(DirArchiveCutPlan(new_binding, new_prev_first: bound_lease_floor, archive_seg_first: None, save_current_receipt: None, unlink_before_sync: list.new(), unlink_after_sync: take after, kept_receipts: list.new(), protected_packs: map.new(), released_unarchived: false, effective_hold_bytes: effective_budget, hold_bytes_explicit: hold.hold_bytes_explicit))
+        return Ok(DirArchiveCutPlan(new_binding, new_prev_first: bound_lease_floor, archive_seg_first: None, save_current_receipt: None, unlink_before_sync: list.new(), unlink_after_sync: take after, kept_receipts: list.new(), protected_packs: take protected_packs, released_unarchived: false, effective_hold_bytes: effective_budget, hold_bytes_explicit: hold.hold_bytes_explicit))
     }
     // Bound -> Bound cut: preserve unarchived receipts and segments within `hold_bytes`.
+    let mut ordinary_packs: Map[u64, ()] = clone(live_packs_next)
+    types.capacity(map.try_reserve(mut ordinary_packs, map.len(protected_packs)))?
+    for (seq, _) in protected_packs {
+        map.insert(mut ordinary_packs, seq, ())
+    }
     let current_raw = read_page_manifest_bytes(d)?
     let current_digest = std.check.xxh3(current_raw, 0, list.len(current_raw))
     let need_current = !(hold.acked_gen > current_gen || (hold.acked_gen == current_gen && hold.acked_digest == current_digest))
@@ -467,7 +540,7 @@ pub fn plan_directory_archive_cut(d: Dir, hold: DirArchiveHold, target_binding: 
         } else {
             candidates[start_idx].first_live
         }
-        let extra = compute_extra_hold_bytes(d, candidates, start_idx, live_packs_next, seg_from, new_first_live, bound_lease_floor)?
+        let extra = compute_extra_hold_bytes(d, journal_packs, candidates, start_idx, ordinary_packs, seg_from, new_first_live, bound_lease_floor)?
         if extra <= effective_budget {
             chosen = start_idx
             chosen_seg_from = seg_from
@@ -486,7 +559,7 @@ pub fn plan_directory_archive_cut(d: Dir, hold: DirArchiveHold, target_binding: 
                 old_first_live
             }
             if unacked_seg < new_first_live {
-                let extra = compute_extra_hold_bytes(d, candidates, n, live_packs_next, unacked_seg, new_first_live, bound_lease_floor)?
+                let extra = compute_extra_hold_bytes(d, journal_packs, candidates, n, ordinary_packs, unacked_seg, new_first_live, bound_lease_floor)?
                 if extra <= effective_budget {
                     chosen_seg_from = unacked_seg
                 } else {
@@ -507,7 +580,12 @@ pub fn plan_directory_archive_cut(d: Dir, hold: DirArchiveHold, target_binding: 
         }
     }
     let mut kept_receipts: List[HeldReceipt] = list.new()
-    let mut protected_packs: Map[u64, ()] = map.new()
+    for (segment, place) in journal_packs {
+        if segment >= chosen_seg_from {
+            types.capacity(map.try_reserve(mut protected_packs, 1))?
+            map.insert(mut protected_packs, place.pack, ())
+        }
+    }
     let mut keep_current = false
     for i in chosen .. n {
         let r = candidates[i]

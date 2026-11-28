@@ -5,7 +5,7 @@ pub type Restored: send {
 }
 
 fn restore_origin_for(point: RestorePoint, attempt: Inline[u8, 16]) -> manifest.RestoreOrigin {
-    manifest.RestoreOrigin(parent: store_key_to_rep(point.token.parent), binding_id: point.token.binding_id, branch: point.branch, version: point.version, at: point.at, boundary: point.token.boundary, attempt, capture_attempt: point.token.capture_attempt)
+    manifest.RestoreOrigin(parent: store_key_to_rep(point.token.parent), binding_id: point.token.binding_id, branch: point.branch, version: point.version, at: point.at, boundary: point.token.boundary, attempt, capture_attempt: point.token.capture_attempt, intent: Successor)
 }
 
 fn restore_same_origin(m: manifest.PageManifest, o: manifest.RestoreOrigin) -> bool {
@@ -16,7 +16,7 @@ fn restore_same_origin(m: manifest.PageManifest, o: manifest.RestoreOrigin) -> b
 }
 
 fn restore_matches(saved: manifest.RestoreOrigin, wanted: manifest.RestoreOrigin, exact_retry: bool) -> bool {
-    saved.parent == wanted.parent && saved.binding_id == wanted.binding_id && saved.capture_attempt == wanted.capture_attempt && saved.boundary == wanted.boundary && saved.attempt == wanted.attempt && (exact_retry || (saved.branch == wanted.branch && saved.version == wanted.version && saved.at == wanted.at))
+    saved.intent == wanted.intent && saved.parent == wanted.parent && saved.binding_id == wanted.binding_id && saved.capture_attempt == wanted.capture_attempt && saved.boundary == wanted.boundary && saved.attempt == wanted.attempt && (exact_retry || (saved.branch == wanted.branch && saved.version == wanted.version && saved.at == wanted.at))
 }
 
 fn restore_is_pinned(target: RestoreTarget) -> bool {
@@ -66,6 +66,10 @@ fn restore_copy_backup(from: Dir, private_dir: Dir, point: RestorePoint) -> Resu
     }
     let last_path = deploy_result(failure_result_from_rep(manifest.journal_path(terminal, "")))?
     deploy_result(failure_result_from_rep(transfer.copy_export_file(from, private_dir, last_path, Some(end))))?
+    deploy_result(restore_direct_prefix(private_dir, key, m.first_live, terminal, end, false, scoped fn(place: format.DirectBlob) -> Result[Bytes, Error] waits {
+        let name = failure_result_from_rep(manifest.paged_pack_path(place.pack))?
+        failure_result_from_rep(manifest.disk_read_file(from, name, place.pack_len))
+    }))?
     let mut stamp = read_export_stamp(from)?
     stamp.terminal = terminal
     stamp.end = end
@@ -151,7 +155,7 @@ fn restore_write_foundation(private_dir: Dir, to: Dir, child: StoreId, point: Re
 fn restore_work_name(origin: manifest.RestoreOrigin) -> Result[String, DeployError] {
     let body = deploy_result(failure_result_from_rep(manifest.restore_origin_payload(origin)))?
     let mut name = string.from("r-")
-    string.push(mut name, std.hex.encode(body))
+    string.push(mut name, std.base64.encode_url(body, false))
     Ok(take name)
 }
 
@@ -169,8 +173,8 @@ fn restore_pending_origin(d: Dir) -> Result[Option[manifest.RestoreOrigin], Erro
             let size: u16 = list.word_le(raw, pos + 1)
             let start = pos + 3
             pos = start + int.widen(size)
-            if pos - start == 2u64 + 2u64 * manifest.RESTORE_ORIGIN_PAYLOAD && list.slice(raw, start, start + 2) == b"r-" {
-                if let Some(body) = std.hex.decode(list.slice(raw, start + 2, pos)) {
+            if pos - start == 2u64 + (4u64 * manifest.RESTORE_ORIGIN_PAYLOAD + 2) / 3 && list.slice(raw, start, start + 2) == b"r-" {
+                if let Some(body) = std.base64.decode_url(list.slice(raw, start + 2, pos), false) {
                     if let Some(saved) = manifest.restore_origin_from_payload(body) {
                         return Ok(Some(saved))
                     }
@@ -202,20 +206,24 @@ fn restore_check_initial_files(to: Dir, work: String) -> Result[(), DeployError]
 }
 
 fn restore_reserve_directory(to: Dir, work: String, point: RestorePoint, origin: manifest.RestoreOrigin, r: Random) -> Result[(StoreId, bool), DeployError] waits {
+    reserve_restore_child(to, work, point, origin, r, None)
+}
+
+fn reserve_restore_child(to: Dir, work: String, point: RestorePoint, origin: manifest.RestoreOrigin, r: Random, expected: Option[types.StoreKey]) -> Result[(StoreId, bool), DeployError] waits {
     if deploy_result(failure_result_from_rep(journal.disk_exists(to, "EXPORT")))? {
         let bytes_in = scratch_result(failure_result_from_rep(manifest.disk_read_file(to, "EXPORT", 4096)))?
         let (id, take fence) = match manifest.disk_read_page_manifest("EXPORT", bytes_in) {
             Ok(take decoded) => take decoded,
             Error(_) => return Error(Scratch(Exists("restore target"))),
         }
-        if !restore_same_origin(fence, origin) {
+        if !restore_same_origin(fence, origin) || (expected != None && expected != Some(id)) {
             return Error(Scratch(Exists("restore target")))
         }
         return Ok((store_key_from_rep(id), false))
     }
     if deploy_result(failure_result_from_rep(journal.disk_exists(to, "MANIFEST")))? {
         let (id, take published) = deploy_result(read_page_manifest_file(to))?
-        if !restore_same_origin(published, origin) {
+        if !restore_same_origin(published, origin) || (expected != None && expected != Some(store_key_to_rep(id))) {
             return Error(Scratch(Exists("restore target")))
         }
         scratch_result(failure_result_from_rep(manifest.disk_io(host.sync_dir(to))))?
@@ -231,7 +239,10 @@ fn restore_reserve_directory(to: Dir, work: String, point: RestorePoint, origin:
     // The directory entry reserves the child ID before its contents are written.
     // Rebuild a torn fence from that ID and the origin in the work directory name.
     let id = if list.len(contents) == 0 {
-        deploy_result(failure_result_from_rep(types.capacity(types.disk_identity(r))))?
+        match expected {
+            Some(key) => key,
+            None => deploy_result(failure_result_from_rep(types.capacity(types.disk_identity(r))))?,
+        }
     } else {
         let name = string.as_bytes(contents[0u64].name)
         if list.len(contents) != 1 || list.len(name) != 32 {
@@ -242,7 +253,7 @@ fn restore_reserve_directory(to: Dir, work: String, point: RestorePoint, origin:
         }
         types.StoreKey(hi: format.read_le(words, 0, 8), lo: format.read_le(words, 8, 8))
     }
-    if id == store_key_to_rep(point.token.parent) {
+    if id == store_key_to_rep(point.token.parent) || (expected != None && expected != Some(id)) {
         return Error(Store(Foreign))
     }
     let mut fence = manifest.page_manifest_empty(types.named_limits(None))

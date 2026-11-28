@@ -1,0 +1,156 @@
+// The installed frontier bounds reclaim. Private reservations and the journal
+// suffix advance the writer's allocation frontier independently of a cut.
+pub type DirectPacks: send {
+    stamps: DiskIndex[u64, Arc[format.DirectBlob]],
+    rows: DiskIndex[u64, DirectPackRow]
+}
+
+pub type DirectPackRow: shareable + send {
+    pack: pages.TieredPagerPack,
+    epoch: u64,
+    digest: u64
+}
+
+fn empty_direct_packs() -> DirectPacks {
+    DirectPacks(stamps: disk_index(), rows: disk_index())
+}
+
+pub fn pack_allocation_next(state: PackDiskState) -> u64 {
+    order.max(state.next_pack, state.allocation_next)
+}
+
+pub fn reserve_pack_frontier(mut state: PackDiskState, next: u64) {
+    state.allocation_next = order.max(state.allocation_next, next)
+}
+
+pub fn direct_packs(state: PackDiskState) -> View[DirectPacks] in state {
+    view state.direct
+}
+
+pub fn direct_history_ref(p: format.DirectBlob) -> pages.HistoryRef {
+    pages.HistoryRef(seq: p.pack, epoch: p.epoch, len: p.pack_len, digest: p.digest)
+}
+
+pub fn direct_pack_row(p: format.DirectBlob) -> pages.TieredPagerPack {
+    let row = pages.PagePack(foreign: None, class: 4, frames: 1, live: 8 + p.len, payload_bytes: p.pack_len, index: p.offset + 24 + p.len)
+    let object: Option[pages.HistoryRef] = if p.epoch == 0 {
+        None
+    } else {
+        Some(direct_history_ref(p))
+    }
+    pages.TieredPagerPack(inventory: row, object: object)
+}
+
+fn same_direct(before: format.DirectBlob, after: format.DirectBlob) -> bool {
+    before == after
+}
+
+fn direct_row_charge(_row: DirectPackRow) -> u64 {
+    0
+}
+
+fn direct_stamp_charge(_place: Arc[format.DirectBlob]) -> u64 {
+    0
+}
+
+pub fn candidate_direct_packs(state: PackDiskState, introduced: List[Arc[format.DirectBlob]]) -> Result[DirectPacks, types.Failure] {
+    candidate_direct_rows(state, introduced, scoped fn(_place: format.DirectBlob) -> Result[Option[pages.ForeignPack], types.Failure] {
+        Ok(None)
+    })
+}
+
+pub fn candidate_direct_rows(state: PackDiskState, introduced: List[Arc[format.DirectBlob]], foreign: scoped fn(format.DirectBlob) -> Result[Option[pages.ForeignPack], types.Failure]) -> Result[DirectPacks, types.Failure] {
+    let mut candidate = DirectPacks(stamps: disk_index_share(state.direct.stamps), rows: disk_index_share(state.direct.rows))
+    for p in introduced {
+        let imported = foreign(p)?
+        if imported == None && p.pack < state.next_pack {
+            return Error(format.disk_fault("direct BLOB", p.offset, Order))
+        }
+        if let Some(prior) = disk_index_get(candidate.stamps, p.stamp) {
+            if !same_direct(prior, p) {
+                return Error(format.disk_fault("direct BLOB", p.offset, Order))
+            }
+            continue
+        }
+        let mut row = direct_pack_row(p)
+        row.inventory.foreign = imported
+        if let Some(_) = imported {
+            row.object = None
+        }
+        if let Some(before) = disk_index_get(candidate.rows, p.pack) {
+            if before.pack.inventory.foreign != imported || before.pack.inventory.payload_bytes != p.pack_len || before.digest != p.digest || before.epoch != p.epoch {
+                return Error(format.disk_fault("direct BLOB", p.offset, Order))
+            }
+            row.inventory.frames += before.pack.inventory.frames
+            row.inventory.live += before.pack.inventory.live
+            row.inventory.index = order.max(row.inventory.index, before.pack.inventory.index)
+        }
+        types.capacity(disk_index_put(mut candidate.stamps, p.stamp, arc.share(p), direct_stamp_charge))?
+        types.capacity(disk_index_put(mut candidate.rows, p.pack, DirectPackRow(pack: take row, epoch: p.epoch, digest: p.digest), direct_row_charge))?
+    }
+    Ok(take candidate)
+}
+
+pub fn install_direct_packs(mut state: PackDiskState, take candidate: DirectPacks) {
+    state.direct = take candidate
+}
+
+pub fn seed_direct_packs(mut state: PackDiskState, introduced: List[Arc[format.DirectBlob]]) -> Result[(), types.Failure] {
+    seed_direct_rows(mut state, introduced, scoped fn(_place: format.DirectBlob) -> Result[Option[pages.ForeignPack], types.Failure] {
+        Ok(None)
+    })
+}
+
+pub fn seed_direct_rows(mut state: PackDiskState, introduced: List[Arc[format.DirectBlob]], foreign: scoped fn(format.DirectBlob) -> Result[Option[pages.ForeignPack], types.Failure]) -> Result[(), types.Failure] {
+    let candidate = candidate_direct_rows(state, introduced, foreign)?
+    let mut next = pack_allocation_next(state)
+    for p in introduced {
+        next = order.max(next, catalog.stamp_after(p.pack)?)
+    }
+    install_direct_packs(mut state, take candidate)
+    reserve_pack_frontier(mut state, next)
+    Ok(())
+}
+
+// Unpublished direct rows let the resident walk recognise their existing
+// locations. Discard every row still unreferenced after both walks.
+pub fn direct_page_retry_base(state: PackDiskState, holders: List[HeldPage], roots: List[pages.PageRoots], resident_packs: Map[u64, pages.PagePack]) -> Result[PageRetryBase, types.Failure] {
+    if std.omap.len(state.direct.rows.values) == 0 && map.len(resident_packs) == 0 {
+        return page_retry_base(state.locations, state.owners, holders, roots)
+    }
+    let mut known = share_page_locations(state.locations)
+    for (seq, item) in resident_packs {
+        let mut pack: pages.PagePack = clone(item)
+        pack.live = 0
+        types.capacity(disk_index_put(mut known.packs, seq, pack, pack_edge_charge))?
+    }
+    let mut rows = std.omap.range(state.direct.rows.values, Unbounded, Unbounded)
+    while let Some((seq, proposed)) = std.omap.next(mut rows) {
+        let mut pack = proposed.pack.inventory
+        pack.live = 0
+        types.capacity(disk_index_put(mut known.packs, seq, pack, pack_edge_charge))?
+    }
+    page_retry_base(known, state.owners, holders, roots)
+}
+
+pub fn adopt_direct_packs(mut known: PageLocations, journal: DirectPacks, cold: Map[u64, ()]) -> Result[(), types.Failure] {
+    for (stamp, _) in cold {
+        if map_has_location(known, stamp) {
+            continue
+        }
+        let Some(p) = disk_index_get(journal.stamps, stamp) else {
+            continue
+        }
+        let _ = types.capacity(disk_index_update(mut known.packs, p.pack, pack_edge_charge, fn(mut pack: pages.PagePack) {
+            pack.live += 8 + p.len
+        }))?
+    }
+    let mut rows = std.omap.range(journal.rows.values, Unbounded, Unbounded)
+    while let Some((seq, _)) = std.omap.next(mut rows) {
+        let live_bytes = option.unwrap(disk_index_get(known.packs, seq)).live
+        if live_bytes == 0 {
+            let _ = types.capacity(disk_index_remove(mut known.packs, seq, pack_edge_charge))?
+        }
+    }
+    Ok(())
+}

@@ -93,7 +93,7 @@ fn replay_ops(take ops: List[StepOp]) -> List[format.JournalOp] {
     let mut out: List[format.JournalOp] = list.with_capacity(list.len(ops))
     for take op in take ops {
         let StepOp(key: take key, value: take value, prior: prior) = take op
-        list.push(mut out, format.JournalOp(key: take key, value: take value, prior: prior, trim: None))
+        list.push(mut out, format.JournalOp(key: take key, value: take value, direct: None, prior: prior, trim: None))
     }
     take out
 }

@@ -445,7 +445,7 @@ fn test_l65_pager_directory(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
     list.fill(mut pack_bytes, 28, 0u8)
     failure_result_from_rep(manifest.disk_write_synced(fixtures, path, pack_bytes))?
     let owner = StoreId(hi: 3, lo: 4)
-    let inventory = pages.PagePack(class: 3, frames: 1, live: 80, payload_bytes: 196, index: 168)
+    let inventory = pages.PagePack(foreign: None, class: 3, frames: 1, live: 80, payload_bytes: 196, index: 168)
     let ptr = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)
     let demand = pager.TieredPagerTarget(edge: TieredPage(ptr), direction: TieredPoint, inventory: inventory, object: None, next_stamp: 42, deadline: 0)
     let (requests, take worker) = failure_result_from_rep(object_writer.start_tiered_pager(tasks, store_key_to_rep(owner), 0, PagerDirectory(fixtures), pager.TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 0, pager_task_bytes: 1048576, cut_pins: false), 4))?
@@ -643,8 +643,8 @@ fn l68_write_page_pack(d: Dir, owner: StoreId, seq: u64, stamp: u64, payload_byt
 
 fn l68_inventory_wire(class_three_end: u64) -> Result[Bytes, Error] {
     let mut records: List[std.page.Entry] = list.with_capacity(2)
-    let cold = pages.PagePack(class: 3, frames: 1, live: 80, payload_bytes: 220, index: class_three_end)
-    let warm = pages.PagePack(class: 0, frames: 1, live: 91, payload_bytes: 91, index: 0)
+    let cold = pages.PagePack(foreign: None, class: 3, frames: 1, live: 80, payload_bytes: 220, index: class_three_end)
+    let warm = pages.PagePack(foreign: None, class: 0, frames: 1, live: 91, payload_bytes: 91, index: 0)
     list.push(mut records, std.page.Entry(key: types.key_word(8), cell: InlineValue(manifest.encode_pack_row(cold))))
     list.push(mut records, std.page.Entry(key: types.key_word(9), cell: InlineValue(manifest.encode_pack_row(warm))))
     let image = failure_result_from_rep(pages.page_result(std.page.encode(records, 0, 101, Unprefixed)))?
@@ -709,7 +709,7 @@ fn l68_replay_base() -> Result[pager.JournalReplay, Error] {
 
 fn l68_replay_put(branch_id: u32, head: u64, prior: u32, value: String) -> Result[format.JournalEvent, Error] {
     let mut ops: List[format.JournalOp] = list.new()
-    list.push(mut ops, format.JournalOp(key: failure_result_from_rep(pager.log_key(9, 2))?, value: Some(string.into_bytes(string.from(value))), prior: prior, trim: None))
+    list.push(mut ops, format.JournalOp(key: failure_result_from_rep(pager.log_key(9, 2))?, value: Some(string.into_bytes(string.from(value))), direct: None, prior: prior, trim: None))
     Ok(Commit(format.JournalCommit(branch: branch_id, version: head, at: head, data: take ops, streams: list.new(), keyed: list.new(), call: None, payload: 0)))
 }
 

@@ -399,7 +399,7 @@ fn check_test_stamp(stamp: u64) -> Result[std.page.Image, Error] {
 
 fn check_test_inventory(d: Dir, id: StoreId, second: bool, width: u64) -> Result[std.page.PagePtr, Error] waits {
     let mut rows: List[std.page.Entry] = list.with_capacity(2)
-    let packed = manifest.encode_pack_row(pages.PagePack(class: 0, frames: 1, live: width, payload_bytes: width, index: 0))
+    let packed = manifest.encode_pack_row(pages.PagePack(foreign: None, class: 0, frames: 1, live: width, payload_bytes: width, index: 0))
     list.push(mut rows, std.page.Entry(key: types.key_word(1), cell: InlineValue(clone(packed))))
     if second {
         list.push(mut rows, std.page.Entry(key: types.key_word(2), cell: InlineValue(take packed)))

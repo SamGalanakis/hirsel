@@ -40,13 +40,15 @@ pub fn start_tiered_pager_link(tasks: Tasks, owner: types.StoreKey, opened: u64,
 fn run_tiered_pager(take launch: pager.TieredPagerStart) waits {
     let pager.TieredPagerStart(store: owner, opened: opened, authority: take authority, inbox: take incoming, writer: take writer, notices: take notify, shared_bytes: shared) = take launch
     let mut input: pager.TieredPagerInput = match take authority {
-        PagerDirectory(d) => PagerLocal(d),
+        PagerDirectory(d) => PagerLocal(d, None),
+        PreviewDirectory(d, take preview) => PagerLocal(d, Some(take preview)),
+        PreviewBucket(take requests, op_ms, cache, take preview) => PagerObjects(take requests, op_ms, history.pack_cache_directory(cache), Some(take preview)),
         PagerBucket(take requests, op_ms, cache) => {
             let local = history.pack_cache_directory(cache)
             if let Some(directory) = local {
                 pack_cache_trim(directory)
             }
-            PagerObjects(take requests, op_ms, local)
+            PagerObjects(take requests, op_ms, local, None)
         },
     }
     let mut private_cache = pager.new_tiered_cache(shared)
@@ -352,8 +354,20 @@ fn tiered_pager_frame(mut input: pager.TieredPagerInput, mut private_cache: page
         return Ok(take found)
     }
     let width = 16 + expected.len
+    if let Some(row) = demand.inventory.foreign {
+        let Some(source) = pager.pager_preview(input) else {
+            return Error(Missing("preview archive"))
+        }
+        pager.check_index_membership(row.parent, path, expected.pack, demand.inventory.class, demand.inventory.index, row.len, demand.next_stamp, expected, scoped fn(at: u64, size: u64) -> Result[Bytes, types.Failure] waits {
+            pager.preview_pack_range(source, expected.pack, row, at, at + size, demand.deadline)
+        })?
+        let raw = pager.preview_pack_range(source, expected.pack, row, expected.offset, expected.offset + width, demand.deadline)?
+        let frame = manifest.read_tiered_frame(path, row.parent, demand.edge, raw, expected.offset, demand.next_stamp)?
+        pager.tiered_cache_admit(mut private_cache, frame)
+        return Ok(take frame)
+    }
     let page = match input {
-        PagerLocal(d) => {
+        PagerLocal(d, _) => {
             let mut opened = match host.open(d, path, Read) {
                 Ok(take fd) => take fd,
                 Error(NotFound) => return Error(format.disk_fault(path, expected.offset, Dangling(expected.stamp))),
@@ -366,7 +380,7 @@ fn tiered_pager_frame(mut input: pager.TieredPagerInput, mut private_cache: page
                 manifest.read_tiered_frame(path, owner, demand.edge, raw, expected.offset, demand.next_stamp)
             })?
         },
-        PagerObjects(client, op_ms, cache) => {
+        PagerObjects(client, op_ms, cache, _) => {
             let item = option.unwrap(demand.object)
             let window = pager.tiered_bucket_range(path, demand.edge, item.len, demand.direction)?
             let deadline = if demand.deadline == 0 {

@@ -113,7 +113,7 @@ pub fn check_pack_slot(packs: List[CheckPack], path: String, ptr: std.page.PageP
     if lo == list.len(packs) || packs[lo].seq != ptr.pack {
         return Error(format.disk_fault(path, ptr.offset, Dangling(ptr.stamp)))
     }
-    if packs[lo].class != class {
+    if packs[lo].class != class && !(class == 1 && packs[lo].class == 4) {
         let why: types.WhyRep = if packs[lo].class == 2 {
             Dangling(ptr.stamp)
         } else {

@@ -23,7 +23,7 @@ pub type Fault: shareable + cross {
 
 pub type StoreCapacity: shareable + cross = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity) | Cache(Capacity) | Slots(Capacity) | Pins(Capacity) | Register(Capacity)
 
-pub type Error: shareable + cross = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Conflict(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Superseded(Claim) | Undecided | Declared(String) | NotCurrent(u64) | Endpoint(EndpointRefusal) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Retired | Remote(std.object.Error) | Missed | Tiered(TieredRefusal) | NotReady(String) | Drift(String) | LimitsDiffer(StoreLimits) | Attached(Option[HostStreamId]) | Stream(StreamRefusal) | Latched(StreamLatch)
+pub type Error: shareable + cross = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Conflict(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | PreviewSource | PreviewExpired | ExportDirectory | Fenced(u64) | Lost | Superseded(Claim) | Undecided | Declared(String) | NotCurrent(u64) | Endpoint(EndpointRefusal) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Retired | Remote(std.object.Error) | Missed | Tiered(TieredRefusal) | NotReady(String) | Drift(String) | LimitsDiffer(StoreLimits) | Attached(Option[HostStreamId]) | Stream(StreamRefusal) | Latched(StreamLatch)
 
 pub opaque type Db {
     store: StoreId,
@@ -700,6 +700,11 @@ fn finish_served(mut db: Db, take pending_run: Pending, take staged: Ran[Bytes, 
             if let Some(problem) = reserve_tiered_freed(mut db, accepted) {
                 return Ok(NoRoom(take pending_run, problem))
             }
+            match secure_direct_writes(mut db, accepted) {
+                Ok(()) => (),
+                Error(Full(problem)) => return Ok(NoRoom(take pending_run, problem)),
+                Error(take problem) => return Error(Before(take problem, None)),
+            }
             let (take committed, take frame) = commit_prepared(mut db, 0, take accepted, take publication)
             serve_after(handoff(mut db, take frame))?
             serve_after(maybe_checkpoint(mut db))?
@@ -867,7 +872,7 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
     let caught = isolate(fn() -> Result[Finished[R, A], OutOfTime] {
         let perform = scoped fn() -> Finished[R, A] {
             let staged = draft_body(db, indexes.index_registry(db.indexes), pages.holder_heads(db.holders)[i].roots, ci, keep_reply, reads, issued, attempt, pins, body)
-            let prepared = match prepare_metered_pages(pages.holder_heads(db.holders)[i].roots, issued, attempt, pins, take staged) {
+            let prepared = match prepare_writer_pages(db, pages.holder_heads(db.holders)[i].roots, issued, attempt, pins, take staged) {
                 Ok(take ready) => take ready,
                 Error(Full(problem)) => RolledBack(Refused(problem)),
                 Error(take problem) => DraftFault(take problem),
@@ -1489,30 +1494,6 @@ fn db_target(db: Db) -> Option[manifest.TargetLimits] {
     }
 }
 
-fn disk_start(d: Dir, c: Clock, r: Random, options: Options) -> Result[journal.DiskStartup, Error] waits {
-    disk_start_with_mode(d, c, r, options, ServingDefault)
-}
-
-fn disk_session(d: Dir, clock: Clock, r: Random, options: Options) -> Result[journal.DiskSession, Error] waits {
-    disk_session_with_mode(d, clock, r, options, ServingDefault)
-}
-
-type DiskState {
-    open: u64,
-    options: Options,
-    transfer: transfer.TransferState,
-    // The schema commits main published since the lease last moved
-    // (§3.5a "Catch-up"): they reach the child as the round's STEPS.
-    retention: journal.RecordRetention,
-    packs: manifest.PackDiskState,
-    archive_hold: manifest.DirArchiveHold,
-    pending_binding: Option[u64],
-    archiver: Option[ArchiveLane],
-    backend: Backend,
-    tasks: Tasks,
-    tiered: pager.DiskPagerState
-}
-
 fn open_number(db: Db) -> u64 {
     if is_disk(db) {
         disk_state(db).open
@@ -1567,101 +1548,6 @@ fn open_heads(mut db: Db, take state: pages.State) -> Result[(), Error] {
 /// Opens a Directory store. An object store opens with `open_authority`.
 pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Result[Db, Error] waits {
     open_directory(tasks, d, c, r, options, journal.DIRECTORY_JOURNAL_CADENCE)
-}
-
-/// Captures an existing Directory store. The clock drives the terminal
-/// segment fence wait if a dead writer still has a write in flight.
-pub fn open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Error] waits {
-    if let Bucket(_) = options.authority {
-        return Error(Unsupported(1))
-    }
-    failure_result_from_rep(object_writer.open_checks(options.group_commits, options.group_bytes, optional_limits_to_rep(options.limits), options.checkpoint_bytes, options.journal_limit))?
-    let mut restarted = false
-    loop {
-        let (take raw, store, take page_record) = failure_result_from_rep(capture.read_only_manifest(d))?
-        let id = store_key_from_rep(store)
-        failure_result_from_rep(manifest.check_expected_store(optional_store_key_to_rep(options.expect), store_key_to_rep(id)))?
-        failure_result_from_rep(types.check_limits(optional_limits_to_rep(options.limits), page_record.limits))?
-        let candidate = failure_result_from_rep(journal.capture_walk(d, store_key_to_rep(id), page_record.first_live, restarted))?
-        let Some(take selected) = take candidate else {
-            restarted = true
-            continue
-        }
-        let mut walk = take selected
-        failure_result_from_rep(journal.capture_fence(d, c, 18446744073709551615u64, mut walk))?
-        failure_result_from_rep(manifest.disk_io(host.sync_dir(d)))?
-        if failure_result_from_rep(manifest.read_page_manifest_bytes(d))? != raw {
-            restarted = false
-            continue
-        }
-        let mut initial = read_only_checkpoint(d, id, take page_record)?
-        initial.immutable = true
-        let replay = capture_scan(id, None, take walk, take initial)?
-        failure_result_from_rep(catalog.over_ceiling(failure_result_from_rep(journal.journal_account(replay))?, options.resident_limit))?
-        let inner = failure_result_from_rep(read.read_only_state(store, replay))?
-        return Ok(ReadOnly(inner: take inner))
-    }
-}
-
-fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, cadence_spec: journal.JournalCadence, take session: journal.DiskSession) -> Result[Db, Error] waits {
-    let journal.DiskSession(lock: take lock, startup: take startup) = take session
-    let zero_extension = failure_result_from_rep(manifest.disk_io(host.zero_extension(d)))?
-    let journal.DiskStartup(store: store, fence: fence, state: take state, live: live_bytes, tiered: tiered, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: next_table, generation: generation, cut_first: cut_first, archive_prev_first: archive_prev_first, binding_id: binding_id, held_receipts: take held_receipts, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, header: take header, creation: take creation, pages: take page_disk, limits: limits) = take startup
-    let id = store_key_from_rep(store)
-    let mut db = disk_allocation(scoped fn() -> Result[Db, Error] {
-        Ok(empty_db(c, id, options))
-    })?
-    open_heads(mut db, take state)?
-    db.accounting.resident = live_bytes
-    rebuild_keyed_credit(mut db, uncovered, options.journal_limit)?
-    // The pager starts before the journal tasks, so a refusal leaves none. It
-    // reserves C + K + P (§1.1); a queued Cold frame needs it to drain (§13.6).
-    let pager_task: Option[Task[()]] = if store_has_tiered(db) || std.page.count(std.page.image_of(manifest.pack_lists(page_disk).deferred)) != 0 {
-        let funding = pager.TieredPagerFunding(cache_bytes: options.cache_bytes, writer_pin_bytes: options.writer_pin_bytes, pager_task_bytes: options.pager_task_bytes, cut_pins: true)
-        let link = failure_result_from_rep(object_writer.start_tiered_pager_link(tasks, store_key_to_rep(id), seq, PagerDirectory(d), funding, pager.TIERED_PAGER_QUEUE))?
-        Some(attach_tiered_pager(mut db, take link))
-    } else {
-        None
-    }
-    catalog.restore_fence(mut db.schema, fence)
-    db.limits = limits_from_rep(limits)
-    pages.set_next_node(mut db.holders, next_node)
-    catalog.set_next_table(mut db.schema, next_table)
-    db.accounting.tiered = tiered
-    db.accounting.page_resident = resident_pages
-    db.accounting.checkpointed = generation
-    let start = journal.DirJournalStart(lock: take lock, seq: seq, uncovered: uncovered, creation: take creation, segment: take segment, end_file: take end_file, header: take header)
-    let directory = failure_result_from_rep(journal.start_directory(tasks, d, c, store, options.group_commits, options.group_bytes, cadence_spec, zero_extension, take start))?
-    let archive_hold = manifest.recovered_archive_hold(binding_id, None, archive_prev_first, take held_receipts)
-    db.disk = Some(DiskState(open: seq, options: clone(options), transfer: transfer.new_state(), retention: journal.record_retention(cut_first, recorded_after), packs: take page_disk, archive_hold: take archive_hold, pending_binding: None, archiver: None, backend: DirBackend(take directory), tasks, tiered: pager.disk_pager_state(take pager_task)))
-    Ok(take db)
-}
-
-fn disk_wait_cut(db: Db, generation: u64) -> Result[(), Error] {
-    healthy(db)?
-    if db.accounting.checkpointed < generation {
-        return Error(Foreign)
-    }
-    Ok(())
-}
-
-fn disk_rotate(mut db: Db, id: StoreId, seq: u64, previous: u64) -> Result[(), Error] waits {
-    let c = db.clock
-    let closed = match db.disk {
-        Some(mut storage) => match storage.backend {
-            DirBackend(mut directory) => failure_result_from_rep(journal.rotate(mut directory, c, store_key_to_rep(id), seq, previous))?,
-            ObjectBackend(_) => return Error(Unsupported(1)),
-        },
-        None => return Error(Foreign),
-    }
-    if closed {
-        // The task sends Broken before ending. Preserve that first error.
-        loop {
-            let ack = journal_receive(db);
-            journal_ack(mut db, take ack)?
-        }
-    }
-    journal_poll(mut db)
 }
 
 fn cut_io_error(mut db: Db, take problem: Error) -> Error {
@@ -1743,12 +1629,11 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
         cut_participants(db, delta)
     })?
     let manifest.CutParticipants(holders: take participants_held, roots: take roots, branches: take branches, heads: heads, promote: promote) = take participants
-    let mut staged = stage_tiered_cut(db, delta, take roots, branches, heads, promote, pack_bytes, manifest.pack_next(disk_state(db).packs))?
+    let mut staged = stage_tiered_cut(db, delta, take roots, branches, heads, promote, pack_bytes, manifest.pack_allocation_next(disk_state(db).packs))?
     pages.set_next_node(mut db.holders, staged.stamp_end - 1)
     raise_materialized_pin(mut delta, staged)
     let holders = failure_result_from_rep(pager.sealed_cut_holders(take participants_held, staged))?
-    let mut base = failure_result_from_rep(manifest.page_retry_base(manifest.pack_locations(disk_state(db).packs), manifest.pack_owners(disk_state(db).packs), holders, staged.roots))?
-    failure_result_from_rep(pager.list_tiered_cut(mut base.locations, staged))?
+    let mut base = cut_page_base(db, holders, staged)?
     let lineage_rows = settle_lineage_kills(cut_lineage_rows(db, delta, branches, staged.queue.added)?, db, delta, staged.queue, mut base.locations.packs)?
     failure_result_from_rep(catalog.over_ceiling(base.account, txn.available_resident(db.accounting, db.call_streams.keyed_credit)))?
     let manifest_bytes = cut_manifest_size(db, delta)
@@ -1764,6 +1649,10 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
             plan_page_cut(base, holders, manifest.pack_lists(installed), staged.queue, lineage_rows, Some(manifest.pack_carried(installed)), staged.next_pack, pack_bytes, marks, relocated, mut stamp)?
         }
         let mut buffers = failure_result_from_rep(manifest.cut_output_buffers(cut_plan, manifest_bytes, limit))?
+        let frontier = cut_plan.lists.run_packs.next_pack
+        edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+            manifest.reserve_pack_frontier(mut state.packs, frontier)
+        })
         // A retry after emission reuses the segment created by the first attempt.
         if file_seq(db) != seq {
             let previous = file_end(db)
@@ -1778,7 +1667,7 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
         let layout = failure_result_from_rep(manifest.write_page_cut(d, store_key_to_rep(id), take cut_plan, mut buffers))?
         let manifest.PackBuffers(out: take out, ..) = take buffers
         let mut page_record = take out
-        let archive_plan = plan_dir_cut_archive(d, db, layout, seq, prev_first, manifest_bytes)?
+        let archive_plan = plan_dir_cut_archive(d, db, layout, staged.compaction, seq, prev_first, manifest_bytes)?
         let (take pages, take compaction, take removals) = retire_dir_cut_with_holds(db, delta, layout, holders, staged.compaction, archive_plan, prev_first, seq)?
         fill_cut_manifest(mut page_record, db, delta, staged.roots, generation, seq, archive_plan.new_prev_first, layout, stamp, base.account, write_seal)?
         Ok(PreparedDiskCut(pages: take pages, compaction: take compaction, removals: take removals, manifest: take page_record, archive_plan: take archive_plan))
@@ -1794,7 +1683,13 @@ fn disk_cut_with_limit_emitted(mut db: Db, take requested: HolderDelta, write_se
     // The records name exactly the frames reachable from the participants
     // and the two list roots, so their running charge is the AP15 report.
     let resident_pages = manifest.resident_location_charge(manifest.pack_locations(prepared_pages))
-    validate_cut_pages(d, id, page_record, target, transfer.active_lease(disk_state(db).transfer), disk_state(db).packs)?
+    {
+        let preview = match disk_state(db).preview {
+            Some(s) => Some(view s),
+            None => None
+        }
+        validate_cut_pages(d, id, page_record, target, transfer.active_lease(disk_state(db).transfer), disk_state(db).packs, preview)?
+    }
     if let Error(take problem) = failure_result_from_rep(manifest.publish_directory_cut_manifest(d, page_record, archive_plan)) {
         return Error(cut_io_error(mut db, take problem))
     }
@@ -1873,16 +1768,6 @@ pub type CallRecord: codec + shareable + send {
 }
 
 pub type StopKind: key = Raised | OutOfSteps(u64) | OutOfBytes | Conflict
-
-pub type Recorded {
-    record: CallRecord,
-    settle: u8,
-    branch: Branch,
-    base: u64,
-    at: u64,
-    seed: u64,
-    stop: Option[StopKind]
-}
 
 fn journal_decode_commit(file: String, raw: Bytes) -> Result[format.JournalCommit, Error] {
     let mut at = 0u64
@@ -1972,7 +1857,7 @@ fn journal_decode(file: String, kind: u16, raw: Bytes) -> Result[format.JournalE
 
 // Middle segments stop at the next HEADER's prev_end. Only the last segment
 // reads beyond its durable boundary, stopping at the first physically bad frame.
-fn journal_scan[S](mut input: format.JournalInput, path: String, id: StoreId, seq: u64, start: u64, boundary: Option[u64], final_item: bool, mut destination: S, consume: scoped fn(mut S, take format.JournalEvent) -> Result[(), Error]) -> Result[(u64, u64), Error] waits {
+fn journal_scan[S](mut input: format.JournalInput, path: String, id: StoreId, seq: u64, start: u64, boundary: Option[u64], final_item: bool, mut destination: S, consume: scoped fn(mut S, take format.JournalEvent) -> Result[(), Error] waits) -> Result[(u64, u64), Error] waits {
     let header = failure_result_from_rep(manifest.disk_read_header(path, failure_result_from_rep(manifest.journal_prefix(mut input, path, 0, 72))?, 2, Some(seq), optional_store_key_to_rep(Some(id))))?
     let durable_end = match boundary {
         Some(d) => d,
@@ -2017,13 +1902,6 @@ fn journal_scan[S](mut input: format.JournalInput, path: String, id: StoreId, se
         at = frame.end
     }
     Ok((at, accepted))
-}
-
-pub fn recorded(db: Db, b: Branch, wanted: u64) -> Result[Option[Recorded], Error] waits {
-    match recorded_commit(db, b, wanted)? {
-        Some(commit) => Ok(recorded_call(db.store, b, commit)),
-        None => Ok(None),
-    }
 }
 
 fn reserve_tx(mut tx: Tx, fault: bool) -> Result[Bytes, Bytes] {

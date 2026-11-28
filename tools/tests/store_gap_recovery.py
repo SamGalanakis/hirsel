@@ -8,7 +8,7 @@ from store_archive_server import ArchiveServer, KEYS
 
 
 def check_archive_gap(hirsel, release, root, fixture):
-    parent = "684d8cdcdba2abe262c8021049b8c8a7"
+    parent = "9f9d1c1f02fbbcf8f461780520e0f2d0"
     child = root / "healed-child"
     descriptor = root / "healed.json"
     env = dict(os.environ, XDG_STATE_HOME=str(root / "operations"), TMPDIR=str(root),
@@ -32,6 +32,12 @@ def check_archive_gap(hirsel, release, root, fixture):
         assert [(i["first_version"], i["through_version"], i["closed_by_gap"])
                 for i in state["intervals"]] == [("4", "4", False), ("2", "2", True)], state
         assert not state["open_gap"]
+        hold, = state["holds"]
+        assert (hold["child"], hold["base"], hold["until_ms"]) == (
+            "00000000000000070000000000000002", "4", str(2**64 - 1)), hold
+        assert int(hold["stamp"]) > 0
+        expiry = run("store", "archive", "expire", source, "--keep-from", "6")["result"]["plan"]
+        assert expiry["proposed_base"] == "4" and expiry["limiting_holds"] == [hold], expiry
         run("store", "archive", "verify", source, "--deep")
         def plan(target, code):
             return run("store", "restore", "--from", source, "--target", target, "--to", child, "--plan", code=code)

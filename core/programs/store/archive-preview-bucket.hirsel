@@ -1,0 +1,76 @@
+// Capture the archive namespace and its read lanes together. The child can
+// compare the destination prefix and issue reads through this grant.
+pub opaque type PreviewArchive: send {
+    namespace: std.object.Bucket,
+    reader: std.object.Opener
+}
+
+pub fn preview_archive(client: std.object.Client) -> PreviewArchive {
+    PreviewArchive(namespace: std.object.bucket_config(client), reader: std.object.opener(client))
+}
+
+pub fn mount_preview_bucket(tasks: Tasks, archive: PreviewArchive, hold: PreviewHold, point: RestorePoint, mut dst: std.object.Client, level_name: String, names: RestoreNamespaces, scratch: Dir, attempt: Inline[u8, 16], c: Clock, r: Random, options: Options, op_ms: u64) -> Result[Restored, DeployError] waits {
+    let target = std.object.bucket_config(dst)
+    if format.archive_bucket_overlaps(target, archive.namespace) {
+        return Error(Store(Conflict("restore namespaces")))
+    }
+    deploy_result(restore_disjoint(target, StampedBackup(scratch), names))?
+    let origin = deploy_result(preview_origin(hold, point, attempt))?
+    let source = deploy_result(preview_source(archive.reader, hold.record.child, origin, op_ms))?
+    let due = std.object.deadline_after_ms(dst, op_ms)
+    if let Some((found, _)) = deploy_result(restore_bucket_published(mut dst, origin, false, due))? {
+        if store_key_to_rep(found) != hold.record.child {
+            return Error(Store(Foreign))
+        }
+        return Ok(Restored(child: found, point, attempt))
+    }
+    let mut prefix = string.with_capacity(64)
+    string.push(mut prefix, "preview-")
+    let work = scratch_result(failure_result_from_rep(manifest.disk_io(host.mkdtemp(scratch, mut prefix))))?
+    let answer_out = preview_bucket_stage(tasks, archive.reader, source, hold, point, mut dst, level_name, work, attempt, origin, c, r, options, op_ms, due)
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.remove_tree(scratch, prefix))))?
+    take answer_out
+}
+
+fn preview_bucket_stage(tasks: Tasks, archive: std.object.Opener, source: pager.PreviewRead, hold: PreviewHold, point: RestorePoint, mut dst: std.object.Client, level_name: String, work: Dir, attempt: Inline[u8, 16], origin: manifest.RestoreOrigin, c: Clock, r: Random, options: Options, op_ms: u64, due: u64) -> Result[Restored, DeployError] waits {
+    scratch_result(failure_result_from_rep(manifest.disk_io(host.mkdir(work, "child"))))?
+    let foundation = scratch_result(failure_result_from_rep(manifest.disk_io(host.open_dir(work, "child"))))?
+    match preview_stage(tasks, archive, source, foundation, work, hold, point, origin, c, r, options, op_ms) {
+        Ok(()) => (),
+        Error(Remote(NotFound)) => {
+            deploy_result(failure_result_from_rep(pager.preview_recheck(source)))?
+            return Error(Store(Lost))
+        },
+        Error(take e) => return Error(Store(take e)),
+    }
+    deploy_result(failure_result_from_rep(pager.preview_recheck(source)))?
+    let (child, _) = deploy_result(reserve_bucket_child(mut dst, origin, false, r, due, Some(hold.record.child)))?
+    deploy_result(emit_bucket_foundation(mut dst, foundation, child, origin, RestoreRelease(activation: point.activation, binding: point.binding), level_name, r, due, Some(view source)))?
+    let _ = std.object.erase(mut dst, RESTORE_RESERVATION, due)
+    Ok(Restored(child, point, attempt))
+}
+
+pub fn open_preview_bucket(tasks: Tasks, take client: std.object.Client, level_name: String, archive: std.object.Opener, c: Clock, r: Random, options: Options, op_ms: u64) -> Result[Db, Error] waits {
+    let mut dst = take client
+    let due = std.object.deadline_after_ms(dst, op_ms)
+    let mut raw = failure_result_from_rep(manifest.disk_read_buffer(history.HISTORY_HEAD_LIMIT))?
+    let _ = history.history_fetch_head(mut dst, mut raw, due) ?=> Remote
+    let (take capture, _) = failure_result_from_rep(history.history_decode_head_attach(raw))?
+    failure_result_from_rep(history.history_check_namespace(capture, dst))?
+    let head = capture.head
+    let (take mark, _) = failure_result_from_rep(history.history_checkpoint(mut dst, head, due))?
+    let m = failure_result_from_rep(history.history_read_manifest(mut dst, head.store, mark, head.checkpoint.seq, due))?
+    let Some(origin) = m.origin else {
+        return Error(Foreign)
+    }
+    let source = preview_source(archive, head.store, origin, op_ms)?
+    let ObjectAuthority(take config) = object_authority(take dst, level_name, op_ms) else {
+        fail("object authority")
+    }
+    let mut opts: Options = clone(options)
+    opts.create = false
+    match open_object_writer(tasks, take config, c, r, opts, 1, Some(take source)) {
+        Ok(take opened) => Ok(take opened),
+        Error(Refusal(error: take e, ..)) => Error(take e),
+    }
+}

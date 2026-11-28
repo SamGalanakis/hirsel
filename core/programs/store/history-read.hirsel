@@ -15,26 +15,7 @@ pub type HistoryMark {
 }
 
 pub fn history_object_context(path: String, id: types.StoreKey, role: u8, reference: pages.HistoryRef, raw: Bytes) -> Result[format.DiskContext, types.Failure] {
-    if list.len(raw) < 72 {
-        return Error(format.disk_fault(path, 0, Truncated))
-    }
-    let stored_id = types.StoreKey(hi: format.read_le(raw, 32, 8), lo: format.read_le(raw, 40, 8))
-    if raw[28] != role || format.read_le(raw, 48, 8) != reference.epoch || format.read_le(raw, 56, 8) != reference.seq || !types.same(stored_id.hi, stored_id.lo, id.hi, id.lo) {
-        return Error(format.disk_fault(path, 0, Header))
-    }
-    let ctx = format.DiskContext(store: id, role, seq: reference.seq)
-    let header = manifest.history_frame(path, ctx, raw, 0, 0x0001)?
-    if header.end != 72 || list.slice(raw, 16, 24) != string.as_bytes("HIRSTORE") || format.read_le(raw, 30, 2) != 0 || format.read_le(raw, 64, 8) != 0 {
-        return Error(format.disk_fault(path, 0, Header))
-    }
-    let disk_version = format.read_le(raw, 24, 4)
-    if disk_version != format.DISK_FORMAT {
-        return Error(Unsupported(disk_version))
-    }
-    if raw[29] != 1 && raw[29] != 2 {
-        return Error(Unsupported(int.widen(raw[29])))
-    }
-    Ok(ctx)
+    manifest.history_object_context(path, id, role, reference, raw)
 }
 
 pub fn history_object_digest(path: String, reference: pages.HistoryRef, raw: Bytes) -> Result[(), types.Failure] {

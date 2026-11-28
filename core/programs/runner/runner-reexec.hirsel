@@ -54,7 +54,7 @@ fn reexecute_at[G: send, H: shareable + inert + send](db: store.Db, branch: stor
             return Ok(Unknown(RevisionUnknown))
         }
     }
-    // The current CALL format has only stream records. HTTP Part B adds claim keys.
+    // Store decodes the caller from the recorded stream or claim key.
     let caller = view recorded_entry.record.stream.caller
     if let Some(Malformed(_)) = check(recorded_entry.record.args) {
         return Ok(Unknown(ArgsUnresolved))

@@ -1,0 +1,197 @@
+fn prepare_writer_pages[R, A](db: Db, base: pages.Roots, issued: core.Cell[u64], attempt: Option[core.Cell[pager.TieredTouchSet]], pins: Map[pager.TieredCacheKey, Arc[format.TieredFrame]], take finished: Finished[R, A]) -> Result[Finished[R, A], Error] {
+    let mut staged = take finished
+    if let Prepared(mut prepared) = staged {
+        if pages.draft_has_chunks(prepared.ops) {
+            let disk = disk_state(db)
+            let (epoch, authority) = match disk.backend {
+                DirBackend(_) => (0u64, 0u8),
+                ObjectBackend(writer) => object_writer.direct_seal_authority(writer),
+            }
+            let mut seq = manifest.pack_allocation_next(disk.packs)
+            let mut stamp = order.max(prepared.first_stamp, failure_result_from_rep(catalog.stamp_after(cell.get(issued)))?)
+            for i in 0u64 .. pages.data_row_count(prepared.ops) {
+                let write = {
+                    let row = pages.data_row(prepared.ops, i)
+                    let Some(PendingChunk(body)) = view row.value else {
+                        continue
+                    }
+                    let (place, take pack) = failure_result_from_rep(pager.seal_direct_chunk(store_key_to_rep(db.store), seq, stamp, epoch, authority, row.key, body))?
+                    let pager.TieredCutPack(wire: take wire, ..) = take pack
+                    format.DirectWrite(place: place, stored: arc.share(body), wire: take wire)
+                }
+                if i < 2 {
+                    prepared.ops.first[i].value = Some(SealedChunk(arc.new(take write)))
+                } else {
+                    prepared.ops.rest[i - 2].value = Some(SealedChunk(arc.new(take write)))
+                }
+                seq = failure_result_from_rep(catalog.stamp_after(seq))?
+                stamp = failure_result_from_rep(catalog.stamp_after(stamp))?
+            }
+            prepared.first_stamp = stamp
+            cell.set(issued, stamp - 1)
+        }
+    }
+    let mut finished_pages = prepare_metered_pages(base, issued, attempt, pins, take staged)?
+    if let Prepared(mut prepared) = finished_pages {
+        if pages.draft_has_chunks(prepared.ops) {
+            if let Some(mut roots) = prepared.roots {
+                let next_stamp = failure_result_from_rep(catalog.stamp_after(cell.get(issued)))?
+                failure_result_from_rep(extend_direct_inventory(mut roots.collections, prepared.ops, db.accounting.checkpointed, next_stamp))?
+            }
+        }
+    }
+    Ok(take finished_pages)
+}
+
+fn direct_writes(ops: pages.DataRows) -> Result[List[Arc[format.DirectWrite]], types.Failure] {
+    let mut writes: List[Arc[format.DirectWrite]] = list.new()
+    for slot in 0u64 .. pages.data_row_count(ops) {
+        let row = pages.data_row(ops, slot)
+        if let Some(SealedChunk(chunk)) = view row.value {
+            types.capacity(list.try_reserve(mut writes, 1))?
+            list.push(mut writes, arc.share(chunk))
+        }
+    }
+    Ok(take writes)
+}
+
+fn extend_direct_inventory(mut tree: pages.PageTree, edits: pages.DataRows, generation: u64, next_stamp: u64) -> Result[(), types.Failure] {
+    let mut packs = match view tree.paging {
+        Some(old) => std.omap.snapshot(old.packs),
+        None => std.omap.new(),
+    }
+    let mut ids = 0u64
+    for chunk in direct_writes(edits)? {
+        let place = chunk.place
+        let (take revised, _) = std.omap.insert_owned(mut ids, take packs, place.pack, manifest.direct_pack_row(place))
+        packs = take revised
+    }
+    tree.paging = Some(arc.new(pages.TieredReadInventory(packs: take packs, generation: generation, next_stamp: next_stamp)))
+    Ok(())
+}
+
+// Preallocate the new journal hold and inventory lease, then complete all
+// backing barriers before the caller can publish a root or hand off its frame.
+fn secure_direct_writes[R, A](mut db: Db, draft: Ran[R, A]) -> Result[(), Error] waits {
+    if !pages.draft_has_chunks(draft.edits) {
+        return Ok(())
+    }
+    let writes = failure_result_from_rep(direct_writes(draft.edits))?
+    if list.len(writes) == 0 {
+        return Ok(())
+    }
+    let candidate = disk_allocation(scoped fn() -> Result[manifest.DirectPacks, Error] {
+        let mut introduced: List[Arc[format.DirectBlob]] = list.with_capacity(list.len(writes))
+        for chunk in writes {
+            list.push(mut introduced, arc.new(chunk.place))
+        }
+        failure_result_from_rep(manifest.candidate_direct_packs(disk_state(db).packs, introduced))
+    })?
+    let end = failure_result_from_rep(catalog.stamp_after(writes[list.len(writes) - 1].place.pack))?
+    let Some(roots) = view draft.roots else {
+        fail("store: direct write has no private root")
+    }
+    let Some(lease) = view roots.collections.paging else {
+        fail("store: direct write has no read inventory")
+    }
+    edit_disk(mut db.disk, scoped fn(mut disk: DiskState) -> Result[(), Error] {
+        failure_result_from_rep(pager.reserve_direct_lease(mut disk.tiered))?
+        manifest.reserve_pack_frontier(mut disk.packs, end)
+        Ok(())
+    })?
+    if object_writer_open(db) {
+        let (take paused, take resume) = take_object_journal_with(mut db, true)?
+        let mut lane = take paused
+        let deadline = object_writer.paused_deadline(lane)
+        let result = install_object_chunks(mut lane, writes, deadline)
+        failure_result_from_rep(object_writer.return_object_journal(take lane, resume))?
+        if let Error(take failure) = take result {
+            // The journal has received no introducing frame. Advance the
+            // reclaim frontier even if this is the last call on the holder.
+            let _ = cut_install(mut db, NoHolderChange)?
+            return Error(failure_from_rep(take failure))
+        }
+    } else {
+        let d = log_directory(db)?
+        for i in 0u64 .. list.len(writes) {
+            let chunk = writes[i]
+            if let Error(take problem) = manifest.install_direct_pack(d, chunk.place.pack, chunk.wire) {
+                for installed in 0u64 .. i {
+                    let name = failure_result_from_rep(manifest.paged_pack_path(writes[installed].place.pack))?
+                    let _ = failure_result_from_rep(manifest.disk_remove_optional(d, name))?
+                }
+                failure_result_from_rep(manifest.disk_io(host.sync_dir(d)))?
+                return Error(failure_from_rep(take problem))
+            }
+        }
+    }
+    write_disk(mut db.disk, take candidate, scoped fn(mut state: DiskState, take retained: manifest.DirectPacks) {
+        pager.hold_direct_lease(mut state.tiered, lease)
+        manifest.install_direct_packs(mut state.packs, take retained)
+    })
+    Ok(())
+}
+
+fn install_object_chunks(mut lane: object_writer.ObjectJournalSession, writes: List[Arc[format.DirectWrite]], deadline: u64) -> Result[(), types.Failure] waits {
+    for chunk in writes {
+        let _ = object_writer.install_direct_pack(mut lane, chunk.place, chunk.wire, deadline)?
+    }
+    Ok(())
+}
+
+// AP15 can install an intervening cut after admission. The old coordinates
+// were only a private plan. Rebind the compact ops and the resident leaves
+// to the new frontiers before issuing any pack I/O.
+fn rebind_direct_after_cut[R, A](mut db: Db, i: u64, mut draft: Ran[R, A], mut wire: Bytes) -> Result[Publication, Error] {
+    let (epoch, authority, allocation) = {
+        let disk = disk_state(db)
+        let (e, k) = match disk.backend {
+            DirBackend(_) => (0u64, 0u8),
+            ObjectBackend(writer) => object_writer.direct_seal_authority(writer),
+        }
+        (e, k, manifest.pack_allocation_next(disk.packs))
+    }
+    let mut seq = allocation
+    let mut stamp = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
+    for slot in 0u64 .. pages.data_row_count(draft.edits) {
+        let replacement = {
+            let row = pages.data_row(draft.edits, slot)
+            let Some(SealedChunk(old)) = view row.value else {
+                continue
+            }
+            let (place, take output) = failure_result_from_rep(pager.seal_direct_chunk(store_key_to_rep(db.store), seq, stamp, epoch, authority, row.key, old.stored))?
+            let pager.TieredCutPack(wire: take pack_bytes, ..) = take output
+            format.DirectWrite(place: place, stored: arc.share(old.stored), wire: take pack_bytes)
+        }
+        if slot < 2 {
+            draft.edits.first[slot].value = Some(SealedChunk(arc.new(take replacement)))
+        } else {
+            draft.edits.rest[slot - 2].value = Some(SealedChunk(arc.new(take replacement)))
+        }
+        seq = failure_result_from_rep(catalog.stamp_after(seq))?
+        stamp = failure_result_from_rep(catalog.stamp_after(stamp))?
+    }
+    let first = stamp
+    // Envelope (16), COMMIT fields (21), data section header (5).
+    let mut at = 42u64
+    if let Some(mut roots) = draft.roots {
+        for slot in 0u64 .. pages.data_row_count(draft.edits) {
+            let row = pager.ordered_row(draft.edits, draft.order, slot)
+            if let Some(SealedChunk(chunk)) = view row.value {
+                let place = chunk.place
+                let start = at + 9 + list.len(row.key)
+                list.set_word_le(mut wire, start, place.stamp)
+                list.set_word_le(mut wire, start + 24, place.pack)
+                list.set_word_le(mut wire, start + 56, place.digest)
+                failure_result_from_rep(pages.put_direct_page_row(mut roots.collections, row.key, place, Some(arc.share(chunk.stored)), first, mut stamp))?
+            }
+            at += format.data_op_size(row, false)
+        }
+        roots.collections.paging = clone(pages.holder_heads(db.holders)[i].roots.collections.paging)
+        failure_result_from_rep(extend_direct_inventory(mut roots.collections, draft.edits, db.accounting.checkpointed, stamp))?
+        let high = stamp - 1
+        pages.set_next_node(mut db.holders, high)
+        return failure_result_from_rep(types.capacity(prepare_publication(db, i, pages.holder_heads(db.holders)[i].head + 1, roots, high)))
+    }
+    fail("store: missing direct draft roots")
+}

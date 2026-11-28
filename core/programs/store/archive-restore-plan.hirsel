@@ -21,6 +21,8 @@ pub type RestorePoint: send {
 pub type RestoreResolution: send = RestorePresent(RestorePoint) | Past(RestorePoint) | Future(RestorePoint) | NoData | InGap(RestoreToken, Option[RestoreToken]) | BelowFloor(RestoreToken) | VersionAbsent
 
 type RestoreScan {
+    inspect_direct: bool,
+    direct: List[Arc[format.DirectBlob]],
     target: RestoreTarget,
     tips: Map[u32, (u64, u64)],
     next_branch: u32,
@@ -120,6 +122,14 @@ fn restore_scan_base(mut walk: RestoreScan, token: RestoreToken, m: manifest.Pag
 fn restore_scan_event(mut walk: RestoreScan, token: RestoreToken, file: String, take ev: format.JournalEvent) -> Result[(), Error] {
     let id = match take ev {
         Commit(take commit) => {
+            if walk.inspect_direct {
+                for op in commit.data {
+                    if let Some(d) = view op.direct {
+                        failure_result_from_rep(types.capacity(list.try_reserve(mut walk.direct, 1)))?
+                        list.push(mut walk.direct, arc.share(d))
+                    }
+                }
+            }
             failure_result_from_rep(format.replay_within_limits(file, walk.limits, commit))?
             let Some(tip) = restore_tip(walk.tips, commit.branch) else {
                 return Error(failure_from_rep(format.disk_fault(file, token.boundary.frame_end, Malformed)))
@@ -189,7 +199,7 @@ fn restore_scan_start(target: RestoreTarget, token: RestoreToken, m: manifest.Pa
     }
     let wanted = restore_wanted(target)
     let genesis = m.generation == 1 && m.branches[0u64].version == 0 && m.next_branch == 1
-    let mut walk = RestoreScan(target, tips: map.new(), next_branch: m.next_branch, physical: token, floor: token, birth_covered: genesis || wanted >= m.next_branch, first: None, latest_point: None, selected: None, gap: None, base: token, activation, limits: m.limits)
+    let mut walk = RestoreScan(inspect_direct: false, direct: list.new(), target, tips: map.new(), next_branch: m.next_branch, physical: token, floor: token, birth_covered: genesis || wanted >= m.next_branch, first: None, latest_point: None, selected: None, gap: None, base: token, activation, limits: m.limits)
     restore_scan_base(mut walk, token, m, activation, true)?
     Ok(take walk)
 }

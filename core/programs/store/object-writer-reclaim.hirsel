@@ -103,15 +103,18 @@ pub fn history_dead_upload(pass: ReclaimPass, key: String) -> bool {
     let Some(name) = history_parse_name(key) else {
         return false
     }
-    name.kind == b'p' && name.epoch < pass.epoch
+    name.kind == b'p' && name.epoch < pass.epoch && !map.contains(pass.live, key) && !map.contains(pass.leased, key)
 }
 
 // Keep the immutable pack maps without retaining an inventory lease ourselves.
 pub type ReadPackMaps: send = List[std.omap.OMap[u64, pages.TieredPagerPack]]
 
-pub fn reclaim_read_packs(held: List[Arc[pages.TieredReadInventory]]) -> Result[ReadPackMaps, types.Failure] {
+pub fn reclaim_read_packs(held: List[Arc[pages.TieredReadInventory]], scrubs: List[Arc[manifest.ScrubLease]]) -> Result[ReadPackMaps, types.Failure] {
     let mut maps: ReadPackMaps = list.new()
-    types.capacity(list.try_reserve(mut maps, list.len(held)))?
+    types.capacity(list.try_reserve(mut maps, list.len(held) + list.len(scrubs)))?
+    for tour in scrubs {
+        list.push(mut maps, std.omap.snapshot(tour.objects))
+    }
     for inventory in held {
         list.push(mut maps, std.omap.snapshot(inventory.packs))
     }
@@ -170,7 +173,7 @@ fn reclaim_chain(mut client: std.object.Client, fixed: ObjectReclaimCapture, mar
     Ok((first.seq - 1, take chain))
 }
 
-fn reclaim_capture(mut client: std.object.Client, fixed: ObjectReclaimCapture, deadline: u64) -> Result[ReclaimPass, types.Failure] waits {
+fn reclaim_capture(mut client: std.object.Client, fixed: ObjectReclaimCapture, newest: pages.HistoryRef, deadline: u64) -> Result[ReclaimPass, types.Failure] waits {
     let at = fixed.head
     let (take selected_mark, take selected_bytes) = history.history_checkpoint(mut client, at, deadline)?
     let _ = history.history_read_manifest(mut client, at.store, selected_mark, at.checkpoint.seq, deadline)?
@@ -185,6 +188,14 @@ fn reclaim_capture(mut client: std.object.Client, fixed: ObjectReclaimCapture, d
         })?
         live_reclaim_checkpoint(mut client, at, item, mark, raw, mut keep, deadline)?
     }
+    let oldest = if list.len(selected_mark.retained) == 0 {
+        at.checkpoint
+    } else {
+        selected_mark.retained[0u64]
+    }
+    // Settlement can move a captured sealed slice into a newer GROUP while a
+    // scheduled pass waits. Both ends are bound by the predecessor chain.
+    let _ = history.retained_entry_names(mut client, at.store, newest, oldest, map.new(), mut keep, deadline)?
     Ok(ReclaimPass(epoch: at.pair.epoch, recovered_checkpoint: after, position: at.entry.seq, checkpoint: at.checkpoint.seq, floor: at.floor, generation: fixed.generation, next_pack: fixed.next_pack, chain: take exact_names, live: take keep, leased: map.new()))
 }
 
@@ -286,22 +297,21 @@ fn history_reclaim_prefix(mut lane: ObjectJournalSession, pass: ReclaimPass, lea
     }
 }
 
-pub fn reclaim_pass_for_lane(mut lane: ObjectJournalSession, fixed: ObjectReclaimCapture, deadline: u64, drop_released: bool) -> Result[ReclaimPass, types.Failure] waits {
-    let mut pass = reclaim_capture(mut lane.client, fixed, deadline)?
-    for packs in fixed.read_packs {
+fn add_lease_names(mut lane: ObjectJournalSession, read_packs: ReadPackMaps, mut names: Map[String, ()], drop_released: bool) -> Result[(), types.Failure] {
+    for packs in read_packs {
         let mut cursor = std.omap.range(packs, Unbounded, Unbounded)
         while let Some((_, pack)) = std.omap.next(mut cursor) {
             if let Some(item) = pack.object {
-                live_reclaim_name(mut pass.leased, "p-", item)?
+                live_reclaim_name(mut names, "p-", item)?
             }
         }
     }
     let released = match lane.export_lease {
         Some(leased) => {
             if let Error(Empty) = channel.try_receive(leased.lifetime) {
-                types.capacity(map.try_reserve(mut pass.leased, map.len(leased.names)))?
+                types.capacity(map.try_reserve(mut names, map.len(leased.names)))?
                 for (name, _) in leased.names {
-                    map.insert(mut pass.leased, string.from(name), ())
+                    map.insert(mut names, string.from(name), ())
                 }
                 false
             } else {
@@ -310,9 +320,39 @@ pub fn reclaim_pass_for_lane(mut lane: ObjectJournalSession, fixed: ObjectReclai
         },
         None => false,
     }
-    if drop_released && released {
+    if released && drop_released {
         lane.export_lease = None
     }
+    Ok(())
+}
+
+pub fn ordinary_cut_names(mut lane: ObjectJournalSession, locator: history.HistoryLocator, read_packs: ReadPackMaps, archive_bound: bool) -> Result[Map[String, ()], types.Failure] {
+    let mut names: Map[String, ()] = map.new()
+    if archive_bound {
+        for (_, item) in history.locator_rows(locator) {
+            live_reclaim_name(mut names, "p-", item)?
+        }
+        for item in history.locator_chunks(locator) {
+            live_reclaim_name(mut names, "l-", item)?
+        }
+        add_lease_names(mut lane, read_packs, mut names, true)?
+    }
+    Ok(take names)
+}
+
+pub fn reclaim_pass_for_lane(mut lane: ObjectJournalSession, fixed: ObjectReclaimCapture, deadline: u64, drop_released: bool) -> Result[ReclaimPass, types.Failure] waits {
+    let current = history.register_head(lane.register)
+    let mut pass = reclaim_capture(mut lane.client, fixed, current.entry, deadline)?
+    if let Some(attach) = history.register_attach(lane.register) {
+        if let Some(slot) = view lane.stream {
+            host_stream.reclaim_attached_packs(mut lane.client, current, attach, host_stream.slot_root(slot), host_stream.slot_commit_batches(slot), mut pass.live, deadline)?
+        } else if list.len(attach.sealed) != 0 {
+            return Error(Undecided)
+        } else if let Some(_) = attach.live {
+            return Error(Undecided)
+        }
+    }
+    add_lease_names(mut lane, fixed.read_packs, mut pass.leased, drop_released)?
     archive_reclaim_protect(mut lane, mut pass, deadline)?
     Ok(take pass)
 }
@@ -327,10 +367,11 @@ pub fn history_execute_reclaim(mut lane: ObjectJournalSession, fixed: ObjectRecl
     history_sweep_entries(mut lane, pass, mut members, deadline)?
     let start_live = history_entry_cursor(manifest.SweepCursor(position: pass.floor, epoch: 0, digest: 0))
     history_reclaim_prefix(mut lane, pass, "e-", take start_live, mut members, deadline)?
+    history_abort_reclaimed_uploads(mut lane, pass, deadline)?
     for lead in["m-", "l-", "p-"] {
         history_reclaim_prefix(mut lane, pass, lead, string.new(), mut members, deadline)?
     }
-    history_abort_reclaimed_uploads(mut lane, pass, deadline)
+    Ok(())
 }
 
 pub const RECLAIM_FORMAT_VERSION: u64 = format.DISK_FORMAT

@@ -18,6 +18,24 @@ fn decode_keyed_edits(file: String, raw: Bytes, mut at: u64) -> Result[List[form
             _ => return Error(failure_from_rep(format.disk_fault(file, at - 1, Malformed))),
         }
         let kind = failure_result_from_rep(format.disk_number(file, raw, mut at, 1))?
+        if kind == 3 {
+            if tree != format.CLAIMS || saw_keyed_call {
+                return Error(failure_from_rep(format.disk_fault(file, at - 1, Malformed)))
+            }
+            let reply = failure_result_from_rep(format.disk_blob(file, raw, mut at, 41 + CLAIM_DONE_MAX))?
+            let state = claim_parse(reply) ?=> |_| failure_from_rep(format.disk_fault(file, at, Malformed))
+            let claim = failure_result_from_rep(format.disk_blob(file, raw, mut at, width))?
+            let op_end = failure_result_from_rep(txn.claim_op_end(claim))?
+            let _ = failure_result_from_rep(txn.claim_principal_end(claim, op_end))?
+            let (take record, settlement) = failure_result_from_rep(format.decode_call_fields(file, raw, mut at))?
+            if !state.replied || request_digest(record.entry, record.args) != RequestDigest(b: state.digest) {
+                return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
+            }
+            saw_keyed_call = true
+            let call = format.KeyedCallSection(record: take record, settlement)
+            list.push(mut edits, format.KeyedEdit(tree, key: take claim, value: Some(take reply), call: Some(take call)))
+            continue
+        }
         let key = failure_result_from_rep(format.disk_blob(file, raw, mut at, width))?
         if list.len(key) == 0 {
             return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
@@ -34,27 +52,9 @@ fn decode_keyed_edits(file: String, raw: Bytes, mut at: u64) -> Result[List[form
                 Some(failure_result_from_rep(format.disk_blob(file, raw, mut at, maximum))?)
             },
             2 => None,
-            3 if tree == format.CLAIMS && !saw_keyed_call => Some(failure_result_from_rep(format.disk_blob(file, raw, mut at, 41 + CLAIM_DONE_MAX))?),
             _ => return Error(failure_from_rep(format.disk_fault(file, at - 1, Malformed))),
         }
-        let call: Option[format.KeyedCallSection] = if kind == 3 {
-            let Some(reply_bytes) = view value else {
-                return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
-            }
-            let state = claim_parse(reply_bytes) ?=> |_| failure_from_rep(format.disk_fault(file, at, Malformed))
-            if !state.replied {
-                return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
-            }
-            let (take record, settlement) = failure_result_from_rep(format.decode_call_fields(file, raw, mut at))?
-            if request_digest(record.entry, record.args) != RequestDigest(b: state.digest) {
-                return Error(failure_from_rep(format.disk_fault(file, at, Malformed)))
-            }
-            saw_keyed_call = true
-            Some(format.KeyedCallSection(record: take record, settlement: settlement))
-        } else {
-            None
-        }
-        list.push(mut edits, format.KeyedEdit(tree: tree, key: take key, value: take value, call: take call))
+        list.push(mut edits, format.KeyedEdit(tree, key: take key, value: take value, call: None))
     }
     Ok(take edits)
 }

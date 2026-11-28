@@ -31,7 +31,7 @@ pub fn share_page_locations(known: PageLocations) -> PageLocations {
 }
 
 fn frame_charge(location: FrameLocation) -> u64 {
-    if location.class == 1 {
+    if location.class == 1 || location.class == 4 {
         let width: u64 = int.widen(location.place.len)
         return width - 8
     }
@@ -163,7 +163,9 @@ pub fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLo
         }
         let class = option.unwrap(types.capacity(disk_index_update(mut known.packs, ptr.pack, pack_edge_charge, fn(mut pack: pages.PagePack) -> u8 {
             let width: u64 = int.widen(ptr.len)
-            pack.live += width
+            if pack.class < 3 {
+                pack.live += width
+            }
             pack.class
         }))?)
         let mut outgoing: List[u64] = list.new()
@@ -288,7 +290,19 @@ pub fn record_fresh_tree(mut known: PageLocations, root: Arc[std.page.Page], cla
                     // its charge is known before the layout locates it.
                     let mut place = std.page.unlocated(reference.stamp)
                     place.len = int.truncate(8 + reference.len)
-                    add_location(mut known, place, 1, 0, list.new())?
+                    let direct = match disk_index_get(known.packs, reference.pack) {
+                        Some(pack) => pack.class == 4,
+                        None => false,
+                    }
+                    if direct {
+                        let _ = types.capacity(disk_index_update(mut known.packs, reference.pack, pack_edge_charge, fn(mut pack: pages.PagePack) {
+                            pack.live += 8 + reference.len
+                        }))?
+                        let located = std.page.PagePtr(pack: reference.pack, offset: reference.offset, len: place.len, checksum: reference.checksum, stamp: reference.stamp)
+                        add_location(mut known, located, 4, 0, list.new())?
+                    } else {
+                        add_location(mut known, place, 1, 0, list.new())?
+                    }
                 }
                 list.push(mut outgoing, reference.stamp)
             },

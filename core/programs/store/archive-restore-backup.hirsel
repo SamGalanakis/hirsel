@@ -60,7 +60,7 @@ pub fn plan_backup_restore(d: Dir, target: RestoreTarget) -> Result[RestoreResol
     }
     let parent = store_key_from_rep(owner)
     let digest = std.check.xxh3(raw, 0, list.len(raw))
-    let b = manifest.RestoreBoundary(source_kind: format.ARCHIVE_SOURCE_LOG, base_ordinal: m.generation, base_digest: digest, unit: m.first_live, epoch: 0, unit_digest: digest, frame_end: 0)
+    let b = format.RestoreBoundary(source_kind: format.ARCHIVE_SOURCE_LOG, base_ordinal: m.generation, base_digest: digest, unit: m.first_live, epoch: 0, unit_digest: digest, frame_end: 0)
     let mut captured: Inline[u8, 16] =[0; 16]
     let mut release: Inline[u8, 32] =[0; 32]
     for i in 0u64 .. 16 {

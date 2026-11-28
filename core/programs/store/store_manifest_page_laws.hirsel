@@ -2,7 +2,10 @@
 // directly, so it never selects or removes files in the captured directory.
 fn read_selected_page_manifest(d: Dir) -> Result[(StoreId, manifest.ValidatedPageManifest), Error] waits {
     let (id, take page_record) = read_page_manifest_file(d)?
-    Ok((id, select_page_manifest(d, id, take page_record)?))
+    let validated = validate_store_manifest(d, id, take page_record)?
+    let holds = failure_result_from_rep(manifest.directory_cleanup_plan(d, store_key_to_rep(id), validated, list.new()))?
+    let _ = failure_result_from_rep(manifest.cleanup_page_manifest_with_holds(d, validated.manifest, take holds))?
+    Ok((id, take validated))
 }
 
 fn publish_page_manifest(d: Dir, id: StoreId, m: manifest.PageManifest, target: Option[manifest.TargetLimits], mut scratch: Bytes) -> Result[(), Error] waits {
@@ -14,22 +17,22 @@ fn publish_page_manifest(d: Dir, id: StoreId, m: manifest.PageManifest, target: 
     failure_result_from_rep(manifest.publish_page_manifest_bytes(d, scratch))
 }
 
-// Independently encoded from AP3, AP14 (Format 14), AP20 and §13.1
+// Independently encoded from AP3, AP14 (Format 15), AP20 and §13.1
 // using libxxhash.
-// The 29-byte pack row has a zero index offset. Both live PAGEs start at byte 72.
+// The 30-byte local pack row has a zero index offset and source tag. Both live PAGEs start at byte 72.
 fn page_manifest_vector() -> Bytes {
     let words: Inline[u64, 59] =[
         0x0000003800010001,
-        0x327c4caf22dd8b88,
+        0x4033654e2bfb850a,
         0x45524f5453524948,
-        0x000000010000000e,
+        0x000000010000000f,
         0x0000000000000001,
         0x0000000000000002,
         0x0000000000000000,
         0x0000000000000001,
         0x0000000000000000,
         0x0000017f00010031,
-        0xb01017707c6c2840,
+        0x4ba369658f59975b,
         0x0000000000000001,
         0x0100000000ff0000,
         0x0100004000000400,
@@ -56,8 +59,8 @@ fn page_manifest_vector() -> Bytes {
         0x0000000000000000,
         0x0000000000000002,
         0x0000000000000048,
-        0x3fa736a500000044,
-        0x00000002c222e972,
+        0x10c85ac300000045,
+        0x0000000244fcf287,
         0x0000000100000000,
         0x616d000400000000,
         0x0000000000006e69,
@@ -88,7 +91,7 @@ fn page_manifest_vector() -> Bytes {
 }
 
 fn page_list_pack_vector() -> Bytes {
-    let expected: Inline[u8, 156] =[
+    let expected: Inline[u8, 157] =[
         1,
         0,
         1,
@@ -97,14 +100,14 @@ fn page_list_pack_vector() -> Bytes {
         0,
         0,
         0,
-        173,
-        27,
-        204,
-        128,
-        57,
-        113,
-        31,
-        203,
+        216,
+        6,
+        75,
+        47,
+        24,
+        131,
+        118,
+        194,
         72,
         73,
         82,
@@ -113,7 +116,7 @@ fn page_list_pack_vector() -> Bytes {
         79,
         82,
         69,
-        14,
+        15,
         0,
         0,
         0,
@@ -165,18 +168,18 @@ fn page_list_pack_vector() -> Bytes {
         0,
         1,
         0,
-        68,
+        69,
         0,
         0,
         0,
-        98,
-        250,
-        113,
-        32,
-        94,
-        86,
-        72,
-        59,
+        127,
+        104,
+        24,
+        209,
+        177,
+        197,
+        167,
+        179,
         0,
         0,
         1,
@@ -193,7 +196,7 @@ fn page_list_pack_vector() -> Bytes {
         0,
         0,
         0,
-        66,
+        67,
         0,
         0,
         0,
@@ -212,7 +215,7 @@ fn page_list_pack_vector() -> Bytes {
         0,
         0,
         0,
-        29,
+        30,
         0,
         0,
         1,
@@ -228,6 +231,7 @@ fn page_list_pack_vector() -> Bytes {
         0,
         0,
         33,
+        0,
         0,
         0,
         0,
@@ -246,7 +250,7 @@ fn page_list_pack_vector() -> Bytes {
         32,
         0,
     ]
-    let mut raw: Bytes = list.with_capacity(156)
+    let mut raw: Bytes = list.with_capacity(157)
     for byte in expected {
         list.push(mut raw, byte)
     }
@@ -254,7 +258,7 @@ fn page_list_pack_vector() -> Bytes {
 }
 
 fn page_planted_pack_vector() -> Bytes {
-    let expected: Inline[u8, 172] =[
+    let expected: Inline[u8, 173] =[
         1,
         0,
         1,
@@ -263,14 +267,14 @@ fn page_planted_pack_vector() -> Bytes {
         0,
         0,
         0,
-        173,
-        27,
-        204,
-        128,
-        57,
-        113,
-        31,
-        203,
+        216,
+        6,
+        75,
+        47,
+        24,
+        131,
+        118,
+        194,
         72,
         73,
         82,
@@ -279,7 +283,7 @@ fn page_planted_pack_vector() -> Bytes {
         79,
         82,
         69,
-        14,
+        15,
         0,
         0,
         0,
@@ -331,34 +335,34 @@ fn page_planted_pack_vector() -> Bytes {
         0,
         0,
         0,
-        84,
+        85,
         0,
         0,
         0,
-        3,
-        154,
-        11,
-        142,
-        91,
-        92,
-        3,
-        30,
+        144,
+        116,
+        76,
+        175,
+        98,
+        205,
+        2,
+        115,
         33,
         0,
         1,
         0,
-        68,
-        0,
-        0,
-        0,
-        98,
-        75,
-        207,
         69,
-        93,
-        92,
-        172,
-        233,
+        0,
+        0,
+        0,
+        18,
+        50,
+        166,
+        9,
+        74,
+        95,
+        52,
+        200,
         0,
         0,
         1,
@@ -375,7 +379,7 @@ fn page_planted_pack_vector() -> Bytes {
         0,
         0,
         0,
-        66,
+        67,
         0,
         0,
         0,
@@ -394,7 +398,7 @@ fn page_planted_pack_vector() -> Bytes {
         0,
         0,
         0,
-        29,
+        30,
         0,
         0,
         1,
@@ -410,6 +414,7 @@ fn page_planted_pack_vector() -> Bytes {
         0,
         0,
         33,
+        0,
         0,
         0,
         0,
@@ -428,7 +433,7 @@ fn page_planted_pack_vector() -> Bytes {
         32,
         0,
     ]
-    let mut raw: Bytes = list.with_capacity(172)
+    let mut raw: Bytes = list.with_capacity(173)
     for byte in expected {
         list.push(mut raw, byte)
     }
@@ -439,6 +444,6 @@ fn page_planted_manifest_vector() -> Bytes {
     let mut raw = page_manifest_vector()
     // The pack-list PagePtr's offset is at byte 88 + 192 + 8.
     list.set_word_le(mut raw, 288, 88u64)
-    list.set_word_le(mut raw, 80, 0x6e7e59fe9364fb25u64)
+    list.set_word_le(mut raw, 80, 0x5c0ba265de3f4948u64)
     take raw
 }

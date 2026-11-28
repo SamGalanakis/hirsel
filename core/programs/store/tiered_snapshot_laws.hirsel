@@ -58,12 +58,12 @@ fn l62_replay_log_window(mut db: Db, events: Log[u32], event_number: u32) -> Res
     let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
     let mut draw = failure_result_from_rep(catalog.stamp_after(pages.holder_next_node(db.holders)))?
     let mut account = pager.ReplayTieredAccount(total: 258, exact: true)
-    let trimmed = format.JournalOp(key: failure_result_from_rep(catalog.prefix(id))?, value: None, prior: 0, trim: Some(format.JournalTrim(floor: 1, dropped: 86)))
+    let trimmed = format.JournalOp(key: failure_result_from_rep(catalog.prefix(id))?, value: None, direct: None, prior: 0, trim: Some(format.JournalTrim(floor: 1, dropped: 86)))
     replay_tiered_op("j-1", mut tree, mut draw, mut account, pager.ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: Some(pages.LogBoundsRep(first: 0, next: 3))), trimmed)?
     let mut value: Bytes = list.with_capacity(6)
     list.put_word_le(mut value, events.binding.readers.current)
     list.put_word_le(mut value, event_number)
-    let appended = format.JournalOp(key: failure_result_from_rep(pager.log_key(id, 3))?, value: Some(take value), prior: 0, trim: None)
+    let appended = format.JournalOp(key: failure_result_from_rep(pager.log_key(id, 3))?, value: Some(take value), direct: None, prior: 0, trim: None)
     replay_tiered_op("j-1", mut tree, mut draw, mut account, pager.ReplayDescriptor(rows: 2, row_bytes: 172, seq_bounds: Some(pages.LogBoundsRep(first: 1, next: 3))), appended)?
     pages.set_head_collection(mut db.holders, 0u64, take tree)
     pages.set_next_node(mut db.holders, draw - 1)
@@ -201,10 +201,10 @@ fn l62_prepare_scan_overlay(mut db: Db, rows_handle: Table[u64, u32]) -> Result[
     let mut stored: Bytes = list.with_capacity(6)
     list.put_word_le(mut stored, rows_handle.readers.current)
     list.put_word_le(mut stored, 20u32)
-    let inserted = format.JournalOp(key: failure_result_from_rep(pager.log_key(collection, 2))?, value: Some(take stored), prior: 0, trim: None)
+    let inserted = format.JournalOp(key: failure_result_from_rep(pager.log_key(collection, 2))?, value: Some(take stored), direct: None, prior: 0, trim: None)
     let mut tree = pages.share_page_tree(pages.holder_heads(db.holders)[0u64].roots.collections)
     replay_tiered_op("j-1", mut tree, mut draw, mut account, pager.ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None), inserted)?
-    let deleted = format.JournalOp(key: failure_result_from_rep(pager.log_key(collection, 3))?, value: None, prior: 7, trim: None)
+    let deleted = format.JournalOp(key: failure_result_from_rep(pager.log_key(collection, 3))?, value: None, direct: None, prior: 7, trim: None)
     replay_tiered_op("j-1", mut tree, mut draw, mut account, pager.ReplayDescriptor(rows: 4, row_bytes: 344, seq_bounds: None), deleted)?
     pages.set_head_collection(mut db.holders, 0u64, take tree)
     pages.set_next_node(mut db.holders, draw - 1)
@@ -425,7 +425,7 @@ fn l62_replay_index_owner(mut db: Db, rows_handle: Table[u64, u32]) -> Result[()
     let mut stored: Bytes = list.with_capacity(6)
     list.put_word_le(mut stored, rows_handle.readers.current)
     list.put_word_le(mut stored, 43u32)
-    let edited = format.JournalOp(key: failure_result_from_rep(pager.log_key(rows_handle.id, 1))?, value: Some(take stored), prior: 7, trim: None)
+    let edited = format.JournalOp(key: failure_result_from_rep(pager.log_key(rows_handle.id, 1))?, value: Some(take stored), direct: None, prior: 7, trim: None)
     replay_tiered_op("j-1", mut data, mut draw, mut account, pager.ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None), edited)?
     pages.set_head_collection(mut db.holders, 0u64, take data)
     pages.set_next_node(mut db.holders, draw - 1)

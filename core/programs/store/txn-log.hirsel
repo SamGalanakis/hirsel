@@ -203,6 +203,9 @@ fn seal_log_trims[Event: inert + shareable + send](mut tx: TxState[Event], mut d
         return Ok(replace(mut tx.ops.rows, pages.new_data_rows()))
     }
     tx.frame_tail = pages.NO_FRAME_TAIL
+    if pages.draft_has_chunks(tx.ops.rows) {
+        pages.mark_chunk_rows(mut operations)
+    }
     for slot in 0u64 .. pages.data_row_count(tx.ops.rows) {
         let op = pages.data_row(tx.ops.rows, slot)
         if !masked_log_append(states, op.key) {

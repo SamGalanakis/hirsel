@@ -81,14 +81,14 @@ def distribution_gates(out, call, Raw, reads, slots):
                             visibility=["PUBLIC"]))
     # The installed Store helpers open Directory grants with openat2.
     out.append("\n" + call("hirsel_script_test", name="store-restore-directory", script="tools/tests/store_restore.py", host=True,
-                            data=Raw('glob(["core/programs/store/corpus/format-14/directory/*"])'),
+                            data=Raw('glob(["core/programs/store/corpus/format-15/directory/*"])'),
                             files_env={"HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain-host"}))
     out.append("\n" + call("hirsel_script_test", name="store-archive-recovery", script="tools/tests/store_archive.py", host=True,
                             data=Raw('glob(["core/programs/store/**/*.hirsel"]) + ' + repr([
                                 "core/programs/store/hirsel.hcfg",
                                 "tools/tests/store_archive_server.py", "tools/tests/store_gap_recovery.py",
-                                "tools/tests/fixtures/store-archive-gap-format14.json", "tools/tests/store_index_recovery.py",
-                                "tools/tests/fixtures/store-archive-format14.json",
+                                "tools/tests/fixtures/store-archive-gap-format15.json", "tools/tests/store_index_recovery.py",
+                                "tools/tests/fixtures/store-archive-format15.json",
                                 "tools/tests/fixtures/store-recovery-release/damage-index.hirsel",
                                 "tools/tests/fixtures/store-recovery-release/main.hirsel",
                                 "tools/tests/fixtures/store-recovery-release/hirsel.hcfg",

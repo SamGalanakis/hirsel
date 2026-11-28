@@ -21,6 +21,10 @@ fn history_write_pack_run(mut client: std.object.Client, id: types.StoreKey, epo
 }
 
 pub fn history_write_page_cut(mut client: std.object.Client, id: types.StoreKey, epoch: u64, kind: u8, take prepared: manifest.PagedCutLayout, tiered: List[pager.TieredCutPack], inherited: history.HistoryLocator, cache: Option[pager.ObjectsCache], mut buffers: manifest.PackBuffers, mut workspace: history.HistoryBuffers, deadline: u64) -> Result[(manifest.PagedCutLayout, List[pages.HistoryRef]), types.Failure] waits {
+    history_write_page_cut_direct(mut client, id, epoch, kind, take prepared, tiered, inherited, None, cache, mut buffers, mut workspace, deadline)
+}
+
+fn history_write_page_cut_direct(mut client: std.object.Client, id: types.StoreKey, epoch: u64, kind: u8, take prepared: manifest.PagedCutLayout, tiered: List[pager.TieredCutPack], inherited: history.HistoryLocator, direct: Option[View[manifest.DirectPacks]], cache: Option[pager.ObjectsCache], mut buffers: manifest.PackBuffers, mut workspace: history.HistoryBuffers, deadline: u64) -> Result[(manifest.PagedCutLayout, List[pages.HistoryRef]), types.Failure] waits {
     let (take uploaded, take covered_packs) = manifest.disk_allocation(scoped fn() -> Result[(Map[u64, pages.HistoryRef], List[pages.HistoryRef]), types.Failure] {
         let new_packs = list.len(tiered) + list.len(prepared.blobs.packs) + list.len(prepared.data_pages.packs) + list.len(prepared.lists.run_packs.packs)
         let mut refs: Map[u64, pages.HistoryRef] = map.new()
@@ -55,12 +59,26 @@ pub fn history_write_page_cut(mut client: std.object.Client, id: types.StoreKey,
         } else {
             record.live != 0
         }
-        if !retained {
+        if !retained || record.foreign != None {
             continue
         }
-        let item = match map.get(packs, seq) {
-            Some(created) => created,
-            None => option.unwrap(map.get(history.locator_rows(inherited), seq)),
+        let item: pages.HistoryRef = match map.get(packs, seq) {
+            Some(created) => clone(created),
+            None => match map.get(history.locator_rows(inherited), seq) {
+                Some(prior) => clone(prior),
+                None => {
+                    let Some(introduced) = direct else {
+                        return Error(format.disk_fault("locator", seq, Absent))
+                    }
+                    let Some(row) = manifest.disk_index_get(introduced.rows, seq) else {
+                        return Error(format.disk_fault("locator", seq, Absent))
+                    }
+                    let Some(item) = view row.pack.object else {
+                        return Error(format.disk_fault("locator", seq, Absent))
+                    }
+                    item
+                },
+            },
         }
         list.push(mut rows, item)
     }
@@ -74,7 +92,7 @@ pub opaque type PublishedCut {
     dropped_attach: bool
 }
 
-fn publish_cut(mut lane: ObjectJournalSession, installed: pages.HistoryRef, retained: history.HistoryRetention, locate_root: history.HistoryLocateRoot, activation: Option[history.HistoryActivation], take candidate_locator: history.HistoryLocator, drop_on_cut: bool, mut workspace: history.HistoryBuffers, now: u64, mut observed: Option[host_stream.DeferredSlotReport], mut completion: Option[host_stream.DeferredSlotReport]) -> Result[PublishedCut, types.Failure] waits {
+pub fn publish_cut(mut lane: ObjectJournalSession, installed: pages.HistoryRef, retained: history.HistoryRetention, locate_root: history.HistoryLocateRoot, activation: Option[history.HistoryActivation], take candidate_locator: history.HistoryLocator, drop_on_cut: bool, mut workspace: history.HistoryBuffers, now: u64, mut observed: Option[host_stream.DeferredSlotReport], mut completion: Option[host_stream.DeferredSlotReport]) -> Result[PublishedCut, types.Failure] waits {
     let old = history.register_head(lane.register)
     // A cut of an attached Place consumes every sealed tail and the live
     // tail into the checkpoint (§12.11.11): a normal cut resets ATTACH to
@@ -123,21 +141,18 @@ pub fn read_checkpoint(mut lane: ObjectJournalSession, head: history.HistoryHead
     history.history_checkpoint(mut lane.client, head, deadline)
 }
 
-pub fn write_cut_packs(mut lane: ObjectJournalSession, old: history.HistoryHead, take cut_plan: manifest.PagedCutLayout, tiered: List[pager.TieredCutPack], inherited: history.HistoryLocator, cache: Option[pager.ObjectsCache], mut buffers: manifest.PackBuffers, mut workspace: history.HistoryBuffers, now: u64) -> Result[(u64, manifest.PagedCutLayout, List[pages.HistoryRef]), types.Failure] waits {
+pub fn write_cut_packs(mut lane: ObjectJournalSession, old: history.HistoryHead, take cut_plan: manifest.PagedCutLayout, tiered: List[pager.TieredCutPack], inherited: history.HistoryLocator, direct: manifest.DirectPacks, cache: Option[pager.ObjectsCache], mut buffers: manifest.PackBuffers, mut workspace: history.HistoryBuffers, now: u64) -> Result[(u64, manifest.PagedCutLayout, List[pages.HistoryRef]), types.Failure] waits {
     // Refused cuts can leave orphaned objects, so this epoch does not reuse their numbers.
     let generation = history.history_next_id(lane.issued_generation)?
     lane.issued_generation = generation
     lane.next_pack = cut_plan.lists.run_packs.next_pack
-    let (take layout, take refs) = history_write_page_cut(mut lane.client, old.store, old.pair.epoch, old.authority_kind, take cut_plan, tiered, inherited, cache, mut buffers, mut workspace, now)?
+    let (take layout, take refs) = history_write_page_cut_direct(mut lane.client, old.store, old.pair.epoch, old.authority_kind, take cut_plan, tiered, inherited, Some(view direct), cache, mut buffers, mut workspace, now)?
     Ok((generation, take layout, take refs))
 }
 
-pub fn publish_page_cut(mut lane: ObjectJournalSession, old: history.HistoryHead, seq: u64, take candidate: manifest.PageManifest, retained: history.HistoryRetention, take refs: List[pages.HistoryRef], inherited: history.HistoryLocator, check_target: bool, activation: Option[history.HistoryActivation], drop_on_cut: bool, mut workspace: history.HistoryBuffers, now: u64, mut observed: Option[host_stream.DeferredSlotReport], mut completion: Option[host_stream.DeferredSlotReport]) -> Result[PublishedCut, types.Failure] waits {
+pub fn prepare_page_publication(mut lane: ObjectJournalSession, old: history.HistoryHead, seq: u64, take candidate: manifest.PageManifest, take refs: List[pages.HistoryRef], inherited: history.HistoryLocator, mut candidate_locator: history.HistoryLocator, check_target: bool, mut workspace: history.HistoryBuffers, now: u64) -> Result[(pages.HistoryRef, history.HistoryLocateRoot), types.Failure] waits {
     let mut page_record = take candidate
     page_record.sweep = lane.sweep
-    let mut candidate_locator = manifest.disk_allocation(scoped fn() -> Result[history.HistoryLocator, types.Failure] {
-        history.locator_for_cut(refs)
-    })?
     if check_target {
         let checked = manifest.disk_allocation(scoped fn() -> Result[manifest.PageManifest, types.Failure] {
             Ok(clone(page_record))
@@ -153,5 +168,23 @@ pub fn publish_page_cut(mut lane: ObjectJournalSession, old: history.HistoryHead
     }
     let locate_root = history.history_make_locator_reusing(mut lane.client, old.store, seq, old.pair.epoch, old.authority_kind, take refs, inherited, mut candidate_locator, mut workspace, now)?
     let installed = history.history_create_manifest(mut lane.client, old.store, old.pair.epoch, old.authority_kind, page_record, mut workspace, now)?
-    publish_cut(mut lane, installed, retained, locate_root, activation, take candidate_locator, drop_on_cut, mut workspace, now, mut observed, mut completion)
+    Ok((installed, take locate_root))
+}
+
+// Pausing the journal hands the caller its authority and current epoch.
+// Completion checks Exists and uncertain multipart replies against the
+// sealed bytes before the caller can submit the introducing frame.
+pub fn install_direct_pack(mut lane: ObjectJournalSession, place: format.DirectBlob, wire: Bytes, deadline: u64) -> Result[pages.HistoryRef, types.Failure] waits {
+    let held = history.register_head(lane.register)
+    if held.pair.epoch != place.epoch {
+        return Error(Fenced(held.pair.epoch))
+    }
+    if place.pack < lane.next_pack {
+        return Error(format.disk_fault("direct BLOB", 0, Order))
+    }
+    lane.next_pack = catalog.stamp_after(place.pack)?
+    let item = pages.HistoryRef(seq: place.pack, epoch: place.epoch, len: place.pack_len, digest: place.digest)
+    pager.history_fill_key(mut lane.buffers.key, "p-", item)
+    history.history_upload_pack(mut lane.client, lane.buffers.key, wire, mut lane.buffers.compare, deadline)?
+    Ok(item)
 }

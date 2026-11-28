@@ -35,6 +35,7 @@ fn describe_collection(mut packs: capture.CapturePacks, names: List[capture.Desc
         },
         3 => CellForm,
         4 => LogForm,
+        5 => BlobsForm,
         _ => TableForm,
     }
     let desc = failure_result_from_rep(capture.describe_descriptor(mut packs, root, cat.id))?

@@ -518,52 +518,6 @@ fn key_limit(domain: Domain) -> u64 {
     }
 }
 
-fn map_value(raw: Bytes, at: u64, width: u64) -> Result[(), Error] {
-    let page_descriptor.CollectionDescriptor(kind, residency, rows, row_bytes: charge) = page_descriptor.fields(raw, at, width)?
-    let ptr = ptr_at(raw, at)
-    if raw[at + 55] != 0 || (ptr.stamp == 0 && ptr != unlocated(0)) {
-        return Error(MalformedPage)
-    }
-    match kind {
-        CellCollection => {
-            if residency != ResidentMemory || width < 58 {
-                return Error(MalformedPage)
-            }
-            let ilen = u16_at(raw, at + 56)
-            if ilen > 256 || ilen == 1 || width != 58 + ilen {
-                return Error(MalformedPage)
-            }
-            if ilen != 0 {
-                if ptr.stamp != 0 || rows != 1 || charge != row_charge(4, ilen) {
-                    return Error(MalformedPage)
-                }
-            } else if (ptr.stamp == 0 && (rows != 0 || charge != 0)) || (ptr.stamp != 0 && rows != 1) {
-                return Error(MalformedPage)
-            }
-        },
-        LogCollection => {
-            if width != 72 {
-                return Error(MalformedPage)
-            }
-            let next: u64 = list.word_le(raw, at + 56)
-            let first: u64 = list.word_le(raw, at + 64)
-            if first > next || rows != next - first || (rows == 0 && ptr.stamp != 0) {
-                return Error(MalformedPage)
-            }
-        },
-        _ => if width != 56 {
-            return Error(MalformedPage)
-        },
-    }
-    if kind != CellCollection && ptr.stamp == 0 && (rows != 0 || charge != 0) {
-        return Error(MalformedPage)
-    }
-    if raw[at + 54] != 0 {
-        return Error(UnsupportedPage)
-    }
-    Ok(())
-}
-
 pub fn legal(lvl: u8, n: u64, size: u64) -> bool {
     size <= TARGET || (lvl == 0 && n == 1) || (lvl != 0 && n <= 3)
 }
@@ -624,7 +578,7 @@ pub fn decode(take raw: Bytes, domain: Domain) -> Result[Image, Error] {
                     return Error(MalformedPage)
                 }
                 if domain == CollectionMap {
-                    map_value(raw, at, width)?
+                    page_descriptor.validate(raw, at, width)?
                 }
                 at += width
             } else {
@@ -953,7 +907,7 @@ fn valid_entry(domain: Domain, lvl: u8, i: u64, row: Entry) -> Result[(), Error]
                 if n != 4 {
                     return Error(MalformedPage)
                 }
-                map_value(value, 0, width)?
+                page_descriptor.validate(value, 0, width)?
             }
         },
     }
@@ -1611,6 +1565,7 @@ fn edge_matches(image: Image, row: Entry, kid: Option[Slot], blob: Option[BlobSl
         },
         BlobValue(r) => match blob {
             Some(HotBlob(b)) => absent(kid) && list.len(b) == r.len,
+            Some(ColdBlob(held)) => image.domain == Collection && absent(kid) && held == r && r.pack != 0 && r.offset >= 72,
             _ => false,
         },
     }
@@ -1741,9 +1696,9 @@ fn private_put(mut page: Page, incoming: Entry, kid: Option[Slot], blob: Option[
     match blob {
         Some(b) => match old_body {
             Some(i) => {
-                let _ = list.set(mut page.blobs, i, clone(b))
+                let _ = list.set(mut page.blobs, i, numbered_blob_slot(b, int.truncate(i)))
             },
-            None => list.push(mut page.blobs, clone(b)),
+            None => list.push(mut page.blobs, numbered_blob_slot(b, option.unwrap(body_index))),
         },
         None => if let Some(i) = old_body {
             move_last_body(mut page, i, slot)
@@ -3034,8 +2989,8 @@ fn batch_children(mut rows: List[PageSlot], domain: Domain, child_level: u8, fir
     Ok(())
 }
 
-// The prior of a leaf row: its value length plus one.
-fn slot_prior(image: Image, slot: u64) -> u32 {
+/// Stored value length plus one at a leaf row. Reads the edge for a Cold BLOB.
+pub fn slot_prior(image: Image, slot: u64) -> u32 {
     let at = entry_at(image, slot)
     let cell = at + 2 + u16_at(image.raw, at)
     let width = if image.raw[cell] == 0 {
@@ -3449,6 +3404,29 @@ fn insert_value(mut root: Arc[Page], key: Bytes, value: Bytes, shared: Option[Vi
         }
         PageSlot(row: Entry(key: clone(key), cell: BlobValue(edge)), kid: None, blob: Some(HotBlob(take shared_body)))
     }
+    insert_slot(mut root, take incoming, private_from, rightmost, mut next, load)
+}
+
+/// Insert an already sealed BLOB using its reserved stamp. The edited leaf
+/// assigns the body ordinal. The caller supplies the resolver for Cold pages.
+pub fn insert_blob_ref(mut root: Arc[Page], key: Bytes, reference: BlobRef, resident: Option[Arc[Bytes]], private_from: u64, mut next: u64, load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[(), Error] {
+    if root.image.domain != Collection || list.len(key) > key_limit(Collection) || !valid_ref(reference) || reference.pack == 0 || reference.offset < 72 {
+        return Error(MalformedPage)
+    }
+    let attached: BlobSlot = match resident {
+        Some(raw) => {
+            if list.len(raw) != reference.len {
+                return Error(MalformedPage)
+            }
+            HotBlob(arc.share(raw))
+        },
+        None => ColdBlob(reference),
+    }
+    let incoming = PageSlot(row: Entry(key: clone(key), cell: BlobValue(reference)), kid: None, blob: Some(take attached))
+    insert_slot(mut root, take incoming, private_from, false, mut next, load)
+}
+
+fn insert_slot(mut root: Arc[Page], take incoming: PageSlot, private_from: u64, rightmost: bool, mut next: u64, load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[(), Error] {
     let (take revised, _) = insert_path(mut root, incoming, private_from, rightmost, mut next, load)?
     if let Some(parts) = view revised {
         finish_split(mut root, parts, mut next)?

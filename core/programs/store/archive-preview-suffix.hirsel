@@ -1,0 +1,104 @@
+// Only checksummed journal frames through the held terminal frame can
+// contribute a pack. The parent pack itself stays behind the read capability.
+type PreviewPrefix {
+    direct: List[Arc[format.DirectBlob]],
+    terminal: bool
+}
+
+fn preview_prefix(archive_reader: std.object.Opener, parent: StoreId, inc: Inline[u8, 16], base: format.ArchiveBaseRowRep, b: manifest.RestoreBoundary, due: u64) -> Result[List[Arc[format.DirectBlob]], Error] waits {
+    let mut selected = PreviewPrefix(direct: list.new(), terminal: b.frame_end == 0)
+    if b.frame_end != 0 {
+        if b.source_kind == format.ARCHIVE_SOURCE_LOG {
+            if b.unit < base.first_unit {
+                return Error(Lost)
+            }
+            for seq in base.first_unit ..= b.unit {
+                let limit = if seq == b.unit {
+                    b.frame_end
+                } else {
+                    restore_sealed_end_read(archive_reader, parent, inc, seq + 1, due)?
+                }
+                let mut pos = 0u64
+                while pos < limit {
+                    pos = read_archive_chunk(archive_reader, parent, inc, seq, pos, limit, seq == b.unit, due, mut selected, scoped fn(mut found: PreviewPrefix, key: String, digest: u64, end: u64, kind: u16, raw: Bytes) -> Result[(), Error] {
+                        if seq == b.unit && end == b.frame_end {
+                            if digest != b.unit_digest {
+                                return Error(failure_from_rep(format.disk_fault(key, end, Checksum)))
+                            }
+                            found.terminal = true
+                        }
+                        if kind == 0x0011 {
+                            failure_result_from_rep(manifest.commit_direct_blobs(key, raw, mut found.direct))?
+                        }
+                        Ok(())
+                    })?
+                }
+            }
+        } else {
+            let mut last_ref = pages.HistoryRef(seq: b.unit, epoch: b.epoch, len: 0, digest: b.unit_digest)
+            let path = restore_object_key(parent, inc, "e-", last_ref)?
+            let (meta, _) = restore_range_read(archive_reader, path, 0, 112, due)?
+            last_ref.len = meta.size
+            let chain = restore_entry_chain_read(archive_reader, parent, inc, base, last_ref, due)?
+            for i in 0u64 .. list.len(chain) {
+                let unit = history.history_length(chain[i], base.base_ordinal + i + 1)
+                restore_read_entry_read(archive_reader, parent, inc, unit, due, mut selected, scoped fn(mut found: PreviewPrefix, kind: u16, _flags: u16, end: u64, raw: Bytes) -> Result[(), Error] {
+                    if unit.seq == b.unit && end == b.frame_end {
+                        found.terminal = true
+                    }
+                    if kind == 0x0011 && (unit.seq < b.unit || end <= b.frame_end) {
+                        failure_result_from_rep(manifest.commit_direct_blobs(path, raw, mut found.direct))?
+                    }
+                    Ok(())
+                })?
+            }
+        }
+    }
+    if !selected.terminal {
+        return Error(Lost)
+    }
+    let PreviewPrefix(direct: take refs, ..) = take selected
+    Ok(take refs)
+}
+
+fn directory_replay_event(d: Dir, id: StoreId, state: pager.JournalReplay, preview: Option[View[pager.PreviewRead]], take event: format.JournalEvent) -> Result[format.JournalEvent, Error] waits {
+    let Some(source) = preview else {
+        return capture_directory_event(d, id, None, take event)
+    }
+    match take event {
+        Commit(take input) => {
+            let mut commit = take input
+            for i in 0u64 .. list.len(commit.data) {
+                let fixed: Option[Arc[format.DirectBlob]] = clone(commit.data[i].direct)
+                let Some(p) = view fixed else {
+                    continue
+                }
+                let imported = failure_result_from_rep(pager.preview_introduction(source, p))?
+                if let Some(row) = imported {
+                    let mut resident = false
+                    for tip in state.state.tips {
+                        if tip.id != commit.branch {
+                            continue
+                        }
+                        let key = view commit.data[i].key
+                        let Some(raw) = std.page.lookup(tip.roots.collections.root, list.slice(key, 0, 4)) else {
+                            return Error(Lost)
+                        }
+                        let descriptor = pages.unwrap_collection_descriptor(Some(raw))
+                        resident = descriptor.residency != ResidentTiered
+                    }
+                    if resident {
+                        let bytes_in = failure_result_from_rep(pager.preview_pack_range(source, p.pack, row, 0, row.len, 0))?
+                        let path = failure_result_from_rep(pager.preview_pack_key(source, p.pack, row))?
+                        let frame = failure_result_from_rep(history.verify_direct_pack(row.epoch != 0, path, row.parent, p, bytes_in))?
+                        commit.data[i].value = Some(failure_result_from_rep(types.copied(list.slice(bytes_in, frame.payload + 8, frame.end)))?)
+                    }
+                } else {
+                    commit.data[i].value = Some(failure_result_from_rep(manifest.read_directory_direct(d, store_key_to_rep(id), p, None, true, None))?)
+                }
+            }
+            Ok(Commit(take commit))
+        },
+        take other => Ok(take other),
+    }
+}

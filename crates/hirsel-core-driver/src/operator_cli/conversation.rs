@@ -55,7 +55,7 @@ pub(super) fn plan_json(p: &DeployPlan, hash: &[u8]) -> Value {
     if p.entries.is_none() {
         facts["triggers"] = json!("uncomputed");
     }
-    json!({"domain":p.domain,"authority":format!("{:016x}{:016x}",p.authority.hi,p.authority.lo),"request":hex::encode(&p.request),"plan_digest":hex::encode(hash),"intent_digest":hex::encode(&p.intent_digest),"input_digest":hex::encode(&p.input_digest),
+    json!({"domain":p.domain,"authority":format!("{:016x}{:016x}",p.authority.hi,p.authority.lo),"request":hex::encode(&p.request),"plan_digest":hex::encode(hash),"intent_digest":hex::encode(&p.intent_digest),"input_digest":hex::encode(&p.input_digest),"recovery":p.recovery.as_ref().map(super::adopt::evidence),
         "subject":{"name":p.subject.name,"generation":p.subject.generation.to_string(),"predecessor":p.subject.predecessor.map(|v|v.to_string()),"assembly":hex::encode(&p.subject.assembly),"store_id":p.subject.store_id.as_ref().map(|v|format!("{:016x}{:016x}",v.hi,v.lo)),"policy_digest":hex::encode(&p.subject.policy_digest)},
         "incarnation":p.incarnation.map(|i|i.to_string()),"create":create,"facts":facts,"entries":entries})
 }
@@ -236,6 +236,7 @@ impl Exchange<'_> {
                             ("Failed", 1, "committed")
                         }
                         Phase::Retired => ("Completed", 0, "retired"),
+                        Phase::AwaitStore(_) if self.wait.is_none() => ("Accepted", 0, "possible"),
                         Phase::Retiring if self.wait.is_none() => {
                             env.next
                                 .push(json!({"method":"op get","operation":env.operation["id"]}));

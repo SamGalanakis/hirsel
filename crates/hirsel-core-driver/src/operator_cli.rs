@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+pub(crate) mod adopt;
 pub(crate) mod archive;
 mod archive_decision;
 mod bucket;
@@ -278,6 +279,7 @@ fn state_json(d: &[u8], group: &Group, phase: &Phase) -> serde_json::Value {
         Phase::Installed(v, assembly, report) => serde_json::json!({
             "phase": "installed", "activation": v, "assembly": hex::encode(assembly), "report": report_json(report),
         }),
+        Phase::AwaitStore(_) => serde_json::json!({"phase":"awaiting child acceptance"}),
         Phase::Retiring => serde_json::json!({"phase":"retiring"}),
         Phase::Retired => serde_json::json!({"phase":"retired"}),
         Phase::Failed(class, detail, report) => serde_json::json!({

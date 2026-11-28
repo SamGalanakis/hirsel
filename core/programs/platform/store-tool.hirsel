@@ -446,6 +446,9 @@ pub fn main(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, 
     if verb == "backup" {
         return backup(from, to, c, r, tasks, out, err)
     }
+    if verb == "inspect-restored" {
+        return inspect_restored(from, c, r, tasks, out, err, argv)
+    }
     if verb == "observe-restore" {
         return observe_restore(to, out, err, argv)
     }

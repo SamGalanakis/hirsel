@@ -190,6 +190,7 @@ pub(super) enum Note {
     Assembled {
         id: u64,
         attempt: Attempt,
+        recovered: Option<Vec<u8>>,
         key: [u8; 32],
         digest: Vec<u8>,
         fetch: u64,
@@ -199,10 +200,16 @@ pub(super) enum Note {
 }
 
 /// Where the worker's recipe comes from.
+enum Local {
+    Publication(ContentHash),
+    Tree(Tree, Option<[u8; 32]>),
+    Recovered(crate::operator::Recovery),
+}
 pub(super) enum Source {
     /// The host streams the exchange; the loop holds this end of the pair.
     Attested(ContentHash),
     /// The launcher's own code store sends it.
+    Recovered(crate::operator::Recovery),
     Publication(ContentHash),
     /// The worker publishes this source into the code store, which then sends it. With
     /// the tree's digest, the law gate runs on it first.
@@ -336,18 +343,36 @@ impl Worker {
         let cancel = Arc::new(AtomicBool::new(false));
         let (conn, attested, local) = match source {
             Source::Attested(root) => (Some(Conn::new(poll, ours)?), Some(root), None),
-            Source::Publication(root) => (None, None, Some((Ok(root), ours))),
-            Source::Tree(tree, gate) => (None, None, Some((Err((tree, gate)), ours))),
+            Source::Publication(root) => (None, None, Some((Local::Publication(root), ours))),
+            Source::Recovered(plan) => (None, None, Some((Local::Recovered(plan), ours))),
+            Source::Tree(tree, gate) => (None, None, Some((Local::Tree(tree, gate), ours))),
         };
         let cancelled = cancel.clone();
         std::thread::Builder::new()
             .name("hirsel-admit".into())
             .spawn(move || {
                 let mut green = None;
+                let mut recovered = None;
                 let publication = match local {
                     None => None,
-                    Some((Ok(root), ours)) => Some((root, ours)),
-                    Some((Err((tree, gate)), ours)) => {
+                    Some((Local::Recovered(plan), ours)) => {
+                        match super::recovery::inspect(&plan, &admission.records) {
+                            Ok(found) => {
+                                let root = found.record.recipe;
+                                recovered = Some(found);
+                                Some((root, ours))
+                            }
+                            Err(e) => {
+                                return tell(Note::Failed(
+                                    id,
+                                    attempt,
+                                    Failure::Denied(e.to_string()),
+                                ));
+                            }
+                        }
+                    }
+                    Some((Local::Publication(root), ours)) => Some((root, ours)),
+                    Some((Local::Tree(tree, gate), ours)) => {
                         match publish(&admission, &tree, gate, &approvals, &cancelled, deadline) {
                             None => return,
                             Some(Ok((root, gated))) => {
@@ -365,6 +390,7 @@ impl Worker {
                     theirs,
                     attested,
                     publication,
+                    recovered,
                     green,
                     &approvals,
                     &gone,
@@ -749,6 +775,7 @@ fn work(
     peer: UnixStream,
     attested: Option<ContentHash>,
     publication: Option<(ContentHash, UnixStream)>,
+    recovered: Option<super::recovery::Verified>,
     green: Option<Green>,
     approvals: &Approvals,
     go: &mpsc::Receiver<()>,
@@ -824,6 +851,7 @@ fn work(
             "the admission deadline passed while describing the verified release".into(),
         ));
     }
+    let summary_allowance = summary.n_place;
     tell(Note::Admitted {
         id,
         attempt,
@@ -833,10 +861,29 @@ fn work(
     });
     go.recv().ok()?;
     let build = Instant::now();
+    if let Some(verified) = recovered {
+        let _guard = ad.publish.lock().unwrap();
+        let proof =
+            match super::recovery::confirm(&verified, &ad.records, summary_allowance, deadline) {
+                Ok(p) => p,
+                Err(e) => return fail(Failure::Denied(e.to_string())),
+            };
+        tell(Note::Assembled {
+            id,
+            attempt,
+            key: verified.record.identity.0,
+            digest: verified.record.digest.0.to_vec(),
+            fetch,
+            assembly: nanos(build),
+            recovered: Some(proof),
+        });
+        return None;
+    }
     match assemble(ad, admitted, approvals.recording, |record| {
         Note::Assembled {
             id,
             attempt,
+            recovered: None,
             key: record.identity.0,
             digest: record.digest.0.to_vec(),
             fetch,

@@ -15,6 +15,8 @@ flags! {
     PublishDescription ["--description"] "TEXT" => "Include this description in each release intent.";
     PublishSourceCommit ["--source-commit"] "HEX" => "Include this Git object name in each release intent.";
     AddRoot ["--root"] "sha256:HEX" => "Require this archive head root.";
+    AdoptSpec ["--as"] "GROUP.hcfg" => "Read the fresh group registration.";
+    AdoptAssembly ["--assembly"] "HEX" => "Select a retained assembly for the restored release.";
     AddAs ["--as"] "ALIAS" => "Bind the dependency under this alias.";
     AddWorkspace ["--workspace"] => "Declare the binding in the workspace root's dependencies.";
     AddDryRun ["--dry-run"] => "Resolve the change without writing the manifest or lock.";

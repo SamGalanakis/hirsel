@@ -13,6 +13,10 @@ pub fn routing_table(h: Host) -> Result[List[Route], Refused] waits {
     let mut rows = st(store.scan(reader, snap, h.t.groups, Unbounded, Unbounded))?
     let mut routes: List[Route] = list.new()
     while let Some((take name, take row)) = st(store.next(reader, mut rows))? {
+        // A creation awaiting admission has a reserved name and no selected image.
+        if list.len(row.assembly) == 0 {
+            continue
+        }
         if let Some(adoption) = st(store.get(reader, snap, h.t.restored_groups, row.incarnation))? {
             if !adoption.accepted {
                 continue

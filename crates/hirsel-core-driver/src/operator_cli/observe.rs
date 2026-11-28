@@ -82,6 +82,7 @@ fn phase_name(phase: OperationPhase) -> &'static str {
         OperationPhase::Pending => "Pending",
         OperationPhase::Undecided => "Undecided",
         OperationPhase::Decision => "AwaitDecision",
+        OperationPhase::Opening => "Opening",
         OperationPhase::Retiring => "Retiring",
         OperationPhase::Retired => "Retired",
         OperationPhase::Installed => "Installed",

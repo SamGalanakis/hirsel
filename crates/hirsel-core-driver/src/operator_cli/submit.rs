@@ -288,7 +288,10 @@ fn submit(req: Request<O>, env: &mut Envelope<'_>) -> Result<(), Failure> {
         None => Ask::Begin(
             d.clone(),
             subject,
-            prepared.input.into(),
+            prepared
+                .input
+                .try_into()
+                .map_err(|e| Failure::input("input", e))?,
             foreign,
             exec,
             plan,

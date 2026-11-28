@@ -146,6 +146,7 @@ fn observed_phase(p: operator.Phase) -> operator.OperationPhase {
         PendingPhase(_, _) => PendingOperationPhase,
         UndecidedPhase(_, _, _) => UndecidedOperationPhase,
         AwaitDecision(_) => DecisionOperationPhase,
+        AwaitStorePhase(_) => OpeningOperationPhase,
         RetiringPhase => RetiringOperationPhase,
         RetiredPhase => RetiredOperationPhase,
         InstalledPhase(_, _, _) => InstalledOperationPhase,

@@ -1692,7 +1692,8 @@ pub fn event(mut h: Host, take e: launcher.Event, now: Now) -> List[launcher.Req
         Answered(c, said) => answered(mut h, c, said, mut out),
         Need(a, keys, done) => needed(mut h, a, keys, done),
         Admitted(a, root, summary, display) => admitted(mut h, a, root, summary, display, mut out),
-        Assembled(a, key, digest, fetch, asm) => assembled(mut h, a, key, digest, fetch, asm, now, mut out),
+        Assembled(a, key, digest, fetch, asm) => assembled(mut h, a, key, digest, fetch, asm, None, now, mut out),
+        RecoveredAssembly(a, key, digest, fetch, asm, description) => assembled(mut h, a, key, digest, fetch, asm, Some(clone(description)), now, mut out),
         AdmissionFailed(a, why) => unadmitted(mut h, a, why),
         Fenced => fenced(mut h, now, mut out),
         Collected(_) => {
@@ -2479,7 +2480,7 @@ fn needed(mut h: Host, a: launcher.Attempt, keys: List[launcher.Wanted], done: b
 }
 
 // NEW is assembled and its reservation held: the deploy goes on to Preparing.
-fn assembled(mut h: Host, a: launcher.Attempt, key: Bytes, digest: Bytes, fetch_ns: u64, assemble_ns: u64, now: Now, mut out: List[launcher.Request]) waits {
+fn assembled(mut h: Host, a: launcher.Attempt, key: Bytes, digest: Bytes, fetch_ns: u64, assemble_ns: u64, description: Option[Bytes], now: Now, mut out: List[launcher.Request]) waits {
     let Some(name) = admitting_group(h, a) else {
         return
     }
@@ -2509,7 +2510,15 @@ fn assembled(mut h: Host, a: launcher.Attempt, key: Bytes, digest: Bytes, fetch_
         return
     }
     if d.genesis {
-        install_first(mut h, name, d, key, fetch_ns, assemble_ns, now, mut out)
+        let restored = match prepare_adopted_launch(row.input, key, digest, description) {
+            Ok(adopted) => adopted,
+            Error(e) => {
+                list.push(mut out, Release(a))
+                fail_request(mut h, d.request, class_of(e), refused_text(e))
+                return
+            },
+        }
+        install_first(mut h, name, d, key, fetch_ns, assemble_ns, restored, now, mut out)
         return
     }
     match prepare(mut h, name, d.request, a, key, digest, summary.target, summary.n_place, summary.grants, fetch_ns, assemble_ns) {
@@ -2525,43 +2534,6 @@ fn assembled(mut h: Host, a: launcher.Attempt, key: Bytes, digest: Bytes, fetch_
             list.push(mut out, Release(a))
             fail_request(mut h, d.request, class_of(e), refused_text(e))
         },
-    }
-}
-
-// A registering group's first release is assembled. One transaction makes it the group's
-// current assembly at activation 0, gives the group its wake row and records the request
-// Installed; then the attempt's reservation ends and the group is woken, which starts its
-// genesis on the empty store (RUNNER-SPEC §14.1). A host too full to start it leaves the
-// group cold, for its first connection to wake.
-fn install_first(mut h: Host, name: String, d: Admitting, key: Bytes, fetch_ns: u64, assemble_ns: u64, now: Now, mut out: List[launcher.Request]) waits {
-    let made = {
-        let t = view h.t
-        store.run(mut h.db, None, (store.copy_env(assemble_ns), store.copy_env(d), store.copy_env(fetch_ns), store.copy_env(key), store.copy_env(name), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
-            let Some(found) = st(store.fetch(tx, call_env.5 .groups, call_env.4))? else {
-                return Error(Unknown)
-            }
-            if found.incarnation != call_env.1 .incarnation {
-                return Error(Unknown)
-            }
-            if let Some(_) = st(store.fetch(tx, call_env.5 .wake, call_env.4))? {
-                return Error(Exists)
-            }
-            let mut g = found
-            g.assembly = clone(call_env.3)
-            g.activation = 0u64
-            g.source = installed_source(tx, call_env.5, call_env.1 .request)?
-            st(store.put(mut tx, call_env.5 .groups, call_env.4, g))?
-            st(store.put(mut tx, call_env.5 .wake, call_env.4, WakeRow(wake: Clean(None), gen: 0u64)))?
-            let report = operator.Report(fetch_ns: Some(call_env.2), assemble_ns: Some(call_env.0), pause: NotStarted, preview: operator.no_preview())
-            finish_request(mut tx, call_env.5, call_env.4, call_env.1 .request, InstalledPhase(0u64, clone(call_env.3), report))
-        })
-    }
-    list.push(mut out, Release(d.attempt))
-    match decided(mut h, take made) {
-        Ok(()) => {
-            let _ = wake_cause(mut h, name, Operator, now, mut out)
-        },
-        Error(e) => fail_request(mut h, d.request, class_of(e), refused_text(e)),
     }
 }
 

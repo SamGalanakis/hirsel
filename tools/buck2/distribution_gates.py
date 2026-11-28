@@ -78,6 +78,11 @@ def distribution_gates(out, call, Raw, reads, slots):
                                   "tools/tests/fixtures/store-recovery-release/main.hirsel",
                                   "tools/tests/fixtures/store-recovery-release/hirsel.hcfg"],
                             files_env={"HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain"}))
+    out.append("\n" + call("hirsel_script_test", name="store-host-recovery", script="tools/tests/store_host_recovery.py",
+                            data=["core/tools/operator_fixture.py", "tools/tests/fixtures/host-admission.hcfg",
+                                  "tools/tests/fixtures/store-recovery-release/main.hirsel",
+                                  "tools/tests/fixtures/store-recovery-release/hirsel.hcfg"],
+                            files_env={"HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain"}))
     out.append("\n" + call("hirsel_script_test", name="check-installer", script="//tools/toolchain-dist:check-installer",
                             files_env={"HIRSEL_CONFIG_EXPORTER":"//:hirsel-config-export-bin-hirsel-config-export"},
                             data=["//tools/toolchain-dist:install.sh.in", "//tools/toolchain-dist:product.py", "//tools/toolchain-dist:hcfg.py",

@@ -78,6 +78,16 @@ fn record_store(mut h: Host, name: String, incarnation: u64, ready: runner.Place
                     return Error(Unknown)
                 }
                 let mut intent = saved
+                if let Some(d) = st(store.fetch(tx, call_env.4 .active, call_env.2))? {
+                    if let Some(row) = st(store.fetch(tx, call_env.4 .requests, d))? {
+                        if let Done(AwaitStorePhase(report)) = row.status {
+                            if row.group.incarnation != found.incarnation {
+                                return Error(Unknown)
+                            }
+                            finish_request(mut tx, call_env.4, call_env.2, d, InstalledPhase(call_env.3 .version, clone(found.assembly), clone(report)))?
+                        }
+                    }
+                }
                 intent.accepted = true
                 intent.activation = call_env.3 .version
                 st(store.put(mut tx, call_env.4 .restored_groups, found.incarnation, intent))?

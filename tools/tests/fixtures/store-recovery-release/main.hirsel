@@ -72,7 +72,7 @@ fn run_with(binding: StaticFn[fn(mut store.Declare) -> Result[Handles, store.Err
     }
     runner.main(a, process, errors, tasks, c, code.describe(place), binding, scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
         let selected = runner.launch_selection(a) ?=> Usage
-        let config: runner.PlaceConfig[(), Handles, ()] = runner.PlaceConfig(backing: Disk(directory), sizes: store.derived_sizes(), selection: take selected, place: code.describe(place), n_place: 1048576, on_migrate: None, schema: binding, session: runner.wire_defaults(65536), max_sessions: runner.WIRE_OWNER_LIMIT, proxies: list.new(), n_publisher: 67108864, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net: n, tasks, clock: c, random, stop: runner.Stop(lag_ms: 0, grace_ms: 5000), wire: Some(runner.ingress.binding()), grants: Some(runner.ingress.bind_grants()), triggers: None, idle: None)
+        let config: runner.PlaceConfig[(), Handles, ()] = runner.PlaceConfig(backing: Disk(directory), sizes: store.derived_sizes(), selection: take selected, place: code.describe(place), n_place: 1048576, on_migrate: None, schema: binding, session: runner.wire_defaults(65536), max_sessions: runner.WIRE_OWNER_LIMIT, proxies: list.new(), n_publisher: 67108864, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net: n, tasks, clock: c, random, stop: runner.Stop(lag_ms: 0, grace_ms: 5000), wire: None, grants: None, triggers: None, idle: None)
         let ended = runner.operate_report(take config, take stop, result.unwrap(runner.status_root()), None, errors) ?=> Start
         Ok(ended)
     })

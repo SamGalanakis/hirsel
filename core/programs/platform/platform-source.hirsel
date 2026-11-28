@@ -64,6 +64,7 @@ fn relayed_input(input: operator.Input) -> Option[launcher.Input] {
     match input {
         AttestedInput(r) => Some(Attested(clone(r))),
         PublicationInput(r) => Some(Publication(clone(r))),
+        RecoveredInput(child) => Some(Recovered(plan_bytes(child))),
         SourceInput(_) => None,
     }
 }

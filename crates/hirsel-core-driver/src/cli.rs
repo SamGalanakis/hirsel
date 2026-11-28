@@ -142,6 +142,8 @@ commands! {
         Simple(NoOption), One: HELP;
     "host", "host --state DIR --admission FILE --max-places N --lifecycle managed|leader [--idle-ms MS]", "Run the launcher and the installed platform host on STATE.";
         Host(HostOption), One: HostState, HELP, Admission, MaxPlaces, IdleMs, Lifecycle;
+    "host adopt", "host adopt @RESTORE.json --as GROUP.hcfg [--assembly HEX] [--plan] [--wait] [--context NAME|/FILE] [--json]", "Admit a verified restored child as a new group.";
+        [Deploy] Adopt(AdoptOption), One: HELP, AdoptSpec, AdoptAssembly, Plan, Wait, Context, RequestId, Json;
     "host retire", "host retire --group NAME@INCARNATION [--plan] [--context NAME|/FILE] [--json]", "Propose retiring this exact incarnation and keeping its workdir.";
         [Retirement] Retire(RetireOption), None: HELP, GroupName, Plan, Context, RequestId, Json;
     "launcher", "launcher --control SOCKET --state DIR --lifecycle managed|leader [--operator-listen SOCKET --admission FILE --max-places N [--platform-host FILE] [--idle-ms MS]]", "Hold the groups' listeners and start their children for the platform host.";

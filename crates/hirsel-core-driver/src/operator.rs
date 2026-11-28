@@ -13,16 +13,18 @@ use std::path::Path;
 mod wire;
 include!(concat!(env!("OUT_DIR"), "/operator_wire.rs"));
 
-impl From<Input> for BeginInput {
-    fn from(input: Input) -> Self {
-        match input {
+impl TryFrom<Input> for BeginInput {
+    type Error = &'static str;
+    fn try_from(input: Input) -> Result<Self, Self::Error> {
+        Ok(match input {
+            Input::Recovered(_) => return Err("a recovered input requires a fresh group"),
             Input::Attested(r) => Self::Attested(r),
             Input::Publication(r) => Self::Publication(r),
             Input::Source(manifest) => Self::Source {
                 manifest,
                 gate: false,
             },
-        }
+        })
     }
 }
 

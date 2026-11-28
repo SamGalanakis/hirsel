@@ -44,3 +44,18 @@ pub fn verified_restored_child(db: store.Db, take recovered: store.Restored) -> 
 pub fn described_release(description: Describe) -> Result[Bytes, std.codec.EncodeError] {
     http_release_digest(description.exported, description.bindings)
 }
+
+// The host uses the saved Describe to select a retained executable for this
+// child. Read the provenance and the Describe under the same Directory lock.
+pub fn restored_description(db: store.Db, take claimed: store.Restored) -> Result[Option[Bytes], store.Error] waits {
+    let expected = claimed.point.activation
+    let binding = claimed.point.binding
+    let actual = verified_restored_child(db, take claimed)?
+    if actual.point.activation != expected || actual.point.binding != binding {
+        return Error(NotCurrent(expected))
+    }
+    if expected == 0 {
+        return Ok(None)
+    }
+    current_description(db)
+}

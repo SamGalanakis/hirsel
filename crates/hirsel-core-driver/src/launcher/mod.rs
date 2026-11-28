@@ -23,6 +23,7 @@ mod lifecycle;
 pub(crate) mod objects;
 mod places;
 mod ready;
+mod recovery;
 pub(crate) mod session;
 #[cfg(test)]
 mod source_laws;

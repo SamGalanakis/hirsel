@@ -27,23 +27,7 @@ pub type RestoredLaunch: codec + send {
 pub fn add_restored_group(mut h: Host, spec: NewGroup, restored: store.Restored, description: runner.Describe) -> Result[List[launcher.Request], Refused] waits {
     let selected = restored.point
     let child = restored.child
-    let Some(binding) = binding_of(description) else {
-        return Error(Denied("invalid restore Describe"))
-    }
-    if list.len(spec.assembly) != 32 || spec.activation != selected.activation {
-        return Error(Denied("restore selection"))
-    }
-    if selected.activation != 0 {
-        for i in 0u64 .. 32 {
-            if selected.binding[i] != binding.identity[i] {
-                return Error(Denied("restore release binding"))
-            }
-        }
-    } else if selected.binding != ([0u8; 32]) {
-        return Error(Denied("unactivated restore binding"))
-    }
-    let release = runner.described_release(description) ?=> |_| Denied("restore Describe")
-    let intent = RestoredLaunch(activation: selected.activation, assembly: clone(spec.assembly), binding: take binding, release: take release, accepted: false)
+    let intent = restored_launch(spec.assembly, spec.activation, selected.activation, selected.binding, description)?
     let added = add_group_turn(mut h, spec, Some((child, take intent)), (), fn(mut tx: store.Tx, unused: ()) -> Result[(), store.Error] {
         Ok(())
     })
@@ -81,14 +65,7 @@ fn add_group_turn[E: inert](mut h: Host, spec: NewGroup, restore: Option[(store.
             }
             let mut meta = meta_of(tx, call_env.2)?
             let expected_id = if let Some((child, intent)) = call_env.3 {
-                {
-                    let mut peers = store.range(tx, call_env.2 .groups, Unbounded, Unbounded) ?=> |e| Store(take e)
-                    while let Some((_, peer)) = st(store.next_in(tx, mut peers))? {
-                        if peer.listen == call_env.1 .listen || peer.store_id == Some((child.hi, child.lo)) {
-                            return Error(Exists)
-                        }
-                    }
-                }
+                check_restored_peers(tx, call_env.2, call_env.1 .name, call_env.1 .listen, child)?
                 st(store.put(mut tx, call_env.2 .restored_groups, meta.next_incarnation, intent))?
                 Some((child.hi, child.lo))
             } else {
@@ -255,4 +232,24 @@ fn drop_rows(mut tx: store.Tx, t: Tables, name: String, g: GroupRow, due: Option
     }
     st(store.put(mut tx, t.usage, g.tenant, u))?
     st(store.put(mut tx, t.retired, name, Retired(workdir: string.from(g.workdir), disposition: disposition)))
+}
+
+fn restored_launch(assembly: Bytes, activation: u64, selected_activation: u64, selected_binding: Inline[u8, 32], description: runner.Describe) -> Result[RestoredLaunch, Refused] {
+    let Some(binding) = binding_of(description) else {
+        return Error(Denied("invalid restore Describe"))
+    }
+    if list.len(assembly) != 32 || activation != selected_activation {
+        return Error(Denied("restore selection"))
+    }
+    if selected_activation != 0 {
+        for i in 0u64 .. 32 {
+            if selected_binding[i] != binding.identity[i] {
+                return Error(Denied("restore release binding"))
+            }
+        }
+    } else if selected_binding != ([0u8; 32]) {
+        return Error(Denied("unactivated restore binding"))
+    }
+    let release = runner.described_release(description) ?=> |_| Denied("restore Describe")
+    Ok(RestoredLaunch(activation: selected_activation, assembly: clone(assembly), binding: take binding, release: take release, accepted: false))
 }

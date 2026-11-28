@@ -71,6 +71,31 @@ impl Records {
         })
     }
 
+    pub(super) fn for_image(&self, digest: ContentHash) -> io::Result<AssemblyRecord> {
+        let mut found = None;
+        for entry in fs::read_dir(self.root.join("assemblies"))? {
+            let name = entry?.file_name();
+            let Some(key) = name
+                .to_str()
+                .and_then(|s| crate::native::recipe_build::parse_root(s).ok())
+            else {
+                continue;
+            };
+            let record = self.assembly(key)?;
+            if record.digest == digest && found.replace(record).is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "ambiguous retained image, select an assembly",
+                ));
+            }
+        }
+        found.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "no retained assembly for restored release",
+            )
+        })
+    }
     pub(crate) fn image_path(&self, digest: ContentHash) -> PathBuf {
         self.key("images", digest)
     }

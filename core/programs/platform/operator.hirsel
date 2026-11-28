@@ -75,7 +75,23 @@ pub type Registration: codec + send {
 // What a Begin or Register deploys (launch.md "The operator socket"): an attested recipe R,
 // a publication R in the launcher's code store, or source, a `launcher.Manifest`'s codec
 // bytes, whose files the host receives by content (launch.md "Source by content").
-pub type Input: codec + send = AttestedInput(Bytes) | PublicationInput(Bytes) | SourceInput(Bytes)
+pub type Recovery: codec + send {
+    directory: String,
+    parent: CatalogStore,
+    child: CatalogStore,
+    boundary: String,
+    branch: u64,
+    cut: u64,
+    at_ms: u64,
+    main_version: u64,
+    main_at_ms: u64,
+    activation: u64,
+    release_binding: String,
+    attempt: String,
+    assembly: Option[Bytes],
+}
+
+pub type Input: codec + send = AttestedInput(Bytes) | PublicationInput(Bytes) | SourceInput(Bytes) | RecoveredInput(Recovery)
 
 // What a Begin deploys: a Register's inputs, with a source carrying whether it asks for the
 // law gate (launch.md "The law gate"). Only a source can be gated, and a Register never is.
@@ -117,6 +133,7 @@ pub type DeployPlan: codec + send {
     incarnation: Option[u64],
     create: Option[Registration],
     input_digest: Bytes,
+    recovery: Option[Recovery],
     facts: Decision,
     entries: Option[List[EntryLine]],
 }
@@ -157,7 +174,7 @@ BeginAsk(Bytes, Precondition, BeginInput, List[String], List[String], bool)
 
 pub type Health: codec + send = ServingHealth | StartingHealth | ColdHealth | FailedHealth | UnknownHealth
 
-pub type OperationPhase: codec + send = InputOperationPhase | AdmissionOperationPhase | ConfirmOperationPhase | AssemblyOperationPhase | PrepareOperationPhase | PendingOperationPhase | UndecidedOperationPhase | DecisionOperationPhase | InstalledOperationPhase | FailedOperationPhase | RetiringOperationPhase | RetiredOperationPhase
+pub type OperationPhase: codec + send = InputOperationPhase | AdmissionOperationPhase | ConfirmOperationPhase | AssemblyOperationPhase | PrepareOperationPhase | PendingOperationPhase | UndecidedOperationPhase | DecisionOperationPhase | InstalledOperationPhase | FailedOperationPhase | RetiringOperationPhase | RetiredOperationPhase | OpeningOperationPhase
 
 pub type OperationObservation: codec + send {
     request: Bytes,
@@ -318,7 +335,7 @@ pub fn shows_held(d: Decision) -> bool {
 // 7 Installed(v, assembly, report), 8 Failed(class, detail, report), 9 AwaitDecision(decision).
 // Installed and Failed are terminal. AwaitDecision holds no attempt: the request waits for
 // the operator's Decide on exactly that decision.
-pub type Phase: codec + send = AwaitInput(launcher.Attempt) | AdmittingPhase(launcher.Attempt) | AwaitConfirm(launcher.Attempt) | AssemblingPhase(launcher.Attempt) | PreparingPhase(launcher.Attempt) | PendingPhase(launcher.Attempt, u64) | UndecidedPhase(launcher.Attempt, u64, String) | InstalledPhase(u64, Bytes, Report) | FailedPhase(Class, String, Report) | AwaitDecision(Decision) | RetiringPhase | RetiredPhase
+pub type Phase: codec + send = AwaitInput(launcher.Attempt) | AdmittingPhase(launcher.Attempt) | AwaitConfirm(launcher.Attempt) | AssemblingPhase(launcher.Attempt) | PreparingPhase(launcher.Attempt) | PendingPhase(launcher.Attempt, u64) | UndecidedPhase(launcher.Attempt, u64, String) | InstalledPhase(u64, Bytes, Report) | FailedPhase(Class, String, Report) | AwaitDecision(Decision) | RetiringPhase | RetiredPhase | AwaitStorePhase(Report)
 
 // One host reply. Tags: 0 State, 1 Need, 2 Display, 3 Pin, 4 Error, 5 GroupInfo, 6 Part,
 // 7 Backup, 8 BackupOffline.

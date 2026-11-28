@@ -279,6 +279,7 @@ fn observe(request: Request<OpGetOption>, envelope: &mut Envelope<'_>) -> Result
         envelope.target["incarnation"] = json!(group.incarnation.to_string());
         let effect = match &phase {
             Phase::Retired => "retired",
+            Phase::AwaitStore(_) => "awaiting_store",
             Phase::Retiring => "retiring",
             Phase::Installed(..) => "committed",
             Phase::Undecided(..) | Phase::Pending(..) => "possible",

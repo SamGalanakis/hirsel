@@ -147,6 +147,16 @@ pub enum ObserveOption {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdoptOption {
+    AdoptSpec(String),
+    AdoptAssembly(String),
+    Context(String),
+    RequestId(String),
+    Plan,
+    Wait(Option<std::time::Duration>),
+    Json,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RetireOption {
     GroupName(String),
     Context(String),

@@ -47,8 +47,19 @@ hirsel store verify "$CHILD" --release "$EXE" > "$EVIDENCE/release-verify.txt"
 
 If publication loses its reply, use `hirsel op get "$OP" --json`. Resume with the original decision if the operation still needs publication. A new plan allocates another attempt. Save the actual exit of each command. Preserve the receipt, the verifier identity and the exact data compared. Without independent source attestation, report “restored and verified; source equality unmeasured.”
 
-A service recovery drill must additionally record host acceptance under the fresh incarnation, a successful first write, reopen and a second backup. Keep the old incarnation and its evidence until the replacement has passed those checks.
+## Adopt a verified child
 
+For a Directory child, prepare a `host_v1.Group` with a fresh name and listener. Set its store to the receipt's absolute destination. Give its workdir and Dir grant access to that same Directory. Pin the host context that retains the original assembly. Keep the receipt and each decision outside both stores.
+
+```sh
+hirsel host adopt "@$EVIDENCE/restore.json" --as "$GROUP" --context "$CONTEXT" --plan --json > "$EVIDENCE/adoption.json"
+OP=$(jq -er '.operation.id' "$EVIDENCE/adoption.json")
+hirsel op decide "$OP" --context "$CONTEXT" --decision "$EVIDENCE/create.hcfg" --wait --json > "$EVIDENCE/admission.json"
+```
+
+Review the creation plan's child, parent, destination, release binding and attempt against your saved receipt before writing `create.hcfg`. If admission requests another decision, check its assembly, requested grants and plan digest and submit that decision to the same operation. Use `--assembly HEX` to select among retained assemblies with the same image or to bootstrap an unactivated Store. The launcher checks the immutable assembly and the stopped child's recorded provenance. The host records the expected child identity and waits for the Place to open that Store before routing clients.
+
+Read `hirsel status --group "$NEW_NAME@$NEW_INCARNATION" --context "$CONTEXT" --json` and compare its StoreId to the receipt. Exercise a service write, take a second backup through the serving Place and reopen a copy to check the written data. Keep the old incarnation and its evidence until these checks pass.
 
 ## Advance the retention floor
 
@@ -62,7 +73,7 @@ Put the destination profile in an operator-owned file under a trusted directory.
 {"location":{"endpoint":"https://objects.example.org","region":"auto","bucket":"recovery","prefix":"children/drill/"},"level":"bucket","source_place":null,"host_stream":null}
 ```
 
-Set `HIRSEL_RESTORE_BUCKET_ACCESS_KEY_ID` and `HIRSEL_RESTORE_BUCKET_SECRET_ACCESS_KEY` for that prefix. Temporary credentials also need `HIRSEL_RESTORE_BUCKET_SESSION_TOKEN`. Use `--to @/absolute/path/to/bucket.json` with the same plan and decision commands. If the commit reply is lost, `op get` can identify the published child from the destination with its own credential.
+Set `HIRSEL_RESTORE_BUCKET_ACCESS_KEY_ID` and `HIRSEL_RESTORE_BUCKET_SECRET_ACCESS_KEY` for that prefix. Temporary credentials also need `HIRSEL_RESTORE_BUCKET_SESSION_TOKEN`. Use `--to @/absolute/path/to/bucket.json` with the same plan and decision commands. If the commit reply is lost, `op get` can identify the published child from the destination with its own credential. The process launcher currently admits Directory children. A streamed Bucket also requires host-owned credentials, a slot for the child, conditional ATTACH and acknowledgement of its current claim.
 
 ## Retire the old incarnation
 

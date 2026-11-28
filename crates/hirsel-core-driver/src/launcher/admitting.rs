@@ -97,6 +97,10 @@ impl Admissions {
                 .map(hirsel_core_ids::ContentHash)
         };
         let source = match input {
+            Input::Recovered(bytes) => match super::recovery::decode(&bytes) {
+                Ok(plan) => Some(admit::Source::Recovered(plan)),
+                Err(why) => return Some(invalid(attempt, why.to_string())),
+            },
             Input::Attested(r) => root(&r).map(admit::Source::Attested),
             Input::Publication(r) => root(&r).map(admit::Source::Publication),
             Input::Source(bytes, gated) => match admit::source(&bytes, gated) {
@@ -205,10 +209,22 @@ impl Admissions {
                     digest,
                     fetch,
                     assembly,
+                    recovered,
                     ..
                 } => {
                     self.workers.remove(&attempt);
                     reserved.push((attempt, key));
+                    if let Some(proof) = recovered {
+                        events.push(Event::RecoveredAssembly(
+                            attempt,
+                            key.to_vec(),
+                            digest,
+                            fetch,
+                            assembly,
+                            proof,
+                        ));
+                        continue;
+                    }
                     events.push(Event::Assembled(
                         attempt,
                         key.to_vec(),

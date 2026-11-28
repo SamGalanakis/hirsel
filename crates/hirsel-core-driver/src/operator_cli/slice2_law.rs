@@ -44,6 +44,7 @@ fn terminal_and_document_choose_identical_wire_bytes() {
     use std::{fs::File, io::Write};
     let operation = vec![0x42; 16];
     let plan = DeployPlan {
+        recovery: None,
         domain: "hirsel.host.deploy.plan.v1".into(),
         authority: CatalogStore { hi: 1, lo: 2 },
         request: operation.clone(),

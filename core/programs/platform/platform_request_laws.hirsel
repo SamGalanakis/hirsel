@@ -44,6 +44,7 @@ fn operator_request_identity(c: Clock, rnd: Random) -> Result[(), ()] waits {
 // The Begin input that deploys `input` without the law gate.
 fn ungated(input: operator.Input) -> operator.BeginInput {
     match input {
+        RecoveredInput(_) => fail("a restored child requires a fresh registration"),
         AttestedInput(b) => AttestedBegin(clone(b)),
         PublicationInput(b) => PublicationBegin(clone(b)),
         SourceInput(b) => SourceBegin(clone(b), false),

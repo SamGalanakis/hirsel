@@ -211,6 +211,7 @@ pub(crate) enum Event {
     Assembled(Attempt, Vec<u8>, Vec<u8>, u64, u64),
     AdmissionFailed(Attempt, Failure),
     CutoverResult(Child, Attempt, HostReply),
+    RecoveredAssembly(Attempt, Vec<u8>, Vec<u8>, u64, u64, Vec<u8>),
 }
 
 pub(crate) fn malformed(what: &'static str) -> io::Error {
@@ -759,6 +760,9 @@ session_wire!(Event, "event tag", w, r;
         a.put(w);
         reply.put(w);
     } => Self::CutoverResult(Child::get(r)?, Attempt::get(r)?, HostReply::get(r)?),
+    18 => RecoveredAssembly(a,k,d,f,b,proof) {
+        a.put(w); w.bytes(k); w.bytes(d); w.u64(*f); w.u64(*b); w.bytes(proof);
+    } => Self::RecoveredAssembly(Attempt::get(r)?,r.bytes()?,r.bytes()?,r.u64()?,r.u64()?,r.bytes()?),
 );
 
 #[path = "session_mode.rs"]

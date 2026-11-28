@@ -19,6 +19,7 @@ pkg_v1.Package(
         ("platform-recovery.hirsel", "platform"),
         ("platform-preview.hirsel", "platform"),
         ("platform-retire.hirsel", "platform"),
+        ("platform-adopt.hirsel", "platform"),
         ("platform-plan.hirsel", "platform"),
         ("platform-admitted.hirsel", "platform"),
         ("platform-operator.hirsel", "platform"),

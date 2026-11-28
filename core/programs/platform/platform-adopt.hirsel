@@ -1,0 +1,107 @@
+fn restore_listener_available(h: Host, listen: String) -> bool waits {
+    let Ok(rd) = store.reader(h.db, 0u64) else {
+        return false
+    }
+    let Ok(take scanned) = store.scan(rd, store.snapshot(h.db), h.t.groups, Unbounded, Unbounded) else {
+        return false
+    }
+    let mut rows = take scanned
+    loop {
+        match store.next(rd, mut rows) {
+            Ok(Some((_, g))) if g.listen == listen => return false,
+            Ok(Some(_)) => (),
+            Ok(None) => return true,
+            Error(_) => return false,
+        }
+    }
+}
+
+fn check_restored_peers(tx: store.Tx, tables: Tables, name: String, listener: String, child: store.StoreId) -> Result[(), Refused] {
+    let mut peers = store.range(tx, tables.groups, Unbounded, Unbounded) ?=> |e| Store(take e)
+    while let Some((peer_name, peer)) = st(store.next_in(tx, mut peers))? {
+        if peer_name != name && (peer.listen == listener || peer.store_id == Some((child.hi, child.lo))) {
+            return Error(Exists)
+        }
+    }
+    Ok(())
+}
+
+fn prepare_adopted_launch(input: operator.Input, key: Bytes, digest: Bytes, witness: Option[Bytes]) -> Result[Option[(store.StoreId, RestoredLaunch)], Refused] {
+    let RecoveredInput(recovered) = view input else {
+        if let Some(_) = witness {
+            return Error(Denied("unexpected recovery evidence"))
+        }
+        return Ok(None)
+    }
+    let Some(raw) = view witness else {
+        return Error(Denied("missing recovery evidence"))
+    }
+    let Some(desc) = runner.decode_description(raw) else {
+        return Error(Denied("invalid restored Describe"))
+    }
+    let Some(token) = store.decode_restore_token(recovered.boundary) else {
+        return Error(Denied("invalid approved boundary"))
+    }
+    let child = store.StoreId(hi: recovered.child.hi, lo: recovered.child.lo)
+    if desc.digest != digest || child == token.parent || token.parent.hi != recovered.parent.hi || token.parent.lo != recovered.parent.lo {
+        return Error(Denied("restored assembly or provenance"))
+    }
+    let Some(hash) = std.hex.decode(string.as_bytes(recovered.release_binding)) else {
+        return Error(Denied("invalid release binding"))
+    }
+    if list.len(hash) != 32 {
+        return Error(Denied("invalid release binding"))
+    }
+    let mut binding: Inline[u8, 32] =[0; 32]
+    for i in 0u64 .. 32 {
+        binding[i] = hash[i]
+    }
+    let intent = restored_launch(key, recovered.activation, recovered.activation, binding, desc)?
+    Ok(Some((child, take intent)))
+}
+
+fn install_first(mut h: Host, name: String, d: Admitting, key: Bytes, fetch_ns: u64, assemble_ns: u64, restored: Option[(store.StoreId, RestoredLaunch)], now: Now, mut out: List[launcher.Request]) waits {
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, (store.copy_env(assemble_ns), store.copy_env(d), store.copy_env(fetch_ns), store.copy_env(key), store.copy_env(name), store.copy_env(t), store.copy_env(restored)), fn(mut tx, call_env) -> Result[(), Refused] {
+            let Some(found) = st(store.fetch(tx, call_env.5 .groups, call_env.4))? else {
+                return Error(Unknown)
+            }
+            if found.incarnation != call_env.1 .incarnation {
+                return Error(Unknown)
+            }
+            if let Some(_) = st(store.fetch(tx, call_env.5 .wake, call_env.4))? {
+                return Error(Exists)
+            }
+            let mut g = found
+            g.assembly = clone(call_env.3)
+            g.activation = 0u64
+            if let Some((child, intent)) = call_env.6 {
+                check_restored_peers(tx, call_env.5, call_env.4, g.listen, child)?
+                g.activation = intent.activation
+                g.store_id = Some((child.hi, child.lo))
+                st(store.put(mut tx, call_env.5 .restored_groups, g.incarnation, intent))?
+            }
+            g.source = installed_source(tx, call_env.5, call_env.1 .request)?
+            st(store.put(mut tx, call_env.5 .groups, call_env.4, g))?
+            st(store.put(mut tx, call_env.5 .wake, call_env.4, WakeRow(wake: Clean(None), gen: 0u64)))?
+            let report = operator.Report(fetch_ns: Some(call_env.2), assemble_ns: Some(call_env.0), pause: NotStarted, preview: operator.no_preview())
+            if let Some(_) = call_env.6 {
+                let Some(found_request) = st(store.fetch(tx, call_env.5 .requests, call_env.1 .request))? else {
+                    return Error(Unknown)
+                }
+                let mut saved = found_request
+                saved.status = Done(AwaitStorePhase(report))
+                return st(store.put(mut tx, call_env.5 .requests, call_env.1 .request, saved))
+            }
+            finish_request(mut tx, call_env.5, call_env.4, call_env.1 .request, InstalledPhase(g.activation, clone(call_env.3), report))
+        })
+    }
+    list.push(mut out, Release(d.attempt))
+    match decided(mut h, take made) {
+        Ok(()) => {
+            let _ = wake_cause(mut h, name, Operator, now, mut out)
+        },
+        Error(e) => fail_request(mut h, d.request, class_of(e), refused_text(e)),
+    }
+}

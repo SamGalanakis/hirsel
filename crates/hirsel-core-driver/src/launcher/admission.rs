@@ -13,6 +13,7 @@ pub(crate) enum Input {
     Attested(Vec<u8>),
     Publication(Vec<u8>),
     Source(Vec<u8>, bool),
+    Recovered(Vec<u8>),
 }
 
 /// The host's policy for one admission: whether the image records, the Foreign and Exec
@@ -75,6 +76,7 @@ impl Wire for Input {
             Self::Attested(r) => (0, r),
             Self::Publication(r) => (1, r),
             Self::Source(tree, _) => (2, tree),
+            Self::Recovered(proof) => (3, proof),
         };
         w.u32(tag);
         w.bytes(bytes);
@@ -87,6 +89,7 @@ impl Wire for Input {
             0 => Self::Attested(r.bytes()?),
             1 => Self::Publication(r.bytes()?),
             2 => Self::Source(r.bytes()?, r.bool()?),
+            3 => Self::Recovered(r.bytes()?),
             _ => return Err(malformed("admission input tag")),
         })
     }

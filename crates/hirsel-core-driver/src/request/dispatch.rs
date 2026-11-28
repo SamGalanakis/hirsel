@@ -103,6 +103,7 @@ pub(super) fn run(mut args: Vec<String>) -> Result<Outcome, Box<dyn std::error::
             let serve = crate::resident::Serve::read(request)?;
             conclude(Outcome::Exit(crate::resident::run(serve)?))
         }
+        Invocation::Adopt(request) => conclude(Outcome::Exit(operator_cli::adopt::run(request))),
         Invocation::Retire(request) => conclude(Outcome::Exit(operator_cli::retire::run(request))),
         Invocation::Host(request) => match operator_cli::host(request)? {},
         Invocation::Observe(request) => {

@@ -73,11 +73,15 @@ fn deploy_plan(h: Host, d: Bytes, row: RequestRow, facts: operator.Decision) -> 
         RetirementStage => "hirsel.host.retire.plan.v1",
         _ => "hirsel.host.deploy.plan.v1"
     }
+    let recovery: Option[operator.Recovery] = match row.input {
+        RecoveredInput(evidence) => Some(clone(evidence)),
+        _ => None,
+    }
     operator.DeployPlan(domain: domain, authority: operator.CatalogStore(hi: catalog.hi, lo: catalog.lo), request: clone(d), intent_digest: digest_of(row.begin), subject: take subject, incarnation: if row.group.incarnation == 0u64 {
         None
     } else {
         Some(row.group.incarnation)
-    }, create: take create, input_digest: digest_of(plan_bytes(row.input)), facts: clone(facts), entries: clone(row.entries))
+    }, create: take create, input_digest: digest_of(plan_bytes(row.input)), recovery: take recovery, facts: clone(facts), entries: clone(row.entries))
 }
 
 fn plan_answer(h: Host, d: Bytes, row: RequestRow, facts: operator.Decision) -> operator.Answer {
@@ -145,6 +149,12 @@ fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.
         refuse(mut h, conn, ConflictClass, "the expected absence changed")
         return
     }
+    if let RecoveredInput(child) = requested {
+        if child.directory != spec.store || (child.child.hi == child.parent.hi && child.child.lo == child.parent.lo) || !restore_listener_available(h, spec.listen) {
+            refuse(mut h, conn, ConflictClass, "adoption requires a fresh child, its selected store, and a distinct listener")
+            return
+        }
+    }
     if spec.name == "" || spec.tenant == "" || spec.listen == "" || spec.store == "" {
         refuse(mut h, conn, InvalidClass, "a registration names its group, tenant, listener and store")
         return
@@ -179,6 +189,12 @@ fn create_approved(mut h: Host, conn: u64, d: Bytes, proposal: RequestRow, now: 
     let Some(RegisterAsk(_, spec, requested, foreign, exec, expected, _)) = operator.decode_ask(proposal.begin) else {
         refuse(mut h, conn, ProtocolClass, "expected a creation proposal")
         return
+    }
+    if let RecoveredInput(_) = requested {
+        if !restore_listener_available(h, spec.listen) {
+            refuse(mut h, conn, ConflictClass, "the adoption listener is in use")
+            return
+        }
     }
     if store_owned(h, spec.store) || !matches_subject(h, expected) {
         map.insert(mut h.owners, clone(d), conn)

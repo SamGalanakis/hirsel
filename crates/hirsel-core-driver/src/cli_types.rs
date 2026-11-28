@@ -59,6 +59,7 @@ pub enum Invocation {
     ProfileExport(Request<ProfileExportOption>),
     Coverage(Request<CoverageOption>),
     Lean(Request<LeanOption>),
+    Adopt(Request<AdoptOption>),
     Retire(Request<RetireOption>),
     Host(Request<HostOption>),
     Launcher(Request<LauncherOption>),

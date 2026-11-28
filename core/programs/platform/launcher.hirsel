@@ -78,7 +78,7 @@ pub type Launch: codec + send {
 // which the launcher publishes with the normal checker and then admits as a publication
 // (launch.md "Publish and assemble"). A source's bool asks for the law gate (launch.md
 // "The law gate"): its tests run in the publish scratch after H and before H is admitted.
-pub type Input: codec + send = Attested(Bytes) | Publication(Bytes) | Source(Bytes, bool)
+pub type Input: codec + send = Attested(Bytes) | Publication(Bytes) | Source(Bytes, bool) | Recovered(Bytes)
 
 // Submitted source: the files of a workspace whose root holds its `hirsel.hcfg` and
 // `hirsel.lock`, the package directory to publish within it, and the `--grant` and `--dir`
@@ -373,7 +373,7 @@ Inventory(List[ChildState], List[Group], List[CutoverKey])
 // and assembly times in nanoseconds. The launcher holds the attempt's reservation.
     | Assembled(Attempt, Bytes, Bytes, u64, u64) | AdmissionFailed(Attempt, Failure)
 // OLD's answer to the cutover forwarded for this attempt, or Uncertain if OLD ended first.
-    | CutoverResult(Child, Attempt, runner.HostReply)
+    | CutoverResult(Child, Attempt, runner.HostReply) | RecoveredAssembly(Attempt, Bytes, Bytes, u64, u64, Bytes)
 
 pub fn role_of(m: Mode) -> Role {
     match m {

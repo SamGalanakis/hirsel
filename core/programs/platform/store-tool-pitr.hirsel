@@ -173,3 +173,40 @@ fn observe_restore(dir: Dir, out: Stdout, err: Stderr, argv: Args) -> Result[(),
         Error(e) => refused(err, store_refusal(e)),
     }
 }
+
+// Called by the launcher on the Directory opened for the group's store.
+fn inspect_restored(dir: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, err: Stderr, argv: Args) -> Result[(), Exit] waits {
+    let BranchBoundary(branch_id, token) = selector(argv)? else {
+        return Error(usage())
+    }
+    let Some(hash) = std.hex.decode(string.as_bytes(operand(argv, 10)?)) else {
+        return Error(usage())
+    }
+    if list.len(hash) != 32 {
+        return Error(usage())
+    }
+    let mut binding: Inline[u8, 32] =[0; 32]
+    for i in 0u64 .. 32 {
+        binding[i] = hash[i]
+    }
+    let point = store.RestorePoint(token, branch: branch_id, version: count_arg(argv, 5)?, at: count_arg(argv, 6)?, main_version: count_arg(argv, 7)?, main_at: count_arg(argv, 8)?, activation: count_arg(argv, 9)?, binding)
+    let child = archive_parent(operand(argv, 11)?)?
+    let receipt = store.Restored(child, point, attempt: attempt_arg(argv, 4)?)
+    let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
+    options.create = false
+    options.expect = Some(child)
+    let db = match store.open(tasks, dir, c, r, options) {
+        Ok(take fresh) => take fresh,
+        Error(Held) => return held_writer(err),
+        Error(e) => return refused(err, store_refusal(e)),
+    }
+    let evidence = runner.restored_description(db, take receipt)
+    if let Error(e) = store.close(take db) {
+        return refused(err, store_refusal(e))
+    }
+    match take evidence {
+        Ok(Some(take description)) => say(out, std.hex.encode(description)),
+        Ok(None) => say(out, "unactivated"),
+        Error(e) => refused(err, store_refusal(e)),
+    }
+}

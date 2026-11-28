@@ -31,6 +31,12 @@ pub fn help(command: Option<&CommandSpec>) -> String {
             return result;
         }
         command.schema.write_help(&mut result);
+        if command.name == "host" {
+            result.push_str("\nGroup recovery commands:\n");
+            for child in COMMANDS.iter().filter(|c| c.name.starts_with("host ")) {
+                result.push_str(&format!("  {}\n    {}\n", child.usage, child.description));
+            }
+        }
         result
     } else {
         let mut result =

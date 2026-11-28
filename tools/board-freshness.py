@@ -317,7 +317,7 @@ def atomic_write(path, content):
         pending.replace(path)
 
 
-def service_failure(base, followups, tier="nightly"):
+def service_failure(base, tier):
     now = datetime.now(timezone.utc)
     status = os.environ.get("MONITOR_EXIT_STATUS", "")
     exited = os.environ.get("MONITOR_EXIT_CODE") == "exited"
@@ -358,8 +358,6 @@ def service_failure(base, followups, tier="nightly"):
     alerts.mkdir(exist_ok=True)
     with (alerts / f"{now.date()}{suffix}.txt").open("a") as stream:
         stream.write(line + "\n")
-    with followups.open("a") as stream:
-        stream.write(f"\n- {line}\n")
     print(line)
     return not vopr and tier == "nightly"
 
@@ -386,9 +384,8 @@ def main():
     parser.add_argument("--current", type=Path)
     parser.add_argument("--alert", action="store_true", help="print new attempt failures and current staleness")
     parser.add_argument("--nightly-dir", type=Path, default=NIGHTLY_DIR)
-    parser.add_argument("--service-failure", type=Path, metavar="FOLLOWUPS",
-                        help="record the failing systemd invocation")
-    parser.add_argument("--service-failure-tier", choices=("nightly", "weekly"))
+    parser.add_argument("--service-failure-tier", choices=("nightly", "weekly"),
+                        help="record the failing systemd invocation for this board tier")
     parser.add_argument("--last-complete-commit", action="store_true")
     parser.add_argument("--prune", type=Path, metavar="CURRENT_RUN", help=argparse.SUPPRESS)
     parser.add_argument("--record", type=Path, help="attempt run directory")
@@ -399,8 +396,6 @@ def main():
     for stage in AUXILIARY_STAGES:
         parser.add_argument(f"--{stage}-status", type=int)
     args = parser.parse_args()
-    if args.service_failure_tier and not args.service_failure:
-        parser.error("--service-failure-tier requires --service-failure")
     args.base.mkdir(parents=True, exist_ok=True)
     with (args.base / "freshness.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -410,10 +405,8 @@ def main():
                 remove_run(run)
                 print(f"Pruned board run {run}")
             return
-        if args.service_failure:
-            if not service_failure(args.base, args.service_failure, args.service_failure_tier or "nightly"):
-                return
-            args.current = args.current or args.service_failure.with_name("CURRENT-BOARD.md")
+        if args.service_failure_tier and not service_failure(args.base, args.service_failure_tier):
+            return
         if args.record:
             if args.started is None or not args.step:
                 parser.error("--record requires --started and --step")

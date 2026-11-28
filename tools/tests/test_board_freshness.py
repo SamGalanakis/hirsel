@@ -397,7 +397,7 @@ esac
                         self.assertIn("Finished with auxiliary failures", current)
                         hook = subprocess.check_output(
                             [sys.executable, TOOLS / "board-freshness.py", "--base", base,
-                             "--service-failure", base / "followups.md"],
+                             "--service-failure-tier", "nightly", "--current", base / "CURRENT-BOARD.md"],
                             env=os.environ | {"MONITOR_EXIT_CODE": "exited", "MONITOR_EXIT_STATUS": "4",
                                               "MONITOR_INVOCATION_ID": invocation}, text=True,
                         )
@@ -405,11 +405,9 @@ esac
                         self.assertIn("Laws (exit 1)", hook)
                         self.assertNotIn("service startup", hook)
 
-    def test_service_failure_writes_dated_alert_and_followup(self):
+    def test_service_failure_appends_to_dated_alerts(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            followups = base / "followups.md"
-            followups.write_text("Existing entry\n")
             culprit = "Culprit fc72987650b1cd38f85493120edf157d2d8c2343 arena/Json::ParseMapping\n"
             expected = {}
             for status, outcome in ((1, "incomplete"), (2, "refused"), (3, "regressed")):
@@ -425,7 +423,8 @@ esac
                     "commit": "scheduled-commit", "invocation": invocation,
                 }))
                 result = subprocess.check_output(
-                    [sys.executable, TOOLS / "board-freshness.py", "--base", base, "--service-failure", followups],
+                    [sys.executable, TOOLS / "board-freshness.py", "--base", base,
+                     "--service-failure-tier", "nightly"],
                     env=os.environ | {"MONITOR_EXIT_CODE": "exited", "MONITOR_EXIT_STATUS": str(status),
                                       "MONITOR_INVOCATION_ID": invocation},
                     text=True,
@@ -436,9 +435,8 @@ esac
                 expected[path] = expected.get(path, "") + result
                 for alert, contents in expected.items():
                     self.assertEqual(alert.read_text(), contents)
-                self.assertIn("- " + result, followups.read_text())
             weekly = subprocess.check_output(
-                [sys.executable, TOOLS / "board-freshness.py", "--base", base, "--service-failure", followups,
+                [sys.executable, TOOLS / "board-freshness.py", "--base", base,
                  "--service-failure-tier", "weekly"],
                 env=os.environ | {"MONITOR_EXIT_CODE": "exited", "MONITOR_EXIT_STATUS": "1",
                                   "MONITOR_INVOCATION_ID": ""},
@@ -449,9 +447,9 @@ esac
             self.assertEqual((base / "alerts" / f"{weekly[:10]}-weekly.txt").read_text(), weekly)
             for alert, contents in expected.items():
                 self.assertEqual(alert.read_text(), contents)
-            self.assertIn("- " + weekly, followups.read_text())
             vopr = subprocess.check_output(
-                [sys.executable, TOOLS / "board-freshness.py", "--base", base, "--service-failure", followups],
+                [sys.executable, TOOLS / "board-freshness.py", "--base", base,
+                 "--service-failure-tier", "nightly"],
                 env=os.environ | {"MONITOR_UNIT": "hirsel-vopr-nightly.service", "MONITOR_EXIT_CODE": "exited",
                                   "MONITOR_EXIT_STATUS": "2", "MONITOR_INVOCATION_ID": ""},
                 text=True,
@@ -459,8 +457,6 @@ esac
             self.assertIn("Hirsel nightly VOPR sweep failed (exit 2)", vopr)
             self.assertIn("-u hirsel-vopr-nightly.service", vopr)
             self.assertEqual((base / "alerts" / f"{vopr[:10]}-vopr.txt").read_text(), vopr)
-            self.assertIn("- " + vopr, followups.read_text())
-            self.assertTrue(followups.read_text().startswith("Existing entry\n"))
 
     def test_failure_hook_publishes_startup_failure_ahead_of_staleness(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -473,7 +469,7 @@ esac
             (base / "last-complete.json").symlink_to(board)
             freshness = [sys.executable, TOOLS / "board-freshness.py", "--base", base]
             hook = subprocess.check_output(
-                [*freshness, "--service-failure", base / "followups.md"],
+                [*freshness, "--service-failure-tier", "nightly", "--current", base / "CURRENT-BOARD.md"],
                 env=os.environ | {"MONITOR_EXIT_CODE": "exited", "MONITOR_EXIT_STATUS": "2",
                                   "MONITOR_INVOCATION_ID": "b" * 32}, text=True,
             )

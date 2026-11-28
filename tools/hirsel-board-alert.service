@@ -3,4 +3,5 @@ Description=Record a Hirsel nightly board failure
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 %h/.local/share/hirsel-board/main/tools/board-freshness.py --base %h/.local/share/hirsel-board --service-failure /workspace/code/hirsel-briefs/archive/followups-to-2026-11-28.md --current /workspace/code/hirsel-briefs/CURRENT-BOARD.md
+# The board can fail before it switches its checkout.
+ExecStart=/bin/bash -o pipefail -c '/usr/bin/git -C "$$1" show refs/remotes/origin/main:tools/board-freshness.py | /usr/bin/python3 - "$${@:2}"' _ %h/.local/share/hirsel-board/main --base %h/.local/share/hirsel-board --service-failure-tier nightly --current /workspace/code/hirsel-briefs/CURRENT-BOARD.md

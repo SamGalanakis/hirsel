@@ -238,7 +238,7 @@ impl Service {
                 )));
             }
         }
-        if request.policy != 0 {
+        if request.policy & !hirsel_mod::RECORDING != 0 {
             return Err(Refusal::Unsupported(format!(
                 "policy bits {:#x}",
                 request.policy
@@ -277,7 +277,11 @@ impl Service {
         let mut command = Command::new(&self.worker);
         command
             .arg(hirsel_core_ids::module_build::WORKER)
-            .arg(&source)
+            .arg(&source);
+        if request.policy & hirsel_mod::RECORDING != 0 {
+            command.arg("--recording");
+        }
+        command
             .args(["--target", request.target.triple(), "--backend"])
             .arg(match request.backend {
                 Backend::Cranelift => "cranelift",

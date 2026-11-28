@@ -127,7 +127,10 @@ pub(super) fn validate_target_and_flags(
         OutputKind::Module => "module",
     };
     for (enabled, flag) in [
-        (flags.recording_build, "--recording"),
+        (
+            output == OutputKind::StaticLibrary && flags.recording_build,
+            "--recording",
+        ),
         (flags.release_manifest.is_some(), "--manifest"),
         (
             flags.logical_charge_report.is_some(),

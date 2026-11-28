@@ -203,7 +203,9 @@ policy bits. The host may select closed named exports by fully qualified path. T
 names count toward the input cap. The worker checks the source and links the union
 of the selected functions' reachable units with their PACK-15 adapters. Reordering
 the selection preserves the module bytes and key. An empty selection builds the
-program entry. A reply is a module (its bytes, digest and key) or one refusal:
+program entry. Policy bit 0 selects the same recording instrumentation as
+`hirsel build --emit module --recording`. It participates in the module key for both
+program roots and typed exports. A reply is a module (its bytes, digest and key) or one refusal:
 
 | refusal | when | cached |
 |---|---|---|

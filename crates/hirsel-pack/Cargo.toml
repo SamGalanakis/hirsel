@@ -9,7 +9,7 @@ rust-version.workspace = true
 [dependencies]
 hirsel-code = { path = "../hirsel-code" }
 hirsel-core-ids = { path = "../hirsel-core-ids" }
-hirsel-core-rt = { path = "../hirsel-core-rt" }
+hirsel-core-rt = { path = "../hirsel-core-rt", features = ["record"] }
 hirsel-mod = { path = "../hirsel-mod" }
 
 [dev-dependencies]

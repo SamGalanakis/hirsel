@@ -1042,18 +1042,12 @@ fn timeline(scenario: Scenario, chooser: u8, bytes: Option<&[u8]>) -> Timeline {
     if let Some(bytes) = bytes {
         t.store.files.insert(b"t".to_vec(), bytes.to_vec());
     }
-    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::fd::AsRawFd;
     let pipe = if matches!(scenario, Scenario::Pipe { .. }) {
-        let mut fds = [-1i32; 2];
-        // SAFETY: pipe initializes two descriptors, each transferred once.
-        unsafe {
-            assert_eq!(libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC), 0);
-            let reader = std::fs::File::from_raw_fd(fds[0]);
-            let writer = std::fs::File::from_raw_fd(fds[1]);
-            let other = writer.try_clone().unwrap();
-            t.writers = [writer.as_raw_fd(), other.as_raw_fd()];
-            Some((reader, writer, other))
-        }
+        let (reader, writer) = std::io::pipe().unwrap();
+        let other = writer.try_clone().unwrap();
+        t.writers = [writer.as_raw_fd(), other.as_raw_fd()];
+        Some((reader, writer, other))
     } else {
         None
     };

@@ -53,6 +53,18 @@ fn capped_worker_emits_the_selected_typed_exports() {
         .compile_exports(&request, &[names[1], names[0]])
         .unwrap();
     assert_eq!(built, reversed);
+    let recording = service
+        .compile_exports(
+            &Request {
+                policy: hirsel_mod::RECORDING,
+                ..request
+            },
+            &names,
+        )
+        .unwrap();
+    assert_ne!(recording.key, built.key);
+    let recording = hirsel_mod::Module::parse(&recording.bytes).unwrap();
+    assert_eq!(recording.header.policy, hirsel_mod::RECORDING);
     assert!(matches!(
         service.compile_exports(&request, &[names[0], "local/app@1/main/absent"]),
         Err(Refusal::Unsupported(_))

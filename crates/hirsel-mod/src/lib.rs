@@ -22,8 +22,10 @@ mod tests;
 pub const MAGIC: [u8; 8] = *b"HIRMOD\0\x01";
 pub const HEADER: usize = 232;
 pub const SECTIONS: usize = 13;
-/// Policy bits version 1 defines: tape recording, speculative index masking.
-pub const POLICY: u64 = 0b11;
+/// Request tape recording instrumentation in module code.
+pub const RECORDING: u64 = 1;
+/// All policy bits in a v1 module header.
+pub const POLICY: u64 = RECORDING | 0b10;
 pub const NO_DESCRIPTOR: u32 = u32::MAX;
 /// The fixed words of a PROG-9 descriptor in a module's data: its code address, the
 /// length of its identity bytes and its revision. The identity bytes follow them.

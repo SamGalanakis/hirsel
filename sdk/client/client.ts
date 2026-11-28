@@ -597,7 +597,7 @@ export class Client implements Transport {
         used.push(lane);
       }
       await this.options.storage.write(state, replaceRecords);
-      for (const call of take) call.timing?.admit();
+      if (this.options.onCallTiming) for (const call of take) call.timing?.admit();
       for (const {lane, stream, lease} of claimed.splice(0)) await this.swapLease(lane, stream, lease);
       for (const lane of used) lane.record = state.streams[lane.stream];
     } catch (error) {

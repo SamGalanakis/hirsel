@@ -12,12 +12,31 @@ export function vectors(c) {
     assert.throws(() => codec.decode(from(bytes + '00')),c.Malformed);
     for (let n=0;n<from(bytes).length;n++) assert.throws(() => codec.decode(from(bytes).slice(0,n)),c.Malformed);
   }
-  vector(c.values.u64,0n,'0000000000000000');
-  vector(c.values.u64,18446744073709551615n,'ffffffffffffffff');
+  for (const [name, op, min, max, valueMin, valueMax, keyMin, keyMax] of [
+    ['u8', 3, 0, 255, '00', 'ff', '00', 'ff'],
+    ['u16', 4, 0, 65535, '0000', 'ffff', '0000', 'ffff'],
+    ['u32', 5, 0, 4294967295, '00000000', 'ffffffff', '00000000', 'ffffffff'],
+    ['u64', 6, 0n, 18446744073709551615n, '0000000000000000', 'ffffffffffffffff', '0000000000000000', 'ffffffffffffffff'],
+    ['i8', 7, -128, 127, '80', '7f', '00', 'ff'],
+    ['i16', 8, -32768, 32767, '0080', 'ff7f', '0000', 'ffff'],
+    ['i32', 9, -2147483648, 2147483647, '00000080', 'ffffff7f', '00000000', 'ffffffff'],
+    ['i64', 10, -9223372036854775808n, 9223372036854775807n, '0000000000000080', 'ffffffffffffff7f', '0000000000000000', 'ffffffffffffffff']
+  ]) {
+    const one = typeof min === 'bigint' ? 1n : 1;
+    for (const [codec, minBytes, maxBytes] of [[c.values[name], valueMin, valueMax], [c.keys[name], keyMin, keyMax]]) {
+      vector(codec, min, minBytes);
+      vector(codec, max, maxBytes);
+      assert.throws(() => codec.encode(min - one), RangeError, `${name} below min`);
+      assert.throws(() => codec.encode(max + one), RangeError, `${name} above max`);
+    }
+    const descending = c.makeCodec([21, [op]], [], true);
+    const inverted = bytes => hex(from(bytes).map(byte => byte ^ 255));
+    vector(descending, {value: min}, inverted(keyMin));
+    vector(descending, {value: max}, inverted(keyMax));
+  }
   vector(c.values.u64,9007199254740993n,'0100000000002000');
-  vector(c.values.i64,-9223372036854775808n,'0000000000000080');
   assert.throws(() => c.values.u64.encode(9007199254740993),TypeError);
-  for (const [name,value,bytes] of [['unit',undefined,''],['bool',true,'01'],['char','é','e9000000'],['u8',255,'ff'],['u16',4660,'3412'],['u32',7,'07000000'],['i8',-1,'ff'],['i16',-2,'feff'],['i32',-3,'fdffffff'],['f32',1,'0000803f'],['f64',-0.5,'000000000000e0bf'],['string','hé','0300000068c3a9'],['string','\ufeff','03000000efbbbf']]) vector(c.values[name],value,bytes);
+  for (const [name,value,bytes] of [['unit',undefined,''],['bool',true,'01'],['char','é','e9000000'],['u16',4660,'3412'],['u32',7,'07000000'],['i8',-1,'ff'],['i16',-2,'feff'],['i32',-3,'fdffffff'],['f32',1,'0000803f'],['f64',-0.5,'000000000000e0bf'],['string','hé','0300000068c3a9'],['string','\ufeff','03000000efbbbf']]) vector(c.values[name],value,bytes);
   vector(c.values.bytes,from('00ff'),'0200000000ff');
   for (const [op,value,bytes] of [[6,0n,'0000000000000000'],[5,7,'07000000']]) {
     vector(c.makeCodec([14,[op]]),[],'00000000');
@@ -58,7 +77,7 @@ export function vectors(c) {
   assert.equal(hex(c.values.f64.encode(NaN)),'000000000000f87f');
   assert.throws(() => c.makeCodec([16,[3]]).decode(from('02000000')),c.Malformed);
   assert.throws(() => c.makeCodec([15,[14,[3]],[0]]).decode(from('0200000001000000070100000007')),c.Malformed);
-  for (const [name,value,bytes] of [['u8',255,'ff'],['u16',4660,'1234'],['u32',7,'00000007'],['u64',9007199254740993n,'0020000000000001'],['i8',-1,'7f'],['i16',-2,'7ffe'],['i32',-3,'7ffffffd'],['i64',-9223372036854775808n,'0000000000000000'],['bool',true,'01'],['string','a\0b','6100ff620000'],['bytes',from('00ff'),'00ffff0000']]) vector(c.keys[name],value,bytes);
+  for (const [name,value,bytes] of [['u16',4660,'1234'],['u32',7,'00000007'],['u64',9007199254740993n,'0020000000000001'],['i8',-1,'7f'],['i16',-2,'7ffe'],['i32',-3,'7ffffffd'],['bool',true,'01'],['string','a\0b','6100ff620000'],['bytes',from('00ff'),'00ffff0000']]) vector(c.keys[name],value,bytes);
   vector(c.makeCodec([18,[[9],[13]]],[],true),[-1,'a'],'7fffffff610000');
   for (const bytes of ['00','0001']) assert.throws(() => c.keys.bytes.decode(from(bytes)),c.Malformed);
   return {cases};

@@ -41,29 +41,59 @@ class Writer {
     return out;
   }
 }
-const integer = {3:[1,false],4:[2,false],5:[4,false],6:[8,false],7:[1,true],8:[2,true],9:[4,true],10:[8,true]};
-function readInteger(op, r, key) {
-  const [width, signed] = integer[op], at = r.take(width);
-  let n = width === 8 ? r.view.getBigUint64(at, !key) : BigInt(width === 4 ? r.view.getUint32(at, !key) : width === 2 ? r.view.getUint16(at, !key) : r.view.getUint8(at));
-  const bits = BigInt(width * 8);
-  if (r.inverted) n ^= (1n << bits) - 1n;
-  if (signed) { if (key) n ^= 1n << (bits - 1n); n = BigInt.asIntN(Number(bits), n); }
-  return width === 8 ? n : Number(n);
+function numberInteger(width, min, max, get, set) {
+  const signed = min < 0;
+  // Signed getters extend the sign bit, so their inversion mask is -1.
+  const mask = signed ? -1 : max;
+  return {
+    reader(key) {
+      if (!key) return r => get.call(r.view, r.take(width), true);
+      return r => {
+        const value = get.call(r.view, r.take(width), false) ^ min ^ (r.inverted ? mask : 0);
+        return signed ? value : value >>> 0;
+      };
+    },
+    write(value, w, key) {
+      if (!Number.isInteger(value)) throw new TypeError('expected integer');
+      if (value < min || value > max) throw new RangeError('integer out of range');
+      const raw = key ? value ^ min : value;
+      if (width === 1) {
+        w.byte(raw);
+      } else {
+        const bytes = new Uint8Array(width);
+        set.call(new DataView(bytes.buffer), 0, raw, !key);
+        w.put(bytes);
+      }
+    }
+  };
 }
-function writeInteger(op, value, w, key) {
-  const [width, signed] = integer[op];
-  if (width === 8 ? typeof value !== 'bigint' : typeof value !== 'number' || !Number.isInteger(value)) throw new TypeError(width === 8 ? 'expected bigint' : 'expected integer');
-  const bits = BigInt(width * 8), n = BigInt(value), min = signed ? -(1n << (bits - 1n)) : 0n, max = (1n << (bits - (signed ? 1n : 0n))) - 1n;
-  if (n < min || n > max) throw new RangeError('integer out of range');
-  let raw = BigInt.asUintN(Number(bits), n);
-  if (key && signed) raw ^= 1n << (bits - 1n);
-  const bytes = new Uint8Array(width), view = new DataView(bytes.buffer);
-  if (width === 8) view.setBigUint64(0, raw, !key);
-  else if (width === 4) view.setUint32(0, Number(raw), !key);
-  else if (width === 2) view.setUint16(0, Number(raw), !key);
-  else view.setUint8(0, Number(raw));
-  w.put(bytes);
+function bigInteger(min, max, get) {
+  const mask = min < 0n ? -1n : max;
+  return {
+    reader(key) {
+      if (!key) return r => get.call(r.view, r.take(8), true);
+      return r => get.call(r.view, r.take(8), false) ^ min ^ (r.inverted ? mask : 0n);
+    },
+    write(value, w, key) {
+      if (typeof value !== 'bigint') throw new TypeError('expected bigint');
+      if (value < min || value > max) throw new RangeError('integer out of range');
+      const bytes = new Uint8Array(8);
+      new DataView(bytes.buffer).setBigUint64(0, key ? value ^ min : value, !key);
+      w.put(bytes);
+    }
+  };
 }
+const dataView = DataView.prototype;
+const integers = {
+  3: numberInteger(1, 0, 0xff, dataView.getUint8),
+  4: numberInteger(2, 0, 0xffff, dataView.getUint16, dataView.setUint16),
+  5: numberInteger(4, 0, 0xffffffff, dataView.getUint32, dataView.setUint32),
+  6: bigInteger(0n, 0xffffffffffffffffn, dataView.getBigUint64),
+  7: numberInteger(1, -0x80, 0x7f, dataView.getInt8),
+  8: numberInteger(2, -0x8000, 0x7fff, dataView.getInt16, dataView.setUint16),
+  9: numberInteger(4, -0x80000000, 0x7fffffff, dataView.getInt32, dataView.setUint32),
+  10: bigInteger(-0x8000000000000000n, 0x7fffffffffffffffn, dataView.getBigInt64)
+};
 function readBytes(r, key) {
   if (!key) { const n = r.count(); return r.bytes.slice(r.take(n), r.at); }
   const bytes = [];
@@ -82,54 +112,140 @@ function decodeString(bytes) { try { return utf8.decode(bytes); } catch { throw 
 function keyString(bytes) {
   let key = ''; for (const byte of bytes) key += byte.toString(16).padStart(2,'0'); return key;
 }
-function read(t, defs, r, key) {
-  const op = t[0];
-  if (integer[op]) return readInteger(op, r, key);
-  if (op === 0) return undefined;
-  if (op === 20) throw new Malformed('Never');
-  if (op === 1) { const b = r.byte(); if (b > 1) throw new Malformed('bool'); return b === 1; }
-  if (op === 2) { const c = r.count(); if (c > 0x10ffff || c >= 0xd800 && c <= 0xdfff) throw new Malformed('char'); return String.fromCodePoint(c); }
-  if (op === 11 || op === 12) {
-    const at = r.take(op === 11 ? 4 : 8), value = op === 11 ? r.view.getFloat32(at,true) : r.view.getFloat64(at,true);
-    if (Number.isNaN(value) && (op === 11 ? r.view.getUint32(at,true) !== 0x7fc00000 : r.view.getBigUint64(at,true) !== 0x7ff8000000000000n)) throw new Malformed('noncanonical NaN');
-    return value;
+function readBool(r) {
+  const b = r.byte();
+  if (b > 1) throw new Malformed('bool');
+  return b === 1;
+}
+function readChar(r) {
+  const c = r.count();
+  if (c > 0x10ffff || c >= 0xd800 && c <= 0xdfff) throw new Malformed('char');
+  return String.fromCodePoint(c);
+}
+function readF32(r) {
+  const at = r.take(4), value = r.view.getFloat32(at, true);
+  if (Number.isNaN(value) && r.view.getUint32(at, true) !== 0x7fc00000) throw new Malformed('noncanonical NaN');
+  return value;
+}
+function readF64(r) {
+  const at = r.take(8), value = r.view.getFloat64(at, true);
+  if (Number.isNaN(value) && r.view.getBigUint64(at, true) !== 0x7ff8000000000000n) throw new Malformed('noncanonical NaN');
+  return value;
+}
+function readParts(parts, r) {
+  const values = [];
+  for (const part of parts) values.push(part(r));
+  return values;
+}
+function compileReader(root, definitions, key) {
+  const readers = [];
+
+  function definition(index) {
+    if (readers[index]) return readers[index];
+    const d = definitions[index];
+    let read;
+    readers[index] = r => read(r);
+    if (d.kind === 2) {
+      read = compile(d.body);
+    } else if (d.kind === 0) {
+      const fields = d.body.filter(field => !field.removed)
+        .map(field => ({name: field.name, read: compile(field.type)}));
+      read = r => {
+        const out = {};
+        for (const field of fields) {
+          Object.defineProperty(out, field.name, {value: field.read(r), enumerable: true, writable: true, configurable: true});
+        }
+        return out;
+      };
+    } else {
+      const variants = d.body.map(v => {
+        if (v.removed) return undefined;
+        const tag = v.name, parts = v.fields.map(compile);
+        if (parts.length === 0) return () => ({tag});
+        if (parts.length === 1) return r => ({tag, value: parts[0](r)});
+        return r => ({tag, values: readParts(parts, r)});
+      });
+      read = r => {
+        const variant = variants[r.count()];
+        if (!variant) throw new Malformed('variant');
+        return variant(r);
+      };
+    }
+    readers[index] = read;
+    return read;
   }
-  if (op === 13) return decodeString(readBytes(r,key));
-  if (op === 14) {
-    if (t[1][0] === 3) return readBytes(r,key);
-    const n = r.count(), out = []; for (let i=0;i<n;i++) out.push(read(t[1],defs,r,key)); return out;
+
+  function compile(t) {
+    const op = t[0];
+    if (integers[op]) return integers[op].reader(key);
+    switch (op) {
+      case 0: return () => undefined;
+      case 1: return readBool;
+      case 2: return readChar;
+      case 11: return readF32;
+      case 12: return readF64;
+      case 13: return r => decodeString(readBytes(r, key));
+      case 14: {
+        if (t[1][0] === 3) return r => readBytes(r, key);
+        const item = compile(t[1]);
+        return r => {
+          const n = r.count(), out = [];
+          for (let i = 0; i < n; i++) out.push(item(r));
+          return out;
+        };
+      }
+      case 15: {
+        const readKey = compile(t[1]), readValue = compile(t[2]);
+        return r => {
+          const n = r.count(), out = new Map(), seen = new Set();
+          for (let i = 0; i < n; i++) {
+            const start = r.at, k = readKey(r), identity = keyString(r.bytes.subarray(start, r.at));
+            if (seen.has(identity)) throw new Malformed('duplicate map key');
+            seen.add(identity);
+            out.set(k, readValue(r));
+          }
+          return out;
+        };
+      }
+      case 16: {
+        const some = compile(t[1]);
+        return r => {
+          const tag = r.count();
+          if (tag > 1) throw new Malformed('tag');
+          return tag === 0 ? {tag: 'None'} : {tag: 'Some', value: some(r)};
+        };
+      }
+      case 17: {
+        const ok = compile(t[1]), error = compile(t[2]);
+        return r => {
+          const tag = r.count();
+          if (tag > 1) throw new Malformed('tag');
+          return tag === 0 ? {tag: 'Ok', value: ok(r)} : {tag: 'Error', value: error(r)};
+        };
+      }
+      case 18: {
+        const parts = t[1].map(compile);
+        return r => readParts(parts, r);
+      }
+      case 20: return () => { throw new Malformed('Never'); };
+      case 21: {
+        if (!key) return definition(t[1]);
+        const inner = compile(t[1]);
+        return r => {
+          r.inverted = !r.inverted;
+          try { return {value: inner(r)}; }
+          finally { r.inverted = !r.inverted; }
+        };
+      }
+      default: return definition(t[1]);
+    }
   }
-  if (op === 15) {
-    const n = r.count(), out = new Map(), seen = new Set();
-    for (let i=0;i<n;i++) {
-      const start = r.at, k = read(t[1],defs,r,key), identity = keyString(r.bytes.subarray(start,r.at));
-      if (seen.has(identity)) throw new Malformed('duplicate map key'); seen.add(identity);
-      out.set(k,read(t[2],defs,r,key));
-    } return out;
-  }
-  if (op === 16 || op === 17) {
-    const tag = r.count(); if (tag > 1) throw new Malformed('tag');
-    if (op === 16) return tag === 0 ? {tag:'None'} : {tag:'Some',value:read(t[1],defs,r,key)};
-    return {tag:tag === 0 ? 'Ok' : 'Error',value:read(t[tag + 1],defs,r,key)};
-  }
-  if (op === 21 && key) {
-    r.inverted = !r.inverted;
-    try { return {value: read(t[1],defs,r,key)}; }
-    finally { r.inverted = !r.inverted; }
-  }
-  if (op === 18) return t[1].map(part => read(part,defs,r,key));
-  const d = defs[t[1]];
-  if (d.kind === 2) return read(d.body,defs,r,key);
-  if (d.kind === 0) {
-    const out = {}; for (const field of d.body) if (!field.removed) Object.defineProperty(out,field.name,{value:read(field.type,defs,r,key),enumerable:true,writable:true,configurable:true}); return out;
-  }
-  const tag = r.count(), v = d.body[tag]; if (!v || v.removed) throw new Malformed('variant');
-  const values = v.fields.map(part => read(part,defs,r,key));
-  return values.length === 0 ? {tag:v.name} : values.length === 1 ? {tag:v.name,value:values[0]} : {tag:v.name,values};
+
+  return compile(root);
 }
 function write(t, defs, value, w, key) {
   const op = t[0];
-  if (integer[op]) { writeInteger(op,value,w,key); return; }
+  if (integers[op]) { integers[op].write(value,w,key); return; }
   if (op === 0) { if (value !== undefined) throw new TypeError('expected unit'); return; }
   if (op === 20) throw new TypeError('Never has no values');
   if (op === 1) { if (typeof value !== 'boolean') throw new TypeError('expected bool'); w.byte(value ? 1 : 0); return; }
@@ -184,9 +300,10 @@ function write(t, defs, value, w, key) {
   fields.forEach((part,i) => write(part,defs,values[i],w,key));
 }
 export function makeCodec(root, definitions = [], key = false) {
+  const read = compileReader(root, definitions, key);
   return Object.freeze({
     encode(value) { const w = new Writer(); write(root,definitions,value,w,key); return w.finish(); },
-    decode(bytes) { const r = new Reader(bytes); const value = read(root,definitions,r,key); r.done(); return value; }
+    decode(bytes) { const r = new Reader(bytes); const value = read(r); r.done(); return value; }
   });
 }
 export const values = Object.freeze(Object.fromEntries(['unit','bool','char','u8','u16','u32','u64','i8','i16','i32','i64','f32','f64','string'].map((name,op) => [name,makeCodec([op])]).concat([['bytes',makeCodec([14,[3]])]])));

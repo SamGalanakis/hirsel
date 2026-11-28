@@ -1,0 +1,209 @@
+type Grants = store.Table[u64, u64]
+
+type Feed = shadow_log.Feed[Grants, Bytes]
+
+type Handles: shareable + send {
+    feed: Feed,
+    owner: shadow_log.Owner[Bytes],
+    parent: store.Log[Bytes],
+    grants: Grants
+}
+
+fn permit(tx: store.Tx, grants: Grants, credential: Bytes, child: u64, _access: shadow_log.Access, at: u64) -> Result[bool, store.Error] {
+    if credential != b"session" {
+        return Ok(false)
+    }
+    match store.fetch(tx, grants, child)? {
+        Some(until) => Ok(at < until),
+        None => Ok(false),
+    }
+}
+
+fn schema(mut d: store.Declare) -> Result[Handles, store.Error] {
+    let def = store.declare_table(mut d, "grants", std.codec.key_u64(), std.codec.of_u64())?
+    let grants = store.finish(mut d, take def)?
+    let bytes_codec: std.codec.Codec[Bytes] = std.codec.of()
+    let (take owner, take feed) = shadow_log.declare(mut d, "feed", bytes_codec, 1000, grants, code.describe(permit))?
+    let parent = shadow_log.parent_log(owner)
+    Ok(Handles(feed: take feed, owner: take owner, parent: take parent, grants: take grants))
+}
+
+fn committed[R, E](take outcome: store.Outcome[R, E]) -> store.Done[R] {
+    let Committed(take done) = take outcome else {
+        fail("expected a committed transaction")
+    }
+    take done
+}
+
+fn admit(mut db: store.Db, h: Handles, n: u64) -> Result[(), store.Error] waits {
+    let args: (Handles, u64) = (clone(h), n)
+    let _ = committed(store.run(mut db, None, args, fn(mut tx, env) -> Result[(), shadow_log.Error] {
+        for child in 0u64 .. env.1 {
+            store.put(mut tx, env.0 .grants, child, 500) ?=> Store
+            shadow_log.fork(mut tx, env.0 .feed, child, b"session", 600)?
+        }
+        Ok(())
+    })?)
+    Ok(())
+}
+
+fn write_parent(mut db: store.Db, h: Handles, payload: Bytes) -> Result[store.Ticket, store.Error] waits {
+    let args: (store.Log[Bytes], Bytes) = (clone(h.parent), clone(payload))
+    let done = committed(store.run(mut db, None, args, fn(mut tx, e) -> Result[u64, store.Error] {
+        store.append(mut tx, e.0, e.1)
+    })?)
+    Ok(done.ticket)
+}
+
+fn private(mut db: store.Db, h: Handles, child: u64, payload: Bytes, watermark: u64, seq: u64) -> Result[store.Ticket, store.Error] waits {
+    let args: (Feed, u64, Bytes) = (clone(h.feed), child, clone(payload))
+    let done = committed(store.run(mut db, None, args, fn(mut tx, e) -> Result[shadow_log.Mark, shadow_log.Error] {
+        shadow_log.append_private(mut tx, e.0, e.1, b"session", clone(e.2))
+    })?)
+    if done.value != shadow_log.Mark(parent_watermark: watermark, child_seq: seq) {
+        fail("acknowledged private position")
+    }
+    Ok(done.ticket)
+}
+
+fn step(mut db: store.Db, h: Handles, cursor: shadow_log.Cursor) -> Result[(shadow_log.Cursor, Option[shadow_log.Event[Bytes]]), shadow_log.Error] waits {
+    let args: (Feed, shadow_log.Cursor) = (clone(h.feed), clone(cursor))
+    let outcome = store.run(mut db, None, args, fn(mut tx, env) -> Result[(shadow_log.Cursor, Option[shadow_log.Event[Bytes]]), shadow_log.Error] {
+        shadow_log.next(mut tx, env.0, env.1, b"session")
+    }) ?=> Store
+    match take outcome {
+        Committed(store.Done(value: take value, ..)) => Ok(take value),
+        Aborted(store.Undone(value: take error, ..)) => Error(take error),
+        _ => fail("read transaction failed"),
+    }
+}
+
+fn replay(mut db: store.Db, h: Handles, child: u64) -> List[shadow_log.Event[Bytes]] waits {
+    let mut pos = shadow_log.cursor(h.feed, child)
+    let mut items: List[shadow_log.Event[Bytes]] = list.new()
+    loop {
+        let (take after, take item) = result.unwrap(step(mut db, h, pos))
+        let Some(take entry) = take item else {
+            break
+        }
+        list.push(mut items, take entry)
+        pos = take after
+    }
+    take items
+}
+
+@test
+fn retention_and_authority() -> Result[(), store.Error] waits {
+    let (c, take hand) = provide.clock(0, 100)
+    let mut wall = take hand
+    let mut db = store.memory(c, provide.random(1), result.unwrap(store.sized(Memory, 134217728)))
+    let h = store.bind_declaration(mut db, Migrate, schema)?
+    admit(mut db, h, 2)?
+    let _ = write_parent(mut db, h, b"first")?
+    let _ = write_parent(mut db, h, b"second")?
+    let start = shadow_log.cursor(h.feed, 0)
+    let (resume, item) = result.unwrap(step(mut db, h, start))
+    if let Some(Parent(0, value)) = view item {
+        if value != b"first" {
+            fail("wrong parent bytes")
+        }
+    } else {
+        fail("first parent row")
+    }
+    let kept = committed(store.run(mut db, None, h.owner, fn(mut tx, f) -> Result[u64, store.Error] {
+        shadow_log.trim(mut tx, f, 2)
+    })?)
+    if kept.value != 0 {
+        fail("trim crossed a live hold")
+    }
+    let _ = committed(store.run(mut db, None, h.grants, fn(mut tx, g) -> Result[bool, store.Error] {
+        store.delete(mut tx, g, 0)
+    })?)
+    if let Error(Denied) = step(mut db, h, resume) {} else {
+        fail("revoked caller read buffered row")
+    }
+    clock.set_wall(mut wall, 500)
+    if let Error(Denied) = step(mut db, h, shadow_log.cursor(h.feed, 1)) {} else {
+        fail("expired credential")
+    }
+    let _ = committed(store.run(mut db, None, h.grants, fn(mut tx, g) -> Result[(), store.Error] {
+        store.put(mut tx, g, 1, 10000)
+    })?)
+    let _ = committed(store.run(mut db, None, h.parent, fn(mut tx, log) -> Result[(), store.Error] {
+        store.trim_before(mut tx, log, 1)
+    })?)
+    if let Error(Gap(Trimmed)) = step(mut db, h, shadow_log.cursor(h.feed, 1)) {} else {
+        fail("missing replay prefix")
+    }
+    clock.set_wall(mut wall, 700)
+    if let Error(Gap(Expired)) = step(mut db, h, shadow_log.cursor(h.feed, 1)) {} else {
+        fail("expired hold")
+    }
+    let freed = committed(store.run(mut db, None, h.owner, fn(mut tx, f) -> Result[u64, store.Error] {
+        shadow_log.trim(mut tx, f, 2)
+    })?)
+    if freed.value != 2 {
+        fail("expired hold still retained the parent")
+    }
+    Ok(())
+}
+
+@test
+fn live_cursor_and_lease_lifecycle() -> Result[(), store.Error] waits {
+    let (c, take hand) = provide.clock(0, 100)
+    let mut wall = take hand
+    let mut db = store.memory(c, provide.random(8), result.unwrap(store.sized(Memory, 134217728)))
+    let h = store.bind_declaration(mut db, Migrate, schema)?
+    let _ = write_parent(mut db, h, b"already trimmed")?
+    let _ = committed(store.run(mut db, None, h.owner, fn(mut tx, owner) -> Result[u64, store.Error] {
+        shadow_log.trim(mut tx, owner, 1)
+    })?)
+    let _ = committed(store.run(mut db, None, h, fn(mut tx, handles) -> Result[(), shadow_log.Error] {
+        store.put(mut tx, handles.grants, 9, 9000) ?=> Store
+        if let Error(InvalidTtl) = shadow_log.fork(mut tx, handles.feed, 9, b"session", 1001) {} else {
+            fail("unbounded admission")
+        }
+        shadow_log.fork(mut tx, handles.feed, 9, b"session", 10)
+    })?)
+    let (resume, empty) = result.unwrap(step(mut db, h, shadow_log.cursor(h.feed, 9)))
+    if let Some(_) = empty {
+        fail("fork included a trimmed parent row")
+    }
+    clock.set_wall(mut wall, 109)
+    let _ = committed(store.run(mut db, None, h.feed, fn(mut tx, feed) -> Result[(), shadow_log.Error] {
+        shadow_log.extend(mut tx, feed, 9, b"session", 20)
+    })?)
+    clock.set_wall(mut wall, 110)
+    let _ = write_parent(mut db, h, b"live")?
+    let _ = private(mut db, h, 9, b"shadow", 2, 0)?
+    let (after, p) = result.unwrap(step(mut db, h, resume))
+    if let Some(Parent(1, bytes_in)) = view p {
+        if bytes_in != b"live" {
+            fail("live parent bytes")
+        }
+    } else {
+        fail("tail cursor missed live parent append")
+    }
+    let (_, item) = result.unwrap(step(mut db, h, after))
+    if let Some(Private(pos, bytes_in)) = view item {
+        if pos != shadow_log.Mark(parent_watermark: 2, child_seq: 0) || bytes_in != b"shadow" {
+            fail("live private receipt")
+        }
+    } else {
+        fail("tail cursor missed private append")
+    }
+    let _ = committed(store.run(mut db, None, h.feed, fn(mut tx, feed) -> Result[(), shadow_log.Error] {
+        shadow_log.release(mut tx, feed, 9, b"session")?
+        if let Error(Exists) = shadow_log.fork(mut tx, feed, 9, b"session", 10) {} else {
+            fail("released id reused private sequence")
+        }
+        if let Error(Gap(Expired)) = shadow_log.extend(mut tx, feed, 9, b"session", 10) {} else {
+            fail("released lease resurrected")
+        }
+        Ok(())
+    })?)
+    if let Error(Gap(Expired)) = step(mut db, h, after) {} else {
+        fail("released cursor read private bytes")
+    }
+    Ok(())
+}

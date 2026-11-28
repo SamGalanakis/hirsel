@@ -1,0 +1,185 @@
+// A mark names an exclusive parent watermark and a zero-based private sequence.
+pub type Mark: codec + key + send {
+    parent_watermark: u64,
+    child_seq: u64
+}
+
+pub type Event[V: codec]: codec = Parent(u64, V) | Private(Mark, V)
+
+pub type Access = Read | Write
+
+pub type GapReason = Expired | Trimmed
+
+pub type Error = Denied | Gap(GapReason) | InvalidTtl | Exists | Store(store.Error)
+
+type Hold: codec {
+    first: u64,
+    until_ms: u64
+}
+
+pub opaque type Owner[V: codec]: shareable + send {
+    parent: store.Log[V],
+    holds: store.Table[u64, Hold]
+}
+
+pub fn parent_log[V: codec](owner: Owner[V]) -> store.Log[V] {
+    clone(owner.parent)
+}
+
+pub opaque type Feed[H, V: codec]: shareable + send {
+    owner: Owner[V],
+    entries: store.Table[(u64, u64), (u64, V)],
+    max_ttl_ms: u64,
+    policy: H,
+    check: StaticFn[fn(store.Tx, H, Bytes, u64, Access, u64) -> Result[bool, store.Error]]
+}
+
+fn table[K: key, V: codec](mut d: store.Declare, prefix: String, suffix: String) -> Result[store.Table[K, V], store.Error] {
+    let mut name = string.from(prefix)
+    string.push(mut name, suffix)
+    let key: std.codec.Key[K] = std.codec.key_of()
+    let value: std.codec.Codec[V] = std.codec.of()
+    let def = store.declare_table(mut d, name, key, value)?
+    store.finish(mut d, take def)
+}
+
+/// Give the publisher the owner handle and shadow readers the feed handle.
+/// The policy is bound once, and receives the branch id, operation and Store time.
+pub fn declare[H: shareable + send, V: codec](mut d: store.Declare, name: String, take codec: std.codec.Codec[V], max_ttl_ms: u64, policy: H, check: StaticFn[fn(store.Tx, H, Bytes, u64, Access, u64) -> Result[bool, store.Error]]) -> Result[(Owner[V], Feed[H, V]), store.Error] {
+    let parent = store.declare_log(mut d, name, take codec, Forever)?
+    let holds: store.Table[u64, Hold] = table(mut d, name, ".holds")?
+    let entries: store.Table[(u64, u64), (u64, V)] = table(mut d, name, ".private")?
+    let owner = Owner(parent: take parent, holds: take holds)
+    Ok((clone(owner), Feed(owner: take owner, entries: take entries, max_ttl_ms, policy: clone(policy), check)))
+}
+
+fn authorized[H, V: codec](mut tx: store.Tx, f: Feed[H, V], child: u64, credential: Bytes, access: Access) -> Result[u64, Error] {
+    let call = store.info(mut tx)
+    if call.id.branch != 0 || !((code.callable(f.check))(tx, f.policy, credential, child, access, call.at) ?=> Store) {
+        return Error(Denied)
+    }
+    Ok(call.at)
+}
+
+fn deadline(now: u64, ttl: u64, maximum: u64) -> Result[u64, Error] {
+    if ttl == 0 || ttl > maximum {
+        return Error(InvalidTtl)
+    }
+    let Some(end) = int.checked_add(now, ttl) else {
+        return Error(InvalidTtl)
+    }
+    Ok(end)
+}
+
+/// The fork starts at the first retained parent row. Child ids are single-use.
+pub fn fork[H, V: codec](mut tx: store.Tx, f: Feed[H, V], child: u64, credential: Bytes, ttl_ms: u64) -> Result[(), Error] {
+    let at = authorized(mut tx, f, child, credential, Write)?
+    let end = deadline(at, ttl_ms, f.max_ttl_ms)?
+    if let Some(_) = (store.fetch(tx, f.owner.holds, child) ?=> Store) {
+        return Error(Exists)
+    }
+    let bounds = store.bounds(tx, f.owner.parent) ?=> Store
+    store.put(mut tx, f.owner.holds, child, Hold(first: bounds.first, until_ms: end)) ?=> Store
+    Ok(())
+}
+
+fn held[H, V: codec](tx: store.Tx, f: Feed[H, V], child: u64, at: u64) -> Result[(Hold, store.LogBounds), Error] {
+    let row = store.fetch(tx, f.owner.holds, child) ?=> Store
+    let Some(hold) = take row else {
+        return Error(Gap(Expired))
+    }
+    if at >= hold.until_ms {
+        return Error(Gap(Expired))
+    }
+    let bounds = store.bounds(tx, f.owner.parent) ?=> Store
+    if bounds.first > hold.first {
+        return Error(Gap(Trimmed))
+    }
+    Ok((hold, bounds))
+}
+
+pub fn extend[H, V: codec](mut tx: store.Tx, f: Feed[H, V], child: u64, credential: Bytes, ttl_ms: u64) -> Result[(), Error] {
+    let at = authorized(mut tx, f, child, credential, Write)?
+    let (hold, _) = held(tx, f, child, at)?
+    let end = deadline(at, ttl_ms, f.max_ttl_ms)?
+    store.put(mut tx, f.owner.holds, child, Hold(first: hold.first, until_ms: order.max(end, hold.until_ms))) ?=> Store
+    Ok(())
+}
+
+pub fn release[H, V: codec](mut tx: store.Tx, f: Feed[H, V], child: u64, credential: Bytes) -> Result[(), Error] {
+    let _ = authorized(mut tx, f, child, credential, Write)?
+    if let Some(hold) = (store.fetch(tx, f.owner.holds, child) ?=> Store) {
+        store.put(mut tx, f.owner.holds, child, Hold(first: hold.first, until_ms: 0)) ?=> Store
+    }
+    Ok(())
+}
+
+/// The key persists the child sequence. Its value persists the sampled parent
+/// watermark and the inert payload. A single put publishes all three.
+pub fn append_private[H, V: codec](mut tx: store.Tx, f: Feed[H, V], child: u64, credential: Bytes, take value: V) -> Result[Mark, Error] {
+    let at = authorized(mut tx, f, child, credential, Write)?
+    let (_, bounds) = held(tx, f, child, at)?
+    let seq = store.count(tx, f.entries, Included((child, 0)), Included((child, 18446744073709551615u64))) ?=> Store
+    store.put(mut tx, f.entries, (child, seq), (bounds.next, take value)) ?=> Store
+    Ok(Mark(parent_watermark: bounds.next, child_seq: seq))
+}
+
+pub opaque type Cursor: shareable + send {
+    feed: (store.StoreId, u32),
+    child: u64,
+    parent_seq: Option[u64],
+    private_seq: u64
+}
+
+pub fn cursor[H, V: codec](f: Feed[H, V], child: u64) -> Cursor {
+    Cursor(feed: store.log_identity(f.owner.parent), child, parent_seq: None, private_seq: 0)
+}
+
+/// Each call rechecks authority inside the current transaction, including polls
+/// at the live tail. The cursor retains positions only.
+pub fn next[H, V: codec](mut tx: store.Tx, f: Feed[H, V], pos: Cursor, credential: Bytes) -> Result[(Cursor, Option[Event[V]]), Error] {
+    let at = authorized(mut tx, f, pos.child, credential, Read)?
+    if pos.feed != store.log_identity(f.owner.parent) {
+        return Error(Denied)
+    }
+    let (hold, bounds) = held(tx, f, pos.child, at)?
+    let p = match pos.parent_seq {
+        Some(n) => n,
+        None => hold.first,
+    }
+    let row = store.fetch(tx, f.entries, (pos.child, pos.private_seq)) ?=> Store
+    if let Some((watermark, take value)) = take row {
+        if p == watermark {
+            let mark = Mark(parent_watermark: watermark, child_seq: pos.private_seq)
+            let after = Cursor(feed: pos.feed, child: pos.child, parent_seq: Some(p), private_seq: pos.private_seq + 1)
+            return Ok((after, Some(Private(mark, take value))))
+        }
+    }
+    if p == bounds.next {
+        return Ok((clone(pos), None))
+    }
+    let found = store.log_fetch(tx, f.owner.parent, p) ?=> Store
+    let Some(take payload) = take found else {
+        return Error(Gap(Trimmed))
+    }
+    let after = Cursor(feed: pos.feed, child: pos.child, parent_seq: Some(p + 1), private_seq: pos.private_seq)
+    Ok((after, Some(Parent(p, take payload))))
+}
+
+/// Only retention walks the hold table. Return the installed exclusive floor.
+pub fn trim[V: codec](mut tx: store.Tx, owner: Owner[V], requested: u64) -> Result[u64, store.Error] {
+    let at = store.info(mut tx).at
+    let bounds = store.bounds(tx, owner.parent)?
+    let mut floor = order.min(requested, bounds.next)
+    {
+        let mut rows = store.range(tx, owner.holds, Unbounded, Unbounded)?
+        while let Some((_, hold)) = store.next_in(tx, mut rows)? {
+            if at < hold.until_ms {
+                floor = order.min(floor, hold.first)
+            }
+        }
+    }
+    floor = order.max(floor, bounds.first)
+    store.trim_before(mut tx, owner.parent, floor)?
+    Ok(floor)
+}

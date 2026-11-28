@@ -1,0 +1,99 @@
+type Disk: send {
+    image: std.sim.fs.Fs,
+    clock: Clock,
+    port: core.Served[DirOp]
+}
+
+fn serve(take disk: Disk) -> std.sim.fs.Fs waits {
+    let Disk(image: take saved, clock, port: take port) = take disk
+    let mut image = take saved
+    let mut plan = std.sim.world.plan(3479)
+    std.sim.fs.serve(mut image, mut plan, clock, take port)
+    take image
+}
+
+fn mount(tasks: Tasks, c: Clock, take image: std.sim.fs.Fs) -> (Dir, Task[std.sim.fs.Fs]) {
+    let (dir, port) = provide.dir(bytes 65536)
+    let server = task.spawn(tasks, bytes 8388608, Disk(image: take image, clock: c, port: take port), serve)
+    (dir, take server)
+}
+
+fn mark(watermark: u64, seq: u64) -> shadow_log.Mark {
+    shadow_log.Mark(parent_watermark: watermark, child_seq: seq)
+}
+
+fn encoded(events: List[shadow_log.Event[Bytes]]) -> Bytes {
+    let codec: std.codec.Codec[List[shadow_log.Event[Bytes]]] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    result.unwrap(std.codec.encode(codec, events, mut raw))
+    take raw
+}
+
+type Append = ToParent(Bytes) | ToChild(u64, Bytes, u64, u64) | End
+
+@test
+fn crash_after_each_ack(tasks: Tasks) -> Result[(), store.Error] waits {
+    let (c, _) = provide.clock(0, 100)
+    let r = provide.random(17)
+    let options = result.unwrap(store.sized(Directory, 268435456))
+    let mut image = std.sim.fs.new()
+    let mut expected_a: List[shadow_log.Event[Bytes]] = list.new()
+    let mut expected_b: List[shadow_log.Event[Bytes]] = list.new()
+    let mut parents: List[Bytes] = list.new()
+    let script: Inline[Append, 8] =[ToParent(b"p"), ToChild(0, b"a", 1, 0), ToChild(0, b"b", 1, 1), ToParent(b"q"), ToChild(1, b"sibling", 2, 0), ToChild(0, b"c", 2, 2), ToParent(b"r"), End]
+    for i in 0u64 .. 8 {
+        let (dir, server) = mount(tasks, c, take image)
+        let mut db = store.open(tasks, dir, c, r, options)?
+        let h = store.bind_declaration(mut db, Migrate, schema)?
+        if i == 0 {
+            admit(mut db, h, 2)?
+        }
+        if encoded(replay(mut db, h, 0)) != encoded(expected_a) || encoded(replay(mut db, h, 1)) != encoded(expected_b) {
+            fail("recovered interleaving or sibling changed")
+        }
+        {
+            let reader = store.reader(db, store.READER_PIN_MIN)?
+            let snap = store.snapshot(db)
+            let bounds = store.log_bounds(reader, snap, h.parent)?
+            if bounds.first != 0 || bounds.next != list.len(parents) {
+                fail("private append changed parent bounds")
+            }
+            for seq in 0u64 .. list.len(parents) {
+                if store.log_get(reader, snap, h.parent, seq)? != Some(clone(parents[seq])) {
+                    fail("private append changed parent bytes")
+                }
+            }
+        }
+        let ticket = match view script[i] {
+            ToParent(payload) => {
+                let seq = list.len(parents)
+                list.push(mut expected_a, Parent(seq, clone(payload)))
+                list.push(mut expected_b, Parent(seq, clone(payload)))
+                list.push(mut parents, clone(payload))
+                write_parent(mut db, h, payload)?
+            },
+            ToChild(child, payload, watermark, seq) => {
+                let event: shadow_log.Event[Bytes] = Private(mark(watermark, seq), clone(payload))
+                if child == 0 {
+                    list.push(mut expected_a, take event)
+                } else {
+                    list.push(mut expected_b, take event)
+                }
+                private(mut db, h, child, payload, watermark, seq)?
+            },
+            End => {
+                store.close(take db)?
+                drop(take dir)
+                let _ = result.unwrap(task.join(take server))
+                break
+            },
+        }
+        store.durable(mut db, ticket)?
+        drop(take db)
+        drop(take dir)
+        image = result.unwrap(task.join(take server))
+        let mut cut = std.sim.world.plan(3479 + i)
+        std.sim.fs.crash(mut image, mut cut)
+    }
+    Ok(())
+}

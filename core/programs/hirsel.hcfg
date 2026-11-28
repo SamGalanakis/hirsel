@@ -35,6 +35,7 @@ pkg_v1.Workspace(
         "runner",
         "search",
         "sframe",
+        "shadow_log",
         "spatial",
         "sqlite",
         "srtp",

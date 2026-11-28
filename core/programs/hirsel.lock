@@ -134,6 +134,12 @@ source = "member:replay_receive_laws"
 edges = ["dtls@1", "rtp@1", "sframe@1", "srtp@1", "std@1"]
 
 [[package]]
+id = "hirsel.ai/shadow_log@1"
+version = "1.0.0"
+source = "member:shadow_log"
+edges = ["std@1", "store@1"]
+
+[[package]]
 id = "hirsel.ai/spatial@1"
 version = "1.0.0"
 source = "member:spatial"

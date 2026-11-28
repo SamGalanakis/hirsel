@@ -1084,9 +1084,8 @@ pub fn reads_key(r: Read, key: Bytes) -> bool {
 
 fn index_decoder[J, K, V, P](ix: Index[J, K, V, P]) -> RowDecoder[K, V] {
     let k = ix.key
-    let start = 4u64
     let skip: own[send] fn(Bytes, mut u64) -> Result[(), std.codec.DecodeError] = fn(raw: Bytes, mut at: u64) -> Result[(), std.codec.DecodeError] {
-        at = start
+        at = 4
         let _ = std.codec.take_key_with(raw, mut at, k)?
         Ok(())
     }

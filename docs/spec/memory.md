@@ -2,10 +2,6 @@
 
 ## Memory model: settled
 
-Settled on 2026-11-18 (Sam: "The memory thing seems settled we can go with that - update the
-spec and make sure we do not drift again"). The model is chosen as the clean end-state, not to
-spare existing code. In five lines:
-
 1. **The type decides who frees.** An ordinary `type` is own: one owner, freed when the owner
    goes away ([OWN-3](ownership.md#own-3-kinds)). Sharing is opt-in and counted (`Rc`, `Arc`),
    resources stay resources, loans stay loans.
@@ -24,31 +20,6 @@ spare existing code. In five lines:
    upper bounds, deterministic per build ([MEM-24](budgets.md#mem-24-logical-charges),
    [MEM-28](budgets.md#mem-28-charges-are-an-upper-bound)); a program that fits its logical
    charges fits on every engine.
-
-Rejected, each for a reason that still holds:
-
-- **Region or immutable data by default.** Ordinary mutation, caches and messages that expire
-  one by one become exceptions; a prototype of this default charged 65× to 107× the needed
-  bytes where own charged 1.12× to 7×, and MLKit's inferred regions used from 8% to over 3000%
-  of the space SML/NJ's collected heap used on the same programs.
-- **Build every value in its destination**, a placement read from each binding's later uses
-  with an arena per block. One allocation site can need two lifetimes (a value returned on one
-  path is sent to another task on another); a reference into a block's arena can outlive the
-  slot cleanup of that block or be copied into another task inside plain data; and arena
-  release lists break finalizer order when a return fails.
-- **Region views in place of region values** (`View[T] in r` as the only way to read region
-  data). A view can be no field, element or generic argument, so an own index over a region
-  document (`Map[Text in r, u64]`) cannot be written, or region views become an exempt kind
-  under another name.
-- **A declarable `stable type` beside `@compact`, with `@twin` pairs.** Two ways to say region
-  data; in core, std and the programs every declared region type was compact and no twin was
-  used.
-
-**Reopen condition.** Only a measurement reopens this: matched ports of the AWFY Json and
-Storage benchmarks to an explicit document pool, in Hirsel and in Goose, with the same input,
-output and checksums. If, with every target of MEM-32 met, Hirsel still runs above
-1.5× Goose's instructions on either, the default is reopened. A new design opinion is not a
-reason to reopen it.
 
 ## Regions and region data
 
@@ -245,26 +216,11 @@ unused end, `round8(n) − round8(used)`, to the limit the allocation's record l
 moves nothing and cannot fail.
 
 ```hirsel
-fn batch[T: streamable](r: Region, bytes n: u64,
-    f: scoped fn(take Writer[SeqSpan[T], in r]) -> Result[Child[SeqSpan[T]], BuildError])
-    -> Result[SeqSpan[T] in r, BuildError] {
-  let b = build_stream_in(r, bytes n, f)?
-  Ok(finish_trim(take b))
-}
-```
-```hirsel
 fn doc[T: streamable](r: Region, bytes n: u64,
     f: scoped fn(take Writer[T, in r]) -> Result[Child[T], BuildError])
     -> Result[T in r, BuildError] {
   let b = build_stream_in(r, bytes n, f)?          // refused: MEM-4, T is not a root
   Ok(finish_trim(take b))
-}
-```
-```hirsel
-@compact(u32) type J = Null | Arr(SeqSpan[J])
-fn list[in r](take w: Writer[SeqSpan[J], in r]) -> Result[Child[SeqSpan[J]], BuildError] {
-  writer.append(mut w, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] { emit(take x, Null) })?
-  writer.close(take w)
 }
 ```
 ```hirsel

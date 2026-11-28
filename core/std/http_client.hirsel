@@ -149,6 +149,8 @@ pub opaque type Reader: send {
     at: u64,
     eof: bool,
     head: ResponseHead,
+    pending: http1.Head,
+    cursor: http1.Cursor,
     body: Option[http.Decoder]
 }
 
@@ -158,12 +160,14 @@ pub type BodyRead: key = NeedInput | Data(u64) | End
 pub fn reader() -> Result[Reader, Error] {
     let input: Bytes = list.with_capacity(http1.HEAD_MAX)
     let raw: Bytes = list.with_capacity(http1.HEAD_MAX)
-    Ok(Reader(input: take input, at: 0, eof: false, head: ResponseHead(raw: take raw, parsed: http1.head(), persistent: false), body: None))
+    Ok(Reader(input: take input, at: 0, eof: false, head: ResponseHead(raw: take raw, parsed: http1.head(), persistent: false), pending: http1.head(), cursor: http1.response_cursor(), body: None))
 }
 
 fn compact(mut r: Reader) {
-    list.drop_prefix(mut r.input, r.at)
-    r.at = 0
+    if r.at != 0 {
+        list.drop_prefix(mut r.input, r.at)
+        r.at = 0
+    }
 }
 
 /// Appends the prefix that fits. Pass an unaccepted suffix again after parsing.
@@ -215,8 +219,7 @@ pub fn parse_head(mut r: Reader, head_request: bool, body_max: u64) -> Result[bo
     }
     loop {
         let wire = list.slice(r.input, r.at, list.len(r.input))
-        let mut h = http1.head()
-        match http1.response(wire, mut h) {
+        match http1.resume(wire, mut r.pending, mut r.cursor) {
             Partial => return if r.eof {
                 Error(MalformedHead)
             } else {
@@ -226,6 +229,7 @@ pub fn parse_head(mut r: Reader, head_request: bool, body_max: u64) -> Result[bo
             TooLarge => return Error(TooLarge),
             Complete => {},
         }
+        let h = r.pending
         if h.status < 100 || h.status > 599 {
             return Error(MalformedHead)
         }
@@ -234,6 +238,8 @@ pub fn parse_head(mut r: Reader, head_request: bool, body_max: u64) -> Result[bo
         }
         if h.status < 200 {
             r.at += h.end
+            r.pending = http1.head()
+            r.cursor = http1.response_cursor()
             continue
         }
         let frame = match http.response_framing(wire, view h, head_request, body_max) {
@@ -246,6 +252,8 @@ pub fn parse_head(mut r: Reader, head_request: bool, body_max: u64) -> Result[bo
         r.at += h.end
         r.body = Some(http.decoder(frame, h, body_max, http1.HEAD_MAX))
         r.head.parsed = h
+        r.pending = http1.head()
+        r.cursor = http1.response_cursor()
         return Ok(true)
     }
 }

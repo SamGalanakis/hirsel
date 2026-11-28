@@ -707,7 +707,7 @@ fn resume_limits() -> bool {
     raw[32767] = b'a'
     h = http1.head()
     cur = http1.cursor()
-    http1.resume(raw, mut h, mut cur) == TooLarge && cur.examined == 32768 && http1.request(raw, mut h) == TooLarge
+    http1.resume(raw, mut h, mut cur) == TooLarge && cur.examined == 32768 && reviewed_fragmentation(raw, envelope_partition(32768, 257), TooLarge, 0, 32768)
 }
 
 // HTTP-3 counts initialized fields, including empty values and duplicates.
@@ -726,7 +726,7 @@ fn resume_field_limit() -> bool {
         return false
     }
     raw[list.len(raw) - 2] = b'X'
-    http1.request(raw, mut h) == TooLarge && resume_parity(raw, None)
+    http1.request(raw, mut h) == TooLarge && resume_parity(raw, None) && reviewed_fragmentation(raw, envelope_partition(list.len(raw), 1), TooLarge, 0, list.len(raw) - 1)
 }
 
 // A request-line overflow maps to 414 rather than the field limit's 431.
@@ -861,6 +861,26 @@ fn reviewed_fragmentation(raw: Bytes, ends: List[u64], expected: http1.Progress,
     if http1.request(raw, mut whole) != expected {
         return false
     }
+    // Each byte enters at most one token/value scan. Allow six calls or loop
+    // edges per byte, one field commit and six more steps per fragment for
+    // the driver, slice and resume entry. Head and Cursor have inline storage.
+    let steps = head_steps(consumed, whole.count, list.len(ends))
+    let run = bound bytes 0 {
+        bound steps steps {
+            scheduled_head(raw, ends, expected, consumed)
+        }
+    }
+    match run {
+        Ok(Ok(Some(h))) => h.end == end && same_head(h, whole),
+        _ => false
+    }
+}
+
+fn head_steps(n: u64, fields: u64, fragments: u64) -> u64 {
+    16 + 6 * n + fields + 6 * fragments
+}
+
+fn scheduled_head(raw: Bytes, ends: List[u64], expected: http1.Progress, consumed: u64) -> Option[http1.Head] {
     let mut h = http1.head()
     let mut cur = http1.cursor()
     let mut progress: http1.Progress = Partial
@@ -872,8 +892,105 @@ fn reviewed_fragmentation(raw: Bytes, ends: List[u64], expected: http1.Progress,
             expected
         }
         if progress != want {
-            return false
+            return None
         }
     }
-    progress == expected && h.end == end && cur.offset == consumed && same_head(h, whole)
+    if progress == expected && cur.offset == consumed {
+        Some(h)
+    } else {
+        None
+    }
+}
+
+// Exactly 64 bytes per field including the request line and terminating CRLF.
+// Changing the number of fields preserves the bytes and offsets of earlier ones.
+fn envelope_request(fields: u64) -> Bytes {
+    let mut raw = b"GET / HTTP/1.1\r\n"
+    for i in 0u64 .. fields {
+        list.append(mut raw, b"X: ")
+        list.fill(mut raw, 64 * (i + 1) - 4 - list.len(raw), b'v')
+        list.append(mut raw, b"\r\n")
+    }
+    list.append(mut raw, b"\r\n")
+    take raw
+}
+
+fn envelope_partition(n: u64, width: u64) -> List[u64] {
+    let mut ends: List[u64] = list.new()
+    let mut at: u64 = 0
+    while at < n {
+        at = order.min(n, at + width)
+        list.push(mut ends, at)
+    }
+    take ends
+}
+
+// expect: run request_resource_envelope() = true
+fn request_resource_envelope() -> bool {
+    for fields in[1u64, 2u64, 4u64, 8u64, 16u64] {
+        let raw = envelope_request(fields)
+        let n = 64 * fields
+        let mut h = http1.head()
+        if http1.request(raw, mut h) != Complete || h.count != fields || h.end != n || h.version != 1 || h.method != http1.Span(start: 0, end: 3) || h.target != http1.Span(start: 4, end: 5) {
+            return false
+        }
+        for i in 0u64 .. fields {
+            let start = if i == 0 {
+                16u64
+            } else {
+                64 * i - 2
+            }
+            let field = h.fields[i]
+            if field.name != http1.Span(start, end: start + 1) || field.value != http1.Span(start: start + 3, end: 64 * (i + 1) - 4) {
+                return false
+            }
+        }
+        for width in[1u64, 13u64, n] {
+            if !reviewed_fragmentation(raw, envelope_partition(n, width), Complete, n, n) {
+                return false
+            }
+        }
+    }
+    true
+}
+
+// Exercise the step meter independently of HTTP on a sequence of ones. Both
+// scanners sum the same final prefix. Only the starting index changes.
+fn scan_prefixes(input: Bytes, restart: bool) -> u64 {
+    let mut sum: u64 = 0
+    for stop in 1u64 .. list.len(input) + 1 {
+        let start = if restart {
+            0u64
+        } else {
+            stop - 1
+        }
+        if restart {
+            sum = 0
+        }
+        for i in start .. stop {
+            sum += int.widen(input[i])
+        }
+    }
+    sum
+}
+
+// expect: run head_meter_controls() = true
+fn head_meter_controls() -> bool {
+    for fields in[1u64, 2u64, 4u64, 8u64, 16u64] {
+        let n = 64 * fields
+        let mut input: Bytes = list.new()
+        list.fill(mut input, n, 1u8)
+        let cap = head_steps(n, fields, n)
+        let once = bound steps cap {
+            scan_prefixes(input, false)
+        }
+        let repeated = bound steps cap {
+            scan_prefixes(input, true)
+        }
+        match (once, repeated) {
+            (Ok(total), Error(t)) if total == n && t.steps == cap => {},
+            _ => return false
+        }
+    }
+    true
 }

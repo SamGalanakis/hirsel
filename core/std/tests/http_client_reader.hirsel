@@ -117,3 +117,86 @@ fn large_cookie_response() -> bool {
     list.append(mut wire, string.as_bytes("\r\nContent-Length: 3\r\n\r\nyes"))
     response_split(wire, list.len(wire) - 3, false, 200, "yes", false)
 }
+
+// A fresh reader owns both wire buffers. An interim response can be compacted
+// while a prefix of the final head remains in the input buffer.
+fn metered_response(raw: Bytes, width: u64) -> bool {
+    let mut r = result.unwrap(http_client.reader())
+    let mut at: u64 = 0
+    while at < list.len(raw) {
+        let end = order.min(at + width, list.len(raw))
+        if http_client.feed(mut r, list.slice(raw, at, end)) != end - at {
+            return false
+        }
+        match http_client.parse_head(mut r, false, 0) {
+            Ok(ready) => if ready != (end == list.len(raw)) {
+                return false
+            },
+            Error(_) => return false,
+        }
+        at = end
+    }
+    let h = http_client.response_head(r)
+    http_client.status(h) == 204 && http_client.reason(h) == string.as_bytes("No Content") && http_client.field_count(h) == 1
+}
+
+fn response_example() -> Bytes {
+    b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 204 No Content\r\nX: value\r\n\r\n"
+}
+
+// expect: run response_reader_envelope() = true
+fn response_reader_envelope() -> bool {
+    let wire = response_example()
+    let room = 2 * option.unwrap(charge.seq(bytes[u8], http1.HEAD_MAX))
+    for width in[1u64, 13u64, list.len(wire)] {
+        let fragments = (list.len(wire) + width - 1) / width
+        let steps = 64 + 8 * list.len(wire) + 24 * fragments
+        let trial = bound bytes room {
+            bound steps steps {
+                metered_response(wire, width)
+            }
+        }
+        match trial {
+            Ok(Ok(true)) => {},
+            _ => return false
+        }
+    }
+    true
+}
+
+// One reader already has a partial head when a second child runs out of
+// capacity between its two allocations. The first can finish with no new grant.
+// expect: run response_reader_sibling() = true
+fn response_reader_sibling() -> bool {
+    let buffer = option.unwrap(charge.seq(bytes[u8], http1.HEAD_MAX))
+    let room = buffer * 2
+    let mut first = result.unwrap(result.unwrap(bound bytes room {
+        http_client.reader()
+    }))
+    let prefix = string.as_bytes("HTTP/1.1 204 No ")
+    if http_client.feed(mut first, prefix) != list.len(prefix) || result.unwrap(http_client.parse_head(mut first, false, 0)) {
+        return false
+    }
+    let other = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes (room - 1) {
+            let r = result.unwrap(http_client.reader())
+            http_client.field_count(http_client.response_head(r)) == 0
+        }
+    })
+    let mut refused = false
+    if let Ok(Error(causes)) = take other {
+        for cause in causes {
+            match cause.kind {
+                Capacity(c) if c.requested == buffer && c.available == buffer - 1 => {
+                    refused = true
+                },
+                _ => return false
+            }
+        }
+    }
+    let remaining = string.as_bytes("Content\r\n\r\n")
+    let finished = bound bytes 0 {
+        http_client.feed(mut first, remaining) == list.len(remaining) && result.unwrap(http_client.parse_head(mut first, false, 0))
+    }
+    refused && result.unwrap(finished) && http_client.status(http_client.response_head(first)) == 204
+}

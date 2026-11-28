@@ -31,10 +31,11 @@ pub type Progress: key = Partial | Complete | Bad | TooLarge
 
 // The caller retains the growing buffer, Head and Cursor until completion.
 // No offsets or fields are rediscovered after a fragment boundary.
-type Scan: key = Leading | LeadingLf | Method | Target | Version | RequestEnd | RequestLf | FieldStart | Name | Value | FieldLf | EndLf
+type Scan: key = Leading | LeadingLf | Method | Target | Version | RequestEnd | RequestLf | FieldStart | Name | Value | FieldLf | EndLf | StatusLeading | StatusLeadingLf | StatusSpace | StatusDigits | AfterStatus | Reason | ReasonLf
 
 pub type Cursor {
     state: Scan,
+    response: bool,
     offset: u64,
     line_end: u64,
     line_start: u64,
@@ -53,7 +54,15 @@ pub type Cursor {
 /// Starts a request scan beside a fresh head. examined counts actual byte reads.
 /// Ex: `let mut cur = http1.cursor()`.
 pub fn cursor() -> Cursor {
-    Cursor(state: Leading, offset: 0, line_end: 0, line_start: 0, start: 0, name_end: 0, value_start: 0, value_end: 0, part: 0, utf8_left: 0, utf8_low: 128, utf8_high: 191, examined: 0, result: Partial)
+    Cursor(state: Leading, response: false, offset: 0, line_end: 0, line_start: 0, start: 0, name_end: 0, value_start: 0, value_end: 0, part: 0, utf8_left: 0, utf8_low: 128, utf8_high: 191, examined: 0, result: Partial)
+}
+
+/// Starts a response scan, including any leading empty lines.
+pub fn response_cursor() -> Cursor {
+    let mut cur = cursor()
+    cur.response = true
+    cur.state = StatusLeading
+    cur
 }
 
 fn finish_field(mut h: Head, mut cur: Cursor) {
@@ -109,7 +118,7 @@ fn scan_token(b: Bytes, first: u8, start: u64, limit: u64, separator: u8) -> (u6
 }
 
 /// Resumes over a growing buffer whose examined prefix has not changed.
-/// Initialize h with head() and cur with cursor(), once per request. Terminal
+/// Initialize h with head() and cur with cursor() or response_cursor() per head. Terminal
 /// results are sticky. Each head byte is read once; no allocation or I/O.
 /// Ex: `http1.resume(b, mut h, mut cur)`.
 pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
@@ -203,7 +212,11 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
                     if part >= 7 {
                         if version_byte == b'0' || version_byte == b'1' {
                             h.version = version_byte - b'0'
-                            state = RequestEnd
+                            state = if cur.response {
+                                StatusSpace
+                            } else {
+                                RequestEnd
+                            }
                         } else {
                             result = Bad
                         }
@@ -222,6 +235,78 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
                     next += 1
                 }
                 cur.part = part
+            },
+            StatusLeading => {
+                if c == 13 {
+                    state = StatusLeadingLf
+                } else if c == b'H' {
+                    cur.part = 1
+                    state = Version
+                } else if c != 10 {
+                    result = Bad
+                }
+            },
+            StatusLeadingLf => {
+                if c == 10 {
+                    state = StatusLeading
+                } else {
+                    result = Bad
+                }
+            },
+            StatusSpace => {
+                if c == b' ' {
+                    cur.part = 0
+                    cur.start = 0
+                    state = StatusDigits
+                } else {
+                    result = Bad
+                }
+            },
+            StatusDigits => {
+                if int.is_ascii_digit(c) {
+                    cur.start = cur.start * 10 + int.widen(c - b'0')
+                    cur.part += 1
+                    if cur.part == 3 {
+                        h.status = int.narrow(cur.start)
+                        state = AfterStatus
+                    }
+                } else {
+                    result = Bad
+                }
+            },
+            AfterStatus => {
+                if c == b' ' {
+                    cur.start = next
+                    state = Reason
+                } else if c == 13 || c == 10 {
+                    h.reason = Span(start: at, end: at)
+                    state = if c == 13 {
+                        ReasonLf
+                    } else {
+                        FieldStart
+                    }
+                } else {
+                    result = Bad
+                }
+            },
+            Reason => {
+                if c == 13 || c == 10 {
+                    h.reason = Span(start: cur.start, end: at)
+                    state = if c == 13 {
+                        ReasonLf
+                    } else {
+                        FieldStart
+                    }
+                } else if c < 32 && c != 9 || c == 127 {
+                    result = Bad
+                }
+            },
+            ReasonLf => {
+                if c == 10 {
+                    state = FieldStart
+                } else {
+                    result = Bad
+                }
             },
             RequestEnd => {
                 if c == 13 {
@@ -354,37 +439,11 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
     result
 }
 
-type Stop = More | Malformed | Limit
-
 /// Empty offset head; parsers reset it before each call. No allocation.
 /// Ex: `let mut h = http1.head()`.
 pub fn head() -> Head {
     let z = Span(start: 0, end: 0)
-    Head(method: z, target: z, version: 0, status: 0, reason: z, fields:[Header(name: z, value: z); 64], count: 0, end: 0)
-}
-
-fn byte(b: Bytes, at: u64) -> Result[u8, Stop] {
-    if at >= HEAD_MAX {
-        return Error(Limit)
-    }
-    if at >= list.len(b) {
-        return Error(More)
-    }
-    Ok(b[at])
-}
-
-fn newline(b: Bytes, mut at: u64) -> Result[(), Stop] {
-    let c = byte(b, at)?
-    at += 1
-    if c == 13 {
-        if byte(b, at)? != 10 {
-            return Error(Malformed)
-        }
-        at += 1
-    } else if c != 10 {
-        return Error(Malformed)
-    }
-    Ok(())
+    Head(method: z, target: z, version: 0, status: 0, reason: z, fields: [Header(name: z, value: z); 64], count: 0, end: 0)
 }
 
 /// Checks an Upgrade token with an optional protocol version.
@@ -428,63 +487,6 @@ pub fn valid_field(name: Bytes, value: Bytes) -> bool {
     true
 }
 
-fn version(b: Bytes, mut at: u64) -> Result[u8, Stop] {
-    let prefix = string.as_bytes("HTTP/1.")
-    for i in 0u64 .. 7u64 {
-        if byte(b, at)? != prefix[i] {
-            return Error(Malformed)
-        }
-        at += 1
-    }
-    let c = byte(b, at)?
-    if c != b'0' && c != b'1' {
-        return Error(Malformed)
-    }
-    at += 1
-    Ok(c - b'0')
-}
-
-fn status_line(b: Bytes, mut at: u64, mut h: Head) -> Result[(), Stop] {
-    while byte(b, at)? == 13 || byte(b, at)? == 10 {
-        newline(b, mut at)?
-    }
-    h.version = version(b, mut at)?
-    if byte(b, at)? != b' ' {
-        return Error(Malformed)
-    }
-    at += 1
-    let mut status: u16 = 0
-    for i in 0u64 .. 3u64 {
-        let c = byte(b, at)?
-        if !int.is_ascii_digit(c) {
-            return Error(Malformed)
-        }
-        let digit: u16 = int.widen(c - b'0')
-        status = status * 10 + digit
-        at += 1
-    }
-    h.status = status
-    let c = byte(b, at)?
-    if c == b' ' {
-        at += 1
-    } else if c != 13 && c != 10 {
-        return Error(Malformed)
-    }
-    let start = at
-    loop {
-        let x = byte(b, at)?
-        if x == 13 || x == 10 {
-            break
-        }
-        if x < 32 && x != 9 || x == 127 {
-            return Error(Malformed)
-        }
-        at += 1
-    }
-    h.reason = Span(start, end: at)
-    newline(b, mut at)
-}
-
 /// Parses one request head, capped at HEAD_MAX bytes and 64 fields. A complete
 /// head sets h.end; any read-ahead remains in b[h.end..]. O(head), no allocation.
 /// Partial keeps initialized fields. Ex: `http1.request(b, mut h)`.
@@ -498,16 +500,8 @@ pub fn request(b: Bytes, mut h: Head) -> Progress {
 /// Same offsets, limits and strict header rules as request. Ex: `http1.response(b, mut h)`.
 pub fn response(b: Bytes, mut h: Head) -> Progress {
     h = head()
-    let mut cur = cursor()
-    match status_line(b, mut cur.offset, mut h) {
-        Ok(()) => {
-            cur.state = FieldStart
-            resume(b, mut h, mut cur)
-        },
-        Error(More) => Partial,
-        Error(Malformed) => Bad,
-        Error(Limit) => TooLarge,
-    }
+    let mut cur = response_cursor()
+    resume(b, mut h, mut cur)
 }
 
 /// Compares ASCII bytes without changing their spelling. O(n), no allocation.

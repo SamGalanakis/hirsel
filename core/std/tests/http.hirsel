@@ -523,3 +523,87 @@ fn http_router_literal_precedence() -> bool {
     let routing = result.unwrap(router.build(take routes))
     route_tag_at(routing, b"GET", b"/item/static") == Some(2u64) && route_tag_at(routing, b"GET", b"/item/%73tatic") == Some(2u64) && route_tag_at(routing, b"GET", b"/item/other") == Some(1u64) && route_tag_at(routing, b"HEAD", b"/item/static") == Some(3u64) && route_tag_at(routing, b"HEAD", b"/other/a%2fb") == Some(4u64) && route_tag_at(routing, b"GET", b"/other/a/b") == Some(5u64) && route_tag_at(routing, b"GET", b"") == Some(6u64) && route_tag_at(routing, b"GET", b"/missing") == None
 }
+
+// The child retains one output byte per chunk. Decoder state and the spans
+// returned by decode are inline. Wire bytes and expected output are borrowed.
+fn chunk_stream(wire: Bytes, expected: Bytes, width: u64) -> bool {
+    let n = list.len(expected)
+    let mut out: Bytes = list.with_capacity(n)
+    let mut d = http.decoder(Chunked, http1.head(), n, http1.HEAD_MAX)
+    let mut used: u64 = 0
+    let mut at: u64 = 0
+    while at < list.len(wire) {
+        let stop = order.min(at + width, list.len(wire))
+        match feed(mut d, list.slice(wire, at, stop), mut out, mut used) {
+            Ok(true) => return used == list.len(wire) - 4 && d.decoded == n && out == expected && http.body_eof(mut d) == Ok(()),
+            Ok(false) => {},
+            Error(_) => return false,
+        }
+        at = stop
+    }
+    false
+}
+
+fn chunk_budget(wire: Bytes, expected: Bytes, width: u64, room: u64, fits: bool) -> bool {
+    let size = list.len(wire) - 4
+    let fragments = (size + width - 1) / width
+    // Per framing byte: decode loop, payload/trailer checks, state handler
+    // and token checks. Each fragment and each emitted span also enters feed
+    // or decode and slices the input. Setup and EOF have fixed cost.
+    let steps = 32 + 10 * size + 12 * (fragments + list.len(expected))
+    let attempt = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes room {
+            let run = bound steps steps {
+                chunk_stream(wire, expected, width)
+            }
+            match run {
+                Ok(ok) => ok,
+                _ => false
+            }
+        }
+    })
+    match attempt {
+        Ok(Ok(Ok(true))) => fits,
+        Ok(Error(causes)) => {
+            let mut count: u64 = 0
+            for cause in causes {
+                match cause.kind {
+                    Capacity(c) if !fits && c.requested == room + 1 && c.available == room => {},
+                    _ => return false,
+                }
+                count += 1
+            }
+            count == 1
+        },
+        _ => false
+    }
+}
+
+fn envelope_chunks() -> (Bytes, Bytes) {
+    let mut wire: Bytes = list.new()
+    let mut payload: Bytes = list.new()
+    for i in 0u64 .. 32u64 {
+        list.append(mut wire, b"1;ext=\"v\"\r\n")
+        let c: u8 = int.narrow(65u64 + i)
+        list.push(mut wire, c)
+        list.push(mut payload, c)
+        list.append(mut wire, b"\r\n")
+    }
+    list.append(mut wire, b"0\r\nX: end\r\n\r\nNEXT")
+    (take wire, take payload)
+}
+
+// expect: run chunk_resource_envelope() = true
+fn chunk_resource_envelope() -> bool {
+    let (wire, payload) = envelope_chunks()
+    let room = option.unwrap(charge.seq(bytes[u8], list.len(payload)))
+    if !chunk_budget(wire, payload, 1, room - 1, false) {
+        return false
+    }
+    for width in[1u64, 13u64, list.len(wire)] {
+        if !chunk_budget(wire, payload, width, room, true) {
+            return false
+        }
+    }
+    true
+}

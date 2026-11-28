@@ -252,13 +252,14 @@ fn upkeep_scrub[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Res
     let running = match replace(mut hd.upkeep.tour, None) {
         Some(take tour) => take tour,
         None => {
-            if store.keyed_time(hd.db) < hd.upkeep.tour_from {
+            let started_ms = store.keyed_time(hd.db)
+            if started_ms < hd.upkeep.tour_from {
                 return Ok(false)
             }
-            match store.begin_scrub(mut hd.db) {
+            match store.begin_maintenance_scrub(mut hd.db, started_ms) {
                 Ok(take tour) => {
                     hd.upkeep.tour_start_version = store.main_commit_version(hd.db)
-                    hd.upkeep.tour_started_ms = store.keyed_time(hd.db)
+                    hd.upkeep.tour_started_ms = started_ms
                     hd.upkeep.tour_faults = 0u64
                     take tour
                 },

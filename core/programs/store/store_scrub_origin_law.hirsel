@@ -1,0 +1,82 @@
+// Find a replay time whose uniform byte draw belongs to this file. Use the
+// actual file sizes for the intervals, independently of the pacer's estimate.
+fn scrub_origin_time(generation: u64, total: u64, start: u64, end: u64) -> u64 {
+    let mut seed = 0u64
+    loop {
+        let mut rng = std.rand.new(seed, generation)
+        let byte = std.rand.below(mut rng, total)
+        if byte >= start && byte < end {
+            return seed
+        }
+        seed += 1
+    }
+}
+
+@test
+fn disk_test_scrub_restart_origins(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let path = disk_test_directory(d)
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
+    options.pack_bytes = 512
+    let mut db = open(tasks, path, c, r, options)?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    scrub_fill(mut db, t, 150, 0)?
+    let _ = checkpoint(mut db)?
+    let mut manual = begin_scrub(mut db)?
+    let n = list.len(manual.packs)
+    if n < 2 || manual.position != 0 || scrub_step(mut manual, 1)?.next != Some(manual.packs[0].seq) {
+        fail("manual scrub must start at the lowest listed pack")
+    }
+    let mut starts: List[u64] = list.new()
+    let mut total = 0u64
+    for pack in manual.packs {
+        list.push(mut starts, total)
+        let name = failure_result_from_rep(manifest.paged_pack_path(pack.seq))?
+        total += (host.stat(path, name) ?=> Io).size
+    }
+    list.push(mut starts, total)
+    let config = ScrubConfig(target_ms: 1000, max_rate_bps: 1000000, slice_bytes: 1, min_rate_bps: 1000000)
+    let mut clean: Option[u64] = None
+    for origin in 0u64 .. n {
+        let mut now = scrub_origin_time(manual.generation, total, starts[origin], starts[origin + 1])
+        let mut pacer = begin_scrub_pacer(db, config, now)?
+        let mut seen = 0u64
+        loop {
+            let step = scrub_pacer_step(mut pacer, mut db, now)?
+            if list.len(step.faults) != 0 {
+                fail("clean fixture reported a fault")
+            }
+            if let Some(round) = step.completed {
+                if seen != n || round.examined != total || step.status.last_clean_ms != Some(now) {
+                    fail("clean completion requires exactly one visit to every pack")
+                }
+                clean = Some(now)
+                break
+            }
+            if step.status.last_clean_ms != clean {
+                fail("partial tour advanced last clean")
+            }
+            if let Some(tour) = view pacer.tour {
+                if tour.at == 72 {
+                    if seen >= n || tour.packs[tour.position].seq != manual.packs[(origin + seen) % n].seq {
+                        fail("restarted pacer visited the wrong pack")
+                    }
+                    seen += 1
+                }
+            }
+            now = step.status.next_due_ms
+        }
+    }
+    let last_seq = manual.packs[n - 1].seq
+    let name = failure_result_from_rep(manifest.paged_pack_path(last_seq))?
+    let original = failure_result_from_rep(manifest.disk_read_paged_file(path, name, 67108864))?
+    failure_result_from_rep(manifest.disk_write_synced(path, name, b"bad"))?
+    let now = scrub_origin_time(manual.generation, total, starts[n - 1], total)
+    let mut restarted = begin_scrub_pacer(db, config, now)?
+    let step = scrub_pacer_step(mut restarted, mut db, now)?
+    if list.len(step.faults) != 1 || !scrub_fault_is(step.faults[0], last_seq, 0, Truncated)? || step.completed != None || step.status.last_clean_ms != clean {
+        fail("one restarted slice must find the last pack's damage")
+    }
+    failure_result_from_rep(manifest.disk_write_synced(path, name, original))?
+    close(take db)
+}

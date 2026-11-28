@@ -5,6 +5,7 @@ pub opaque type Scrub {
     next_stamp: u64,
     packs: List[manifest.ScrubPack],
     position: u64,
+    remaining: u64,
     at: u64,
     open: Option[manifest.ScrubInput],
     checked: u64,
@@ -45,14 +46,15 @@ pub fn begin_scrub(mut db: Db) -> Result[Scrub, Error] {
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Result[(), Error] {
         failure_result_from_rep(manifest.add_pack_scrub(mut state.packs, arc.share(lease)))
     })?
-    Ok(Scrub(d: log_directory(db)?, store: db.store, generation: db.accounting.checkpointed, next_stamp: next_stamp, packs: take packs, position: 0, at: 0, open: None, checked: 0, known: manifest.share_page_locations(manifest.pack_locations(disk_state(db).packs)), lease: take lease))
+    let remaining = list.len(packs)
+    Ok(Scrub(d: log_directory(db)?, store: db.store, generation: db.accounting.checkpointed, next_stamp: next_stamp, packs: take packs, position: 0, remaining: remaining, at: 0, open: None, checked: 0, known: manifest.share_page_locations(manifest.pack_locations(disk_state(db).packs)), lease: take lease))
 }
 
 // Reads at least one frame, then stops once budget bytes are read this step.
 pub fn scrub_step(mut tour: Scrub, budget: u64) -> Result[ScrubReport, Error] waits {
     let mut faults: List[Fault] = list.new()
     let mut spent = 0u64
-    while tour.position < list.len(tour.packs) && (spent == 0 || spent < budget) {
+    while tour.remaining > 0 && (spent == 0 || spent < budget) {
         match scrub_next(mut tour, mut spent) {
             Ok(()) => (),
             Error(Corrupt(take fault)) => {
@@ -70,7 +72,7 @@ pub fn scrub_step(mut tour: Scrub, budget: u64) -> Result[ScrubReport, Error] wa
         }
     }
     tour.checked = int.saturating_add(tour.checked, spent)
-    let pending = if tour.position < list.len(tour.packs) {
+    let pending = if tour.remaining > 0 {
         Some(tour.packs[tour.position].seq)
     } else {
         None
@@ -84,7 +86,11 @@ fn scrub_finish_pack(mut tour: Scrub) -> Result[(), Error] waits {
         let handle = format.take_journal_file(take input)
         failure_result_from_rep(manifest.disk_io(host.close(take handle)))?
     }
+    tour.remaining -= 1
     tour.position += 1
+    if tour.position == list.len(tour.packs) {
+        tour.position = 0
+    }
     tour.at = 0
     Ok(())
 }

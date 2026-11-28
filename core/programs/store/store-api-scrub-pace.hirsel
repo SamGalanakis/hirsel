@@ -186,6 +186,27 @@ fn scrub_estimated_bytes(tour: Scrub) -> u64 {
     total
 }
 
+// The replay input is the tour start time. Draw a byte uniformly from the
+// captured files, then begin at the file containing that byte.
+pub fn begin_maintenance_scrub(mut db: Db, started_ms: u64) -> Result[Scrub, Error] {
+    let mut tour = begin_scrub(mut db)?
+    let total = scrub_estimated_bytes(tour)
+    if total > 0 {
+        let mut rng = std.rand.new(started_ms, tour.generation)
+        let mut byte = std.rand.below(mut rng, total)
+        for i in 0u64 .. list.len(tour.packs) {
+            let pack = tour.packs[i]
+            let size = pages.sealed_pack_bytes(pack.class, pack.frames, pack.payload_bytes)
+            if byte < size {
+                tour.position = i
+                break
+            }
+            byte -= size
+        }
+    }
+    Ok(take tour)
+}
+
 fn scrub_pace_rate(estimated_bytes: u64, config: ScrubConfig) -> u64 {
     let needed = manifest.ceil_millis_ratio(estimated_bytes, config.target_ms)
     let floor = order.min(config.min_rate_bps, config.max_rate_bps)
@@ -249,7 +270,7 @@ pub fn scrub_pacer_step(mut pacer: ScrubPacer, mut db: Db, now_ms: u64) -> Resul
     let mut tour = match replace(mut pacer.tour, None) {
         Some(take running) => take running,
         None => {
-            let started = begin_scrub(mut db)?
+            let started = begin_maintenance_scrub(mut db, now_ms)?
             let est = scrub_estimated_bytes(started)
             pacer.tour_start_version = version(snapshot(db))
             pacer.tour_started_ms = now_ms

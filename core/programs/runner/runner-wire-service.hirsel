@@ -210,7 +210,7 @@ fn wire_key(w: Want) -> Bytes {
 }
 
 fn answer_want[G: send, H: shareable + inert + send](r: Registry[G, H], key: Bytes, wire_slot: u32) -> Entry {
-    if map.contains(r.slots, key) {
+    if !none(registered_ordinal(r, key)) {
         Ready(wire_slot)
     } else {
         Gone
@@ -263,7 +263,7 @@ fn wire_plan_call[G: send, H: shareable + inert + send](mut s: WireSession[G], r
     match prepare(r, context, take want) {
         Ok(take sent) => {
             let backing: Bytes = list.with_capacity(DONE_MAX)
-            let run = match map.get(r.slots, sent.key) {
+            let run = match registered_adapter(r, sent.key) {
                 Some(Compute(_)) => Computed(call(r, sent.key, sent.arg)),
                 Some(Granted(launch)) => match s.grants {
                     Some(grant) if call_grant_allows(grant, r, sent.key) => {
@@ -527,7 +527,7 @@ fn wire_service_allocate[G: send, H: shareable + inert + send](mut s: WireSessio
 
 // Classify a Hello entry against the shared Registry.
 fn wire_known_entry[G: send, H: shareable + inert + send](r: Registry[G, H], take key: Bytes) -> (Bytes, Known) {
-    let known: Known = if map.contains(r.slots, key) {
+    let known: Known = if !none(registered_ordinal(r, key)) {
         Registered
     } else if map.contains(r.t.gone, key) {
         Gone

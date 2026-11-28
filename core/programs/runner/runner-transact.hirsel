@@ -155,7 +155,6 @@ pub fn transact_via[G: send, H: shareable + inert + send, F, Env: inert + send, 
         },
         None => None,
     }
-    register_check(mut r, key, ca, n, s)?
     let check = fn(arg: Bytes) -> Option[Refusal] {
         check_arg(ca, arg, n)
     }
@@ -188,7 +187,7 @@ pub fn transact_via[G: send, H: shareable + inert + send, F, Env: inert + send, 
         store.reexecute_with(db, source, take declaration, plan, replay_fault, env, transact_replay)
     }
     let adapters = TransactAdapters(key: clone(key), serve: take serve_entry, resume: take resume_entry, trigger: take trigger, attempt: take attempt, replay: take replay)
-    insert_exported(mut r, take key, code.identity(definition), take d, Transact(n, s, take revision, check, take adapters))
+    insert(mut r, take key, code.identity(definition), take d, Transact(n, s, take revision, check, take adapters), Some(checked_argument(ca, n, s)))
 }
 
 pub fn attempt_key[F, A, R](definition: StaticFn[F], arg: std.codec.Codec[A], reply: std.codec.Codec[R]) -> Result[Bytes, std.codec.EncodeError] {
@@ -240,5 +239,5 @@ pub fn register_attempt[G: send, H: shareable + inert + send, F, Env: inert + se
         store.run(mut db, Some(steps), body_env, run_fenced_entry)
     }
     let ready: own[send] fn(mut store.Db, H, triggers.Tables, triggers.Attempt, Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits = take adapter
-    insert(mut registered, take key, code.identity(definition), None, Fenced(n, steps, take ready))
+    insert(mut registered, take key, code.identity(definition), None, Fenced(n, steps, take ready), None)
 }

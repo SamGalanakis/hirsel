@@ -308,8 +308,8 @@ fn start_head[G: send, H: shareable + inert + send](take db: store.Db, take r: R
     }
     let shared = arc.new(take h)
     let mut images = false
-    for (_, registered) in r.slots {
-        if let Query(..) = registered {
+    for row in r.slots {
+        if let Query(..) = row.adapter {
             images = true;
             break
         }

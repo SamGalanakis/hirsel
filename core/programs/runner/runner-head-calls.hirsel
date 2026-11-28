@@ -46,7 +46,7 @@ fn rerun_parked[G: send, H: shareable + inert + send](mut hd: Head[G, H], drain:
             continue
         }
         let ParkedCall(req: take q, served: take parked_call) = list.remove(mut hd.parked, i)
-        let ran = match map.get(hd.r.slots, q.key) {
+        let ran = match registered_adapter(hd.r, q.key) {
             Some(Transact(_, _, _, _, go)) => (go.resume)(mut hd.db, take parked_call, hd.h, q.caller, q.arg),
             _ => fail("runner: a parked call's entry is registered"),
         }

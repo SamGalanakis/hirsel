@@ -45,7 +45,7 @@ fn reexecute_at[G: send, H: shareable + inert + send](db: store.Db, branch: stor
         }
     }
     let registered = placed(place, n_place) ?=> Place
-    let Some(Transact(n, s, _, check, go)) = map.get(registered.slots, recorded_entry.record.key) else {
+    let Some(Transact(n, s, _, check, go)) = registered_adapter(registered, recorded_entry.record.key) else {
         return Ok(Unknown(NoEntry))
     }
     if let Some(expected_identity) = identity {

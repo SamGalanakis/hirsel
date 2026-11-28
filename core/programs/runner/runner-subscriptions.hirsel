@@ -518,7 +518,7 @@ fn owe(mut owes: List[Owe], who: u64, version: u64) -> u64 {
 }
 
 fn run_query[G: send, H: shareable + inert + send](r: Registry[G, H], h: H, access: PublisherReads, read_handle: store.Reader, at: store.Snapshot, input: SubscriptionInput, prior: store.Snapshot, old: Option[View[List[Cover]]], rows: Log[Row]) -> Queried waits {
-    let Some(Query(_, _, registered)) = map.get(r.slots, input.key) else {
+    let Some(Query(_, _, registered)) = registered_adapter(r, input.key) else {
         return Stopped(Refused(NoEntry))
     }
     let bindings = option.unwrap(map.get(r.bound_slots, input.key))
@@ -665,7 +665,7 @@ fn add_subscription(mut subs: Subscriptions, who: u64, sub: u32, generation: u64
 }
 
 fn project_changes[G: send, H: shareable + inert + send](b: Board[G, H], key: Bytes, newest: store.Snapshot, c: List[Cover], rows: Log[Row]) -> Result[(), Queried] waits {
-    match map.get(b.r.slots, key) {
+    match registered_adapter(b.r, key) {
         Some(Query(allowance, steps, _)) => {
             let bindings = option.unwrap(map.get(b.r.bound_slots, key))
             let projected = bound bytes allowance {

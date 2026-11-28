@@ -50,7 +50,7 @@ fn previous_http_keys[G: send, H: shareable + inert + send](registered: Registry
     let mut keys: List[Bytes] = list.new()
     for entry in previous.exported {
         let key = entry_key(view entry.described.identity, entry.args_fp, entry.result_fp)
-        if !map.contains(registered.slots, key) {
+        if none(registered_ordinal(registered, key)) {
             list.push(mut keys, take key)
         }
     }
@@ -218,7 +218,7 @@ pub fn http_router_with_retirements[G: send, H: shareable + inert + send](regist
         plan.gone = previous_http_keys(registered, prior)
         for saved in prior.bindings {
             let key = view saved.binding.entry
-            if saved.binding.mode != Stream || http_has_op(registered.t.bindings, saved.binding.op) || map.contains(registered.t.keyed, string.as_bytes(saved.binding.op)) || map.contains(registered.slots, key) {
+            if saved.binding.mode != Stream || http_has_op(registered.t.bindings, saved.binding.op) || map.contains(registered.t.keyed, string.as_bytes(saved.binding.op)) || !none(registered_ordinal(registered, key)) {
                 continue
             }
             let index = find_binding_entry(prior.exported, key) ?=> |_| BindError(op: string.from(saved.binding.op), check: NoEntry)
@@ -574,7 +574,7 @@ fn http_keyed_handler[G: send, H: shareable + inert + send](req: std.http.Reques
         return Ok(Reply(http_refusal(Budget(Room(requested: list.len(raw), available: state.budget)))?))
     }
     if let Some(policy) = registered.policy {
-        if let Some(check) = map.get(state.registered.checks, binding.entry) {
+        if let Some(check) = argument_check(state.registered, binding.entry) {
             if let Some(take problem) = (check.validate)(raw, policy.arg_max) {
                 return Ok(Reply(http_refusal(take problem)?))
             }

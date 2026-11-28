@@ -482,7 +482,7 @@ type CheckedArgument: send {
     description: own[send] fn() -> Result[std.codec.Schema, std.codec.EncodeError],
 }
 
-fn register_check[G: send, H: shareable + inert + send, A](mut r: Registry[G, H], key: Bytes, ca: std.codec.Codec[A], n: u64, steps: u64) -> Result[(), RegisterError] {
+fn checked_argument[A](ca: std.codec.Codec[A], n: u64, steps: u64) -> CheckedArgument {
     let check = fn(arg: Bytes, maximum: u64) -> Option[Refusal] {
         let seen = bound bytes order.min(n, maximum) {
             let validate = scoped fn() -> Result[Option[Refusal], OutOfTime] {
@@ -509,11 +509,7 @@ fn register_check[G: send, H: shareable + inert + send, A](mut r: Registry[G, H]
     let description = fn() -> Result[std.codec.Schema, std.codec.EncodeError] {
         std.codec.describe(ca)
     }
-    let go = CheckedArgument(validate: take check, description: take description)
-    let copied_result: Bytes = clone(key)
-    let copied: Bytes = take copied_result
-    map.insert(mut r.checks, take copied, take go)
-    Ok(())
+    CheckedArgument(validate: take check, description: take description)
 }
 
 // The composition root supplies previous/current activation keys. A current key
@@ -574,7 +570,7 @@ pub fn prepare[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admit
 }
 
 fn prepare_call[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admitted, take key: Bytes, stream_id: StreamId, p: u64, take arg: Bytes, relative: u64) -> Result[Send, Refusal] {
-    let known = map.contains(r.slots, key)
+    let known = !none(registered_ordinal(r, key))
     if !known && !map.contains(r.t.gone, key) {
         return Error(NoEntry)
     }
@@ -598,7 +594,7 @@ fn prepare_call[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admi
     if relative == 0u64 || end <= a.now {
         return Error(Deadline)
     }
-    if let Some(check) = map.get(r.checks, key) {
+    if let Some(check) = argument_check(r, key) {
         if let Some(take why) = (check.validate)(arg, a.arg_max) {
             return Error(take why)
         }

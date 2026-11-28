@@ -63,7 +63,7 @@ fn wire_plan_subscribe[G: send, H: shareable + inert + send](mut s: WireSession[
         return Ok(SubscriptionRefusal(sub, Refused(NoEntry)))
     }
     let key: Bytes = clone(entries[index].0)
-    if !map.contains(r.slots, key) {
+    if none(registered_ordinal(r, key)) {
         let outcome: Outcome = if map.contains(r.t.gone, key) {
             Failed(Gone)
         } else {
@@ -71,7 +71,7 @@ fn wire_plan_subscribe[G: send, H: shareable + inert + send](mut s: WireSession[
         }
         return Ok(SubscriptionRefusal(sub, take outcome))
     }
-    let Some(Query(_, _, entry)) = map.get(r.slots, key) else {
+    let Some(Query(_, _, entry)) = registered_adapter(r, key) else {
         return Ok(SubscriptionRefusal(sub, Refused(NoEntry)))
     }
     if list.len(s.subs) >= s.config.max_subs {
@@ -82,7 +82,7 @@ fn wire_plan_subscribe[G: send, H: shareable + inert + send](mut s: WireSession[
             return Ok(SubscriptionRefusal(sub, Refused(Budget(Room(requested: list.len(arg), available: registered.arg_limit)))))
         }
     }
-    let refused = match map.get(r.checks, key) {
+    let refused = match argument_check(r, key) {
         Some(check) => (check.validate)(arg, 18446744073709551615u64),
         _ => {
             let no_refusal: Option[Refusal] = None;

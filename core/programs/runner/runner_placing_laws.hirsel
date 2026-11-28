@@ -36,16 +36,18 @@ fn placing_law[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, 
 
 fn placing_law_slots[G: send, H: shareable + inert + send](r: Registry[G, H]) -> List[Bytes] {
     let mut keys: List[Bytes] = list.new()
-    for (key, _) in r.slots {
-        list.push(mut keys, clone(key))
+    for i in 0u64 .. list.len(r.slots) {
+        list.push(mut keys, clone(r.t.rows[i].key))
     }
     take keys
 }
 
 fn placing_law_checks[G: send, H: shareable + inert + send](r: Registry[G, H]) -> List[Bytes] {
     let mut keys: List[Bytes] = list.new()
-    for (key, _) in r.checks {
-        list.push(mut keys, clone(key))
+    for i in 0u64 .. list.len(r.slots) {
+        if let Some(_) = r.slots[i].argument {
+            list.push(mut keys, clone(r.t.rows[i].key))
+        }
     }
     take keys
 }
@@ -118,4 +120,26 @@ fn placing_law_swapped(mut reg: Registry[(), ()]) -> Result[(), RegisterError] {
 fn placing_law_more(mut reg: Registry[(), ()]) -> Result[(), RegisterError] {
     placing_law_pair(mut reg)?
     placing_law_single(mut reg)
+}
+
+@test
+fn refused_duplicate_preserves_argument_budget() -> Result[(), u64] {
+    let mut reg: Registry[(), ()] = registry()
+    let definition = code.describe(placing_law_double)
+    compute(mut reg, definition, 65536u64, DEFAULT_STEPS) ?=> |_| 1u64
+    let key = attempt_key(definition, std.codec.of_u64(), std.codec.of_u64()) ?=> |_| 2u64
+    match compute(mut reg, definition, 65536u64, 0u64) {
+        Error(AlreadyRegistered(refused)) => if refused != key {
+            return Error(3u64)
+        },
+        _ => return Error(4u64),
+    }
+    let caller = store.Caller(issuer: 0u8, subject: list.new())
+    let mut allowed: List[Bytes] = list.new()
+    list.push(mut allowed, clone(key))
+    let ctx = admitted(take caller, None, take allowed, 0u64, 0u64, 65536u64, 65536u64)
+    let mut arg: Bytes = list.new()
+    std.codec.put_u64(7u64, mut arg)
+    let _ = prepare_call(reg, ctx, take key, store.StreamId(t: 0u64, n: 0u64), 0u64, take arg, 1u64) ?=> |_| 5u64
+    Ok(())
 }

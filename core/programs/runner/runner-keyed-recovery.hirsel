@@ -265,13 +265,13 @@ fn run_claim_recovery[G: send, H: shareable + inert + send](mut hd: Head[G, H], 
         _ => false,
     }
     if live {
-        let transactional = match map.get(hd.r.slots, activation.entry) {
+        let transactional = match registered_adapter(hd.r, activation.entry) {
             Some(Transact(..)) => true,
             _ => false
         }
         if transactional {
             let ran = {
-                let Some(Transact(_, _, revision, _, go)) = map.get(hd.r.slots, activation.entry) else {
+                let Some(Transact(_, _, revision, _, go)) = registered_adapter(hd.r, activation.entry) else {
                     fail("runner: a keyed entry's slot was removed")
                 }
                 let record = claim_run_record(activation, run.arguments, revision, hd.replay_identity)?
@@ -448,7 +448,7 @@ fn resume_recovery[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> 
         let ClaimRun(waiters: take waiters, ..) = take run
         answer_claim_waiters(mut hd, take waiters, Abandoned, None)
     } else {
-        let served = match map.get(hd.r.slots, run.entry) {
+        let served = match registered_adapter(hd.r, run.entry) {
             Some(Transact(_, _, _, _, go)) => (go.resume)(mut hd.db, take parked_call, hd.h, run.caller, run.arguments),
             _ => fail("runner: a parked keyed call's entry is registered"),
         }

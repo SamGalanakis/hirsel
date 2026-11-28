@@ -10,4 +10,4 @@ auth@1/laws/revoke_open_response src=b1d56e72c0881727 sig=221ebd7d5fe06619 run=e
 auth@1/laws/scoped_invalidation src=7bf687f87d9b3857 sig=bfeaffe07122b064 run=2f2681ca48ebe043 bug=- oracle=- rows=pending
 auth@1/laws/scoped_token_limits src=71519c7170dd5df9 sig=b7c2757c9dea3ffd run=2c429cb51b7fff22 bug=- oracle=- rows=pending
 auth@1/laws/session_lifecycle src=2938ed37808d3969 sig=37100fba590f182f run=7338608ae6c89dee bug=- oracle=- rows=pending
-auth@1/laws/transact_authority src=af8fbc6386111e35 sig=fa3a692869e918a4 run=2f2681ca48ebe043 bug=- oracle=- rows=pending
+auth@1/laws/transact_authority src=af8fbc6386111e35 sig=9e72faeb021558bb run=2f2681ca48ebe043 bug=- oracle=- rows=pending

@@ -154,7 +154,8 @@ fn no_rooms() -> RoomPlan {
 // The room sizes a registry's entries fold to; `close_rooms` finishes them for a WireConfig.
 fn fold_rooms[G: send, H: shareable + inert + send](r: Registry[G, H]) -> RoomPlan {
     let mut plan = no_rooms()
-    for (_, entry) in r.slots {
+    for row in r.slots {
+        let entry = view row.adapter
         match entry {
             Transact(n, _, _, _, _) => {
                 plan.head_entry = order.max(plan.head_entry, n)

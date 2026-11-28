@@ -19,6 +19,7 @@ type GrantedLaunch[G: send]: send {
 type Template[G: send]: shareable + send {
     exported: List[Exported],
     rows: List[SlotRow],
+    by_key: Map[Bytes, u64],
     bindings: List[HttpDescribe],
     keyed: Map[Bytes, KeyedRegistration[G]],
     gone: Map[Bytes, ()],
@@ -31,6 +32,11 @@ type Template[G: send]: shareable + send {
 // Template's n-th key (`at`), and `seen` counts the exported entries it has passed.
 // One registered slot: its entry key and the code.identity of the StaticFn it was
 // registered from, which a replay must present at the same ordinal to take the key.
+type RegisteredSlot[G: send, H: shareable + inert + send]: send {
+    adapter: Slot[G, H],
+    argument: Option[CheckedArgument],
+}
+
 type SlotRow: shareable + send {
     key: Bytes,
     mark: Bytes,
@@ -41,20 +47,19 @@ pub opaque type Registry[G: send, H: shareable + inert + send]: send {
     replay: bool,
     at: u64,
     seen: u64,
-    slots: Map[Bytes, Slot[G, H]],
+    slots: List[RegisteredSlot[G, H]],
     bound_slots: Map[Bytes, List[BoundSlot]],
-    checks: Map[Bytes, CheckedArgument],
     trigger_tables: Option[own[send] fn(H) -> triggers.Tables],
 }
 
 pub fn registry[G: send, H: shareable + inert + send]() -> Registry[G, H] {
-    let empty: Template[G] = Template(exported: list.new(), rows: list.new(), bindings: list.new(), keyed: map.new(), gone: map.new())
-    Registry(t: arc.new(take empty), replay: false, at: 0u64, seen: 0u64, slots: map.new(), bound_slots: map.new(), checks: map.new(), trigger_tables: None)
+    let empty: Template[G] = Template(exported: list.new(), rows: list.new(), by_key: map.new(), bindings: list.new(), keyed: map.new(), gone: map.new())
+    Registry(t: arc.new(take empty), replay: false, at: 0u64, seen: 0u64, slots: list.new(), bound_slots: map.new(), trigger_tables: None)
 }
 
 // A fresh Registry that makes adapters against `t`.
 fn replaying[G: send, H: shareable + inert + send](t: Arc[Template[G]]) -> Registry[G, H] {
-    Registry(t: arc.share(t), replay: true, at: 0u64, seen: 0u64, slots: map.new(), bound_slots: map.new(), checks: map.new(), trigger_tables: None)
+    Registry(t: arc.share(t), replay: true, at: 0u64, seen: 0u64, slots: list.new(), bound_slots: map.new(), trigger_tables: None)
 }
 
 // Changes the Template; a shared one is copied first (arc.update), so no other Registry
@@ -98,40 +103,53 @@ fn replayed_key[G: send, H: shareable + inert + send](r: Registry[G, H], mark: B
     Ok(take key)
 }
 
-// The one insertion: a key already present is refused and the registry is unchanged. A
-// replay inserts the adapter under the key the build checked. `d` is None for a slot that
-// exports nothing (an attempt).
-fn insert[G: send, H: shareable + inert + send](mut r: Registry[G, H], take key: Bytes, mark: Bytes, take d: Option[Exported], take s: Slot[G, H]) -> Result[(), RegisterError] {
-    if r.replay {
-        map.insert(mut r.slots, take key, take s)
-        r.at += 1u64
-        return Ok(())
+// Registration order indexes both the installation's route table and its adapters.
+fn registered_ordinal[G: send, H: shareable + inert + send](r: Registry[G, H], key: Bytes) -> Option[u64] {
+    let at = map.get(r.t.by_key, key)?
+    if at < list.len(r.slots) {
+        Some(at)
+    } else {
+        None
     }
-    if map.contains(r.slots, key) {
-        return Error(AlreadyRegistered(take key))
-    }
-    let mut carried = take d
-    let copied: Bytes = clone(key)
-    let marked: Bytes = clone(mark)
-    let mut kept_row: Option[SlotRow] = Some(SlotRow(key: take copied, mark: take marked))
-    edit_template(mut r, scoped fn(mut t: Template[G]) {
-        if let Some(take e) = replace(mut carried, None) {
-            list.push(mut t.exported, take e)
-        }
-        if let Some(take row) = replace(mut kept_row, None) {
-            list.push(mut t.rows, take row)
-        }
-    })
-    map.insert(mut r.slots, take key, take s)
-    Ok(())
 }
 
-// An exported entry's slot: in a replay it also counts the entry as passed.
-fn insert_exported[G: send, H: shareable + inert + send](mut r: Registry[G, H], take key: Bytes, mark: Bytes, take d: Option[Exported], take s: Slot[G, H]) -> Result[(), RegisterError] {
-    if r.replay {
-        r.seen += 1u64
+fn registered_adapter[G: send, H: shareable + inert + send](r: Registry[G, H], key: Bytes) -> Option[View[Slot[G, H]]] in r {
+    let at = registered_ordinal(r, key)?
+    Some(view r.slots[at].adapter)
+}
+
+fn argument_check[G: send, H: shareable + inert + send](r: Registry[G, H], key: Bytes) -> Option[View[CheckedArgument]] in r {
+    let at = registered_ordinal(r, key)?
+    match r.slots[at].argument {
+        Some(check) => Some(view check),
+        None => None
     }
-    insert(mut r, take key, mark, take d, take s)
+}
+
+fn insert[G: send, H: shareable + inert + send](mut r: Registry[G, H], take key: Bytes, mark: Bytes, take d: Option[Exported], take s: Slot[G, H], take argument: Option[CheckedArgument]) -> Result[(), RegisterError] {
+    if !r.replay {
+        if map.contains(r.t.by_key, key) {
+            return Error(AlreadyRegistered(take key))
+        }
+        let mut carried = take d
+        let mut row = Some(SlotRow(key: take key, mark: clone(mark)))
+        edit_template(mut r, scoped fn(mut t: Template[G]) {
+            if let Some(take e) = replace(mut carried, None) {
+                list.push(mut t.exported, take e)
+            }
+            if let Some(take entry) = replace(mut row, None) {
+                map.insert(mut t.by_key, clone(entry.key), list.len(t.rows))
+                list.push(mut t.rows, take entry)
+            }
+        })
+    } else {
+        if let Some(_) = argument {
+            r.seen += 1u64
+        }
+        r.at += 1u64
+    }
+    list.push(mut r.slots, RegisteredSlot(adapter: take s, argument: take argument))
+    Ok(())
 }
 
 // Rule 10: `placed` registers the place once (`placing_at`): it derives every entry key,

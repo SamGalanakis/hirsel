@@ -72,8 +72,8 @@ type RelayStart: send {
 
 fn relay_key_max[G: send, H: shareable + inert + send](reg: Registry[G, H]) -> u64 {
     let mut maximum = 0u64
-    for (key, _) in reg.slots {
-        maximum = order.max(maximum, list.len(key))
+    for row in reg.t.rows {
+        maximum = order.max(maximum, list.len(row.key))
     }
     for (key, _) in reg.t.gone {
         maximum = order.max(maximum, list.len(key))

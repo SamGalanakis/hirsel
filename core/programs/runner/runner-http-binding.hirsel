@@ -144,7 +144,7 @@ pub fn bind[G: send, H: shareable + inert + send](mut reg: Registry[G, H], take 
 }
 
 fn check_http_binding[G: send, H: shareable + inert + send](reg: Registry[G, H], binding: HttpBinding) -> Result[List[HttpDefault], BindCheck] {
-    let Some(validator) = map.get(reg.checks, binding.entry) else {
+    let Some(validator) = argument_check(reg, binding.entry) else {
         return Error(NoEntry)
     }
     let entry_index = find_binding_entry(reg.t.exported, binding.entry) ?=> |_| NoEntry

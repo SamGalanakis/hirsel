@@ -894,11 +894,10 @@ pub fn compute[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: 
     let (take key, take d) = entry_described(r, code.identity(f), scoped fn() -> Result[(Bytes, Exported), RegisterError] {
         Ok(described(code.identity(f), code.revision(f), Compute, ca, cr) ?=> |_| Bounds)
     })?
-    register_check(mut r, key, ca, n, s)?
     let made = fn(arg: Bytes) -> Outcome {
         adapt_compute(f, ca, cr, arg, n, s)
     }
-    insert_exported(mut r, take key, code.identity(f), take d, Compute(made))
+    insert(mut r, take key, code.identity(f), take d, Compute(made), Some(checked_argument(ca, n, s)))
 }
 
 pub fn granted[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(G, Caller, take A) -> Result[R, Capacity] waits], n: u64, s: u64) -> Result[(), RegisterError] {
@@ -907,7 +906,6 @@ pub fn granted[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: 
     let (take key, take d) = entry_described(r, code.identity(f), scoped fn() -> Result[(Bytes, Exported), RegisterError] {
         Ok(described(code.identity(f), code.revision(f), Granted, ca, cr) ?=> |_| Bounds)
     })?
-    register_check(mut r, key, ca, n, s)?
     let made = fn() -> GrantedLaunch[G] {
         GrantedLaunch(go: fn(tasks: Tasks, take g: JobGrant[G], take caller: Caller, take arg: Bytes, take notice: Option[JobReport]) -> Result[Task[Outcome], Capacity] {
             let j = Job(f: f, ca: ca, cr: cr, grant: take g, caller: take caller, arg: take arg, steps: s)
@@ -918,7 +916,7 @@ pub fn granted[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: 
             Ok(task.try_spawn(tasks, bytes n, take j, adapt_granted) ?=> |(cap, _)| cap)
         })
     }
-    insert_exported(mut r, take key, code.identity(f), take d, Granted(made))
+    insert(mut r, take key, code.identity(f), take d, Granted(made), Some(checked_argument(ca, n, s)))
 }
 
 fn current_description(db: store.Db) -> Result[Option[Bytes], store.Error] waits {
@@ -1070,7 +1068,7 @@ fn launch_with[G: send, H: shareable + inert + send](launch: LaunchEnv, place: S
 // A compute call in the caller's task, under the entry's n. A key that names no compute
 // entry is NoEntry.
 pub fn call[G: send, H: shareable + inert + send](r: Registry[G, H], key: Bytes, arg: Bytes) -> Outcome {
-    match map.get(r.slots, key) {
+    match registered_adapter(r, key) {
         Some(Compute(run)) => run(arg),
         _ => Refused(NoEntry),
     }
@@ -1079,7 +1077,7 @@ pub fn call[G: send, H: shareable + inert + send](r: Registry[G, H], key: Bytes,
 // A granted call: a task under the entry's `bytes n` holding g. A key that names no
 // granted entry is NoEntry; a task the place cannot grant is Budget.
 pub fn start[G: send, H: shareable + inert + send](r: Registry[G, H], tasks: Tasks, take g: G, take caller: Caller, key: Bytes, take arg: Bytes) -> Result[Task[Outcome], Refusal] {
-    match map.get(r.slots, key) {
+    match registered_adapter(r, key) {
         Some(Granted(launch)) => match (launch().go)(tasks, Direct(take g), take caller, take arg, None) {
             Ok(take t) => Ok(take t),
             Error(c) => Error(Budget(capacity_room(c))),
@@ -2173,7 +2171,7 @@ fn encode_entry_reply(mut tx: store.Tx, take result: Ran) -> Result[Bytes, Bytes
 type Effect = Served(Result[store.Served, store.ServeError]) | Unregistered(store.Pending)
 
 fn run_effect[G: send, H: shareable + inert + send](mut db: store.Db, identity: Bytes, locations: Registry[G, H], handles: H, mut q: Request, take complete: store.Completion) -> Result[Effect, store.Error] waits {
-    match map.get(locations.slots, q.key) {
+    match registered_adapter(locations, q.key) {
         Some(Transact(n, s, revision, _, go)) => {
             let key = replace(mut q.key, list.new())
             let rec = record_request(take key, q, revision, n, s, identity)?
@@ -2502,7 +2500,7 @@ type TriggerDraft = TriggerApplied(store.Ticket) | TriggerSettled(triggers.Termi
 
 fn invoke_trigger_transaction[G: send, H: shareable + inert + send](mut db: store.Db, r: Registry[G, H], h: H, drive: Box[TriggerDrive[G]], p: triggers.Pending, key: Option[Bytes]) -> Result[TriggerDraft, store.Error] waits {
     let wire_slot = match key {
-        Some(wanted) => map.get(r.slots, wanted),
+        Some(wanted) => registered_adapter(r, wanted),
         None => None
     }
     let terminal: triggers.Terminal = if let Some(Transact(_, _, _, _, go)) = wire_slot {
@@ -2579,7 +2577,7 @@ fn watch_granted[G: send, A, R](take watched: WatchedJob[G, A, R]) -> Outcome wa
 }
 
 fn launch_trigger[G: send, H: shareable + inert + send](r: Registry[G, H], mut drive: Box[TriggerDrive[G]], p: triggers.Pending, a: triggers.Attempt, key: Bytes) -> Result[(), Refusal] {
-    let Some(Granted(launch)) = map.get(r.slots, key) else {
+    let Some(Granted(launch)) = registered_adapter(r, key) else {
         return Error(NoEntry)
     }
     let go = launch().go
@@ -2838,7 +2836,7 @@ pub fn journal_attempt_gate[H: shareable + inert + send](take db: store.Db, take
 }
 
 pub fn apply_attempt[G: send, H: shareable + inert + send](mut db: store.Db, registered: Registry[G, H], h: H, trigger_tables: triggers.Tables, author: Caller, a: triggers.Attempt, key: Bytes, arg: Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits {
-    match map.get(registered.slots, key) {
+    match registered_adapter(registered, key) {
         Some(Transact(_, _, _, _, go)) => (go.attempt)(mut db, h, author, trigger_tables, a, arg),
         Some(Fenced(_, _, go)) => go(mut db, h, trigger_tables, a, arg),
         _ => store.run(mut db, None, (store.copy_env(trigger_tables), store.copy_env(a)), fn(mut tx, env) -> Result[Outcome, FencedRefusal] {

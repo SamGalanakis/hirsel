@@ -129,8 +129,9 @@ pub fn bind_keyed[G: send, H: shareable + inert + send](mut reg: Registry[G, H],
     check_claim_headers(claim) ?=> |take problem| keyed_registration_error(binding.op, take problem)
     let defaults = check_http_binding(reg, binding) ?=> |take problem| keyed_registration_error(binding.op, take problem)
     let index = find_binding_entry(reg.t.exported, binding.entry) ?=> |_| keyed_registration_error(binding.op, NoEntry)
-    let Some(Transact(n_e, s_e, _, _, _)) = map.get(reg.slots, binding.entry) else {
-        return Error(keyed_registration_error(binding.op, Mode))
+    let (n_e, s_e) = match registered_adapter(reg, binding.entry) {
+        Some(Transact(n, steps, _, _, _)) => (n, steps),
+        _ => return Error(keyed_registration_error(binding.op, Mode)),
     }
     let entry_args: Bytes = clone(reg.t.exported[index].described.args)
     let entry_result: Bytes = clone(reg.t.exported[index].described.result)

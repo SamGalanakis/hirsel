@@ -1,10 +1,5 @@
 # In-process code loading
 
-*Specified 2026-11-27 (lane packing-p1-loader-3253, from the ratified in-process packing
-proposal). Rules PACK-1 to PACK-10 are slice P1, the loader core. Rules from PACK-11 are
-slice P2 (lane packing-p2-hot-abi-3281), the hot call ABI. PACK-9 item 7 and PACK-14 through PACK-17
-specify the P2b language and runner cutover. Their typed adapter, cause owner, Held and runner bindings are not yet built.*
-
 A **pack host** is an OS process that runs many Places. It installs compiled Hirsel code
 while it runs, calls it, replaces it and unloads it. This chapter defines the artifact it
 installs (`.hirsel-mod`), the service that produces the artifact (`Compiler`), the memory
@@ -475,12 +470,11 @@ module's `abi` and policy; otherwise the load is refused `Unbound(instance)`.
      capability handle is the one that registration gave. A row the image lacks
      (the law and measurement rows) has no address, and a module that imports one is
      refused as `Import(row)`.
-7. **Causes (L2, specified).** On supported 64-bit targets the prepaid native cell
+7. **Causes.** On supported 64-bit targets the prepaid native cell
    starts with the public 32-byte Cause (message/kind carrier at 0, site word at 24),
    the next-cell pointer at 32 and one aligned 64-bit counted data-owner word at 40.
    Funding and reservation state follow at 48. The public value, iterator prefix and
-   MEM-24 logical 32-byte charge stay fixed. The changed native layout takes a new
-   PACK-2 ABI revision.
+   MEM-24 logical 32-byte charge stay fixed. The native layout is part of the PACK-2 ABI.
 
    The word is zero on reservation. Zero in a recorded cell means all referenced
    literal/source data has process lifetime or is owned by the moved message itself.
@@ -648,7 +642,7 @@ the caller's to cause, are:
 | `PageSize` | the first use of the task heap in the process | the host's page size is read once and does not depend on any argument |
 | `StepIds` | opening a step account | identities are taken in ranges of 64 from a 64-bit counter; passing it takes 2^58 range refills |
 | `CountOverflow` | a share of a counted value | each holder is a live value of at least one word, so 2^64 holders do not fit in memory |
-| `Stack` | a heap or region call that finds less than 16 KiB of stack left | user activations are refused at the allowance ([FAIL-17](failure.md)), and a 16 MiB task stack keeps at least 512 KiB of engine reserve below the largest frame the ceiling admits |
+| `Stack` | a heap or region call that finds less than 16 KiB of stack left | [FAIL-17](failure.md#fail-17-stack-exhaustion) defines the user activation allowance and the engine reserve below the largest frame the ceiling admits |
 | `HostMemory` | the task heap, a region refill, the glue list, `argon2id`, and mounting another task's stack at a checkpoint | the bytes were admitted by a limit ([MEM-21](budgets.md#mem-21-admission)); the host refuses them only when it was given less memory than the root limit promises |
 
 `HostMemory` is the one entry that depends on the host: on a host whose memory is
@@ -670,12 +664,8 @@ functions that raise a stop and that the row reaches in the built runtime.
 
 ## PACK-14: Loading and calling an entry
 
-PACK-14 through PACK-17 and the owner in PACK-9.7 specify P2b. The language bindings,
-typed adapter and runner cutover are unbuilt. The Rust loader already implements the
-counted image, versioned slot and worker cache (PACK-6). The compiled-module driver
-currently calls a program entry with a fixed signature. The loader check is
-`activate_swaps_at_the_expected_version_within_the_retired_budget` in
-`crates/hirsel-code/src/tests.rs`. The compiled caller and adapter are separate gates below.
+The Rust loader implements the counted image, versioned slot and worker cache (PACK-6).
+Native typed calls and dispatch use the entry adapter defined in PACK-15.
 
 **Binding.** `code.load[F](loader, key, identity)` returns `Result[Code[F], LoadError]`.
 `loader` is a host-issued capability for one pool and import policy. Key and entry
@@ -721,8 +711,7 @@ PROG-9 bytes and optional revision as the named instance, with views anchored in
 A PROG-9 `StaticFn` remains the plain descriptor for statically bound code. Its
 identity equality and its role in codec derivation stay as specified. It cannot
 denote an entry looked up by key, nor can an unloadable descriptor or bare callable
-escape its image's lifetime, including inside another value. Runner registration and
-execution use `Code` for both linked and loaded entries. They have one dispatch path.
+escape its image's lifetime, including inside another value.
 
 **Selecting a generation.** `code.slot[F](loader)` creates an empty version-0 slot.
 `code.activate(slot, expected, c)` requires write authority to that slot and a handle
@@ -899,6 +888,9 @@ Exclude only the shared image paid once. The target is at most 512 B per Place a
 design is part of that total. G8a/b cover parked Units separately.
 
 ## Gates
+
+The [slot activation law](../../crates/hirsel-code/src/tests.rs) checks
+`activate_swaps_at_the_expected_version_within_the_retired_budget`.
 
 | gate | target |
 |---|---|

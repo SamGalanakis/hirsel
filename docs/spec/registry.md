@@ -97,11 +97,12 @@ outside publisher state.
 The host explicitly grants a `Compiler` value. Its waiting operation
 `check_library(compiler, request) -> Result<CheckedLibrary, Refusal>` runs one isolated,
 target-independent check. Calling it reaches the `Compiler` authority kind. It conveys no
-general process launch, path lookup, network access or native module admission. Reuse the
-[PACK-3 supervisor](packing.md#pack-3-the-compiler-service), seat/queue, bounded diagnostics
-and process-group deadline. Its module build request and 16 MiB host input default remain
-separate. The following is a typed value schema; `bytes` are length-delimited bytes passed by
-value or read-only handle with a checked length, never a caller-supplied host path.
+general process launch, path lookup, network access or native module admission. Registry
+admission uses the [PACK-3 supervisor](packing.md#pack-3-the-compiler-service) for seats,
+queueing, bounded diagnostics and the process-group deadline. Registry admission requires
+OS aggregate caps. Darwin currently returns `Unavailable` before spawn. The
+following is a typed value schema. Pass length-delimited bytes by value or by
+read-only handle with a checked length.
 
 ```text
 CheckLibrary = { root: digest, content: bytes,
@@ -214,11 +215,12 @@ Neither reinstatement nor withdrawal erases history.
 At each prefix serve `checkpoint`, `tile/<level>/<index>[.p/<width>]` and
 `tile/entries/<index>[.p/<width>]`. Use the C2SP base-1000 three-digit grouping with an
 `x` on each nonfinal group, 256 hashes per full tile, partial widths 1–255 and levels spaced
-eight binary heights apart. A full entry bundle has 256 framed rows. Serve bytes with C2SP
-content types and no redirects. Keep both logs available from index zero. A full tile may
-supply the prefix of a historical partial. Immutable tiles and bundles can be cached
-indefinitely; checkpoints revalidate within seconds. [Tiles](https://c2sp.org/tlog-tiles) ·
-[Checkpoints](https://c2sp.org/tlog-checkpoint) · [Witness protocol](https://c2sp.org/tlog-witness)
+eight binary heights apart. A full entry bundle has 256 framed rows. Use C2SP content
+types and serve these resources without redirects. A full tile can supply the prefix
+of a historical partial. The operator sets checkpoint revalidation and history
+availability policy. Verified use requires the complete status suffix described below.
+[Tiles](https://c2sp.org/tlog-tiles) · [Checkpoints](https://c2sp.org/tlog-checkpoint) ·
+[Witness protocol](https://c2sp.org/tlog-witness)
 
 **Acceptance.** Verify the log signature, origin and two pinned independent external witness
 operators over the *same* checkpoint text in **each** log. Both signed timestamps must be in
@@ -230,8 +232,8 @@ single-operator signed-log wipeable preview (quorum 0). The public origin can se
 preview. Selection and audit output labels it as unwitnessed. Preview still checks log
 signatures, consistency, inclusion and status replay. Never auto-downgrade on an outage or
 count two keys of one operator as independent. Public witnessed selection starts only with
-two independent operators. A witnessed checkpoint bounds freshness to 24 hours; it cannot
-prove that a registry has received or appended an unlogged complaint.
+two independent operators. The verifier accepts a witnessed checkpoint only within the stated timestamp window.
+That predicate concerns the signed prefix.
 
 For each origin keep the last verified checkpoint. A smaller head, a different root at the
 same size, or failure to prove RFC 6962 consistency to a larger head refuses. Keep both signed

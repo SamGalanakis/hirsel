@@ -1,16 +1,8 @@
 # Fleet
 
-*Specified 2026-11-26 (converged Hirsel Fleet blueprint, DECISIONS.md). Rules FLT-1 to FLT-8,
-kernel rules K1 to K13, directory rules D1 to D6, and verification tiers T0 to T3.
-Phase 1 builds the move-authorization kernel, independent register model, simulation laws
-and formal proofs. Phase 3a adds the dedicated `Directory[K]` Place library and
-`hirsel fleet sim` at 50 and 1,000 simulated hosts. The [launcher](launch.md#the-launcher)
-carries opaque move envelopes and the release embeds `platform_main`. Store implements
-`ClaimAuth` and `ORIGIN`, and Runner implements `Deposed` (`0ed2f789`,
-[claim laws](../../core/programs/store/bucket_claim_auth_laws.hirsel)). Phase 3b Split 1
-landed authenticated `join`, a monotonic `roster` and real SPKI-pinned `quic@1` links
-(`631e196b`, [three-host QUIC law](../../core/programs/fleet/cluster_laws.hirsel)).
-Further real-cluster orchestration verbs and platform move integration remain planned.*
+The [move protocol](#flt-2-move-protocol-claimauth-origin-superseded-settlement-deposed)
+defines `ClaimAuth`, `ORIGIN` and `Deposed`. See [directory Places](#flt-5-dedicated-directoryk-places-archetype-b)
+and [membership and peer links](#membership-and-peer-links) for the built library and cluster mechanisms.
 
 Hirsel Fleet runs multi-machine workloads with the existing `hirsel` launcher and `platform`
 host packaged as one single-binary distribution, with no Kubernetes, no second host daemon,
@@ -26,7 +18,7 @@ authority:
 
 | Archetype | Workloads | Safety fence | Clock in safety? | Failover / move |
 |---|---|---|---|---|
-| **A · Durable `Place`** | Databases, sharded KV (`cluster@1`), durable workflows, `fleet@1`, `Directory[K]` | `objects@1` head CAS (`ClaimAuth` + `ORIGIN` witness) plus the workload's own in-Place fence | **Never** (`STORE-SPEC`) | Whole-Place move via conditioned claim (planned: warm follower; crash: direct claim) |
+| **A · Durable `Place`** | Databases, sharded KV (`cluster@1`), durable workflows, `fleet@1`, `Directory[K]` | `objects@1` head CAS (`ClaimAuth` + `ORIGIN` witness) plus the workload's own in-Place fence | **Never** (`STORE-SPEC`) | Whole-Place move via conditioned claim |
 | **B · Ephemeral Stateful Unit** | `sfu_cascade` media rooms, volatile S3-FIFO caches (`cache@1`), pub/sub relays | Dedicated `Directory[K]` Place(s): term CAS + drift-bounded lease `W = ceil(L_max * (1 + d) / (1 - d))` | **Yes** — suspend-inclusive elapsed clock (`CLOCK_BOOTTIME` / `mach_continuous_time`) | State reset by contract; new term waits `W` after directory takeover |
 | **C · Elastic Remote `Compute`** | Ray/FLAME-style tasks, shuffles, batch and AI jobs, scheduled by the reusable core scheduler (`compute@1`, [compute.md](compute.md)) | Worker-only admission; three retry classes: `pure` ([SEM-8](semantics.md#sem-8-determinism)), `keyed` (receiver-checked idempotency), and `effectful` (inert create, pinned activation, never re-dispatched) | **Never** | Dispatch `(release_id, entry_name, codec_args, bounds)` directly to an admitting worker via [compute.md](compute.md) (never placed by `fleet@1`; never ship functions, [PROG-9](programs.md#prog-9-code-descriptors)) |
 
@@ -316,92 +308,20 @@ stall detection.
 
 ## FLT-6: Code trust, revocation clearance, transport and bucket boundaries
 
-- **Operator-only attestation and canonical approval transcript (`v1`).** An offline root key
-  pinned at join signs rotating deploy keysets (with monotone epoch and durable node
-  anti-rollback marks). Operators sign deploy approvals covering `(fleet, group, generation,
-  release, predecessor, recipe_root, assembly_target, grant_diff, held_fates)` serialized as the
-  canonical `DeployApprovalTranscriptV1` transcript below, bound to the signing keyset entry's
-  algorithm (`ed25519` or `p256`) and key identifier:
-
-  ```hirsel unbuilt
-  pub type DeploySigAlg: codec + key + send = AlgEd25519 | AlgP256
-
-  pub type DeployApprovalTranscriptV1: codec + key + send {
-      domain_label: Bytes,
-      version: u8,
-      alg: DeploySigAlg,
-      keyset_epoch: u64,
-      key_id: Bytes,
-      fleet: Bytes,
-      group: Bytes,
-      generation: u64,
-      release: Bytes,
-      predecessor: Option[Bytes],
-      recipe_root: Inline[u8, 32],
-      assembly_target: Bytes,
-      grant_diff: Bytes,
-      held_fates: Bytes
-  }
-  ```
-
-  Canonical wire bytes for signing and verification (little-endian, exact byte concatenation in
-  field order, no padding, no trailing bytes):
-
-  - `domain_label`: `u32` LE byte length (`31`) followed by exact ASCII bytes
-    `"hirsel.fleet.deploy-approval.v1"`.
-  - `version`: `u8` equal to `1`.
-  - `alg`: `u8` wire tag (`1 = AlgEd25519`, `2 = AlgP256`; `0` and `>= 3` reserved/rejected);
-    must equal the referenced keyset entry's declared algorithm.
-  - `keyset_epoch`: `u64` LE (8 bytes).
-  - `key_id`, `fleet`, `group`, `release`, `assembly_target`, `grant_diff`, `held_fates`: each
-    encoded as a `u32` LE byte length followed by raw bytes; `grant_diff` and `held_fates` carry
-    their canonical `std.codec` encodings ([SEM-10](semantics.md#sem-10-codecs)), with any
-    map/set entries serialized in canonical sorted key order.
-  - `generation`: `u64` LE (8 bytes).
-  - `predecessor`: `u8` tag `0` for `None`, or `1` followed by `u32` LE byte length and raw
-    bytes for `Some`.
-  - `recipe_root`: 32 raw digest bytes (fixed width, no length prefix).
-
-  Verifiers reject any unknown `version`, unknown or mismatched `alg` tag, wrong `domain_label`,
-  non-canonical compound encoding, or trailing bytes. Signers and verifiers must agree
-  byte-for-byte against a shared golden transcript vector. Ed25519 verification follows
-  [core.md](core.md#signature-verification)'s cofactorless RFC 8032 acceptance rule (`S < L`,
-  `[S]B − [k]A = R` compared against `R`'s canonical 32-byte encoding with raw `R` and `key` in
-  `k`, rejecting cofactored-only and non-canonical-`R` signatures while accepting non-canonical
-  `key` encodings and small- or mixed-order keys whenever the cofactorless equation holds).
-  Hosts fetch missing objects by digest from the bucket and feed the launcher's existing
-  `Admit -> Need -> AdmitData -> AdmitEnd` exchange (RUNNER-SPEC §14.12.4: `objects/<kind>/<hash hex>` under the
-  code prefix; the launcher hashes every object it receives).
-- **Revocation-ordered clearance and anti-rollback mark bootstrap.** Before starting any preview,
-  prepare or serving child of a new assembly, a host executes `fleet.clear(...)` in one `fleet@1`
-  `transact` ordered with `fleet.install_keyset(...)`. The clearance response is authenticated
-  and bound to this host's enrolled `NodeId`, current enrollment/incarnation, and the
-  `fleet.clear(...)` transaction nonce/version. The host verifies the returned keyset against the
-  pinned root, **rejects any clearance whose keyset epoch is lower than its existing durable
-  anti-rollback floor (or provisional join floor)**, durably persists the raised floor
-  `max(existing_floor, keyset_epoch)` **before** accepting or activating any approval, and
-  re-verifies the approval signer, `key_id`, and `alg` binding against that keyset.
-  - **Fresh or disk-lost host bootstrap:** a host with **no durable anti-rollback mark** refuses
-    all deploy approvals until it completes a fresh, authenticated, ordered `fleet.clear(...)`
-    transaction against `fleet@1` (or an operator-authorized fresh re-enrollment carrying a
-    current root-signed keyset) and durably persists that authoritative keyset epoch. An older
-    saved join record supplies at most a **provisional lower bound** and never satisfies
-    disk-loss bootstrap or authorizes approval acceptance on its own, preventing a wiped host
-    from restoring an obsolete join epoch. An isolated host emits an honest
-    `"staged, not cleared, nothing started"` receipt.
 - **Transport.** Pinned [QUIC](quic.md) (`quic@1`) using SPKI netmap pins directly (no fleet
   CA). Every peer-authenticated request verifies the connection's authenticated pin via
   `quic.peer_pin` and binds it to the claimed peer **node identity** (`NodeId`) against the
   current enrolled roster/netmap pin set — never accepting an unverified peer-declared `NodeId`
   from application framing — with bounded live-session lifetime so revocations take effect on
   active connections.
+- **Release objects.** Hosts fetch missing objects by digest from the bucket and pass
+  them through the launcher's `Admit`, `Need`, `AdmitData`, `AdmitEnd` exchange
+  (RUNNER-SPEC §14.12.4). The launcher hashes each object it receives.
 - **Bucket credential boundaries (L1 minimum):** (1) bucket versioning / object lock preventing
   permanent deletion or version purge; (2) only pinned controller candidates hold write access
-  to `fleet@1`'s prefix; (3) only the operator/publisher writes the code prefix. L2/L3 adds
-  per-host revocable STS/IAM principals and per-security-domain streams when mutually
-  distrustful tenants share a bucket.
+  to `fleet@1`'s prefix; (3) only the operator/publisher writes the code prefix.
 
-### Phase 3b membership and peer links
+### Membership and peer links
 
 The `fleet@1/roster` library stores operator invitations, joins, drain intent and revocations
 in the control Place's `fleet.roster` cell. An invitation assigns a NodeId, an IPv4 or IPv6
@@ -436,7 +356,7 @@ Every Fleet, Store and Cluster protocol core follows one deterministic kernel sh
 deterministic simulation, `std.model.conforms`, TLA+/TLC, Quint MBT and Veil/Lean proofs share
 one canonical transition surface with zero compiler extensions:
 
-```hirsel unbuilt
+```text
 pub type KernelOutput {
     state: State,
     actions: List[Action],

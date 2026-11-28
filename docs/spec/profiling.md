@@ -212,8 +212,6 @@ the peak after inline debits without emitting `observe_charge`. Attribution
 of those debits is at refill or scope granularity. An elided bound shares
 the Capacity raise with other operations. Such raises can appear as
 `capacity_unattributed`, with a raise stack and null parent and limit.
-Exact source-scope coverage requires the separate `--mem=exact-logical`
-observation mode, which is reserved for future work.
 
 Budget rows retain all observed refusals and the 20 highest near-misses
 at or above 80% of their limit. An unopened or still-open scope has a null

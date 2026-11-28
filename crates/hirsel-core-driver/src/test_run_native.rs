@@ -1315,7 +1315,7 @@ fn run_materializes_only_in_the_cache_by_default() {
         PackageLaw::pass(law.run(&["run", "app"]));
         let names = |entries: &[&str]| entries.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
         assert_eq!(listing("."), names(&["app", "cache", "compiler-store", "fixtures", "packages"]));
-        assert_eq!(listing("app"), names(&["hirsel.lock", "hirsel.hcfg", "main.hirsel"]));
+        assert_eq!(listing("app"), names(&["hirsel.hcfg", "hirsel.lock", "main.hirsel"]));
     }
     PackageLaw::pass(law.run(&["run", "app", "-o", "custom-program"]));
     assert!(law.path("custom-program").is_file());

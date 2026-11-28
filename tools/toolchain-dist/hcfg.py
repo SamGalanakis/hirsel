@@ -17,7 +17,7 @@ def host_exporter():
     sys.path.insert(0, str(root / 'tools/buck2'))
     import rust_environment
     env = rust_environment.environment(root)
-    command = [env['CARGO'], 'build', '--offline', '--locked', '--manifest-path',
+    command = [env['CARGO'], 'build', '--quiet', '--offline', '--locked', '--manifest-path',
                str(root / 'crates/hirsel-config-export/Cargo.toml'), '--bin', 'hirsel-config-export',
                '--message-format=json-render-diagnostics']
     built = subprocess.check_output(command, cwd=root, env=env, text=True)
